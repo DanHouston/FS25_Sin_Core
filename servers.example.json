@@ -1,0 +1,16 @@
+{
+  "oak-ridge": {
+    "save_id": "oak-ridge-save-001",
+    "farms_xml": "C:/FS25/snapshots/oak-ridge/farms.xml",
+    "admin_farm_id": 1,
+    "identity_bridge_enabled": false,
+    "withdrawals_enabled": false
+  },
+  "river-valley": {
+    "save_id": "river-valley-save-001",
+    "farms_xml": "C:/FS25/snapshots/river-valley/farms.xml",
+    "admin_farm_id": 1,
+    "identity_bridge_enabled": false,
+    "withdrawals_enabled": false
+  }
+}

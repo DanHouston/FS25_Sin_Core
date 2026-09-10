@@ -1,0 +1,9 @@
+{
+  "local-dev": {
+    "save_id": "local-dev-save-001",
+    "development": true,
+    "snapshot_transport": "local-file",
+    "savegame_index": 1,
+    "withdrawals_enabled": false
+  }
+}

@@ -1,0 +1,7 @@
+__pycache__/
+.venv/
+.env
+atlas-credentials.env
+.test-deps/
+dist/
+local-test/
