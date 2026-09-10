@@ -41,15 +41,11 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(command=name), self.assertRaisesRegex(ValueError, "Network Admin"):
                 await self.bot.tree.get_command(name).callback(interaction, *arguments)
 
-    async def test_farm_approve_rejects_bot_member(self):
-        interaction = MagicMock()
-        interaction.guild_id = 1
-        interaction.user.roles = [MagicMock(id=42)]
-        member = MagicMock()
-        member.bot = True
-        with self.assertRaisesRegex(ValueError, "bot accounts"):
-            await self.bot.tree.get_command("farm_approve").callback(
-                interaction, "local-dev", member, "1", "player", True)
+    async def test_farm_approve_member_is_a_requester_picker(self):
+        command = self.bot.tree.get_command("farm_approve")
+        option = next(item for item in command.to_dict(self.bot.tree)["options"] if item["name"] == "member")
+        self.assertEqual(option["type"], 3)  # Discord string option with autocomplete, not guild-member picker.
+        self.assertTrue(option["autocomplete"])
 
     async def test_player_picker_label_identifies_nickname_and_stable_id(self):
         self.assertEqual(player_choice_label("steam-123", "Repton"),
