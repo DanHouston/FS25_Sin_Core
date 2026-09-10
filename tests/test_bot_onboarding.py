@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from discord import app_commands
 
-from fs25_network_core.bot_frontend import NetworkBot
+from fs25_network_core.bot_frontend import NetworkBot, player_choice_label
 from fs25_network_core.channel_policy import COMMAND_CHANNELS
 
 
@@ -40,3 +40,17 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         for name, arguments in commands:
             with self.subTest(command=name), self.assertRaisesRegex(ValueError, "Network Admin"):
                 await self.bot.tree.get_command(name).callback(interaction, *arguments)
+
+    async def test_farm_approve_rejects_bot_member(self):
+        interaction = MagicMock()
+        interaction.guild_id = 1
+        interaction.user.roles = [MagicMock(id=42)]
+        member = MagicMock()
+        member.bot = True
+        with self.assertRaisesRegex(ValueError, "bot accounts"):
+            await self.bot.tree.get_command("farm_approve").callback(
+                interaction, "local-dev", member, "1", "player", True)
+
+    async def test_player_picker_label_identifies_nickname_and_stable_id(self):
+        self.assertEqual(player_choice_label("steam-123", "Repton"),
+                         "Nickname: Repton | FS25 player ID: steam-123")

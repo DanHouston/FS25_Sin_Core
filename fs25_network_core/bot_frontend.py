@@ -19,6 +19,10 @@ class DiscordSetupError(RuntimeError):
     """An actionable installation error safe to display without credentials."""
 
 
+def player_choice_label(player_id, nickname):
+    return f"Nickname: {nickname or 'Unnamed player'} | FS25 player ID: {player_id}"
+
+
 class NetworkBot(discord.Client):
     def __init__(self, bank, servers, guild_id, operator_role_ids=(), channels=None, authorizations=None):
         intents = discord.Intents.none()
@@ -68,7 +72,7 @@ class NetworkBot(discord.Client):
                 return []
             choices = []
             for player_id, name in snapshot["players"].items():
-                label = f"{name or 'Unnamed player'} ? {player_id}"
+                label = player_choice_label(player_id, name)
                 if current.lower() in label.lower():
                     choices.append(app_commands.Choice(name=label[:100], value=player_id))
             return choices[:25]
@@ -134,6 +138,8 @@ class NetworkBot(discord.Client):
         async def farm_approve(interaction: discord.Interaction, server: str, member: discord.Member,
                                farm_id: str, player_id: str, identity_and_land_confirmed: bool):
             staff_check(interaction)
+            if getattr(member, "bot", False):
+                raise ValueError("Select the player/requester; bot accounts cannot receive farm assignments")
             config = server_config(interaction, server)
             await interaction.response.defer(ephemeral=True)
             snapshot = await asyncio.to_thread(ServerScraper(self.servers).snapshot, server)

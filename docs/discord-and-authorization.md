@@ -54,8 +54,8 @@ See [Discord application commands](https://docs.discord.com/developers/interacti
    Discord interaction; players cannot submit another Discord identity, a game
    identity, or a granted role. A request grants no permissions.
 4. Staff opens #farm-approvals and runs `/farm_requests server:local-dev`.
-   It lists the first 15 pending requests, including requester ID, farm name,
-   starting field, and request ID. Requests persist in MongoDB.
+   It lists the first 15 pending requests, including requester, farm name, and
+   starting field. Requests persist in MongoDB.
 5. Staff reviews the field choice, creates the named farm, and assigns the
    starting land in game. For the existing disposable save, inspect farm 1 and
    its land instead of creating an unnecessary second farm.
@@ -63,15 +63,18 @@ See [Discord application commands](https://docs.discord.com/developers/interacti
    actual farm IDs and stable game player IDs from the mod. Confirm which game
    player corresponds to the Discord requester; a matching display name alone
    is not proof. Coordinate directly with the player if necessary.
-7. Staff runs `/farm_approve server:local-dev request_id:<request> farm_id:1
-   player_id:<observed ID> identity_and_land_confirmed:true` only after that
-   verification. The selected player must exist in the fresh roster, the farm
-   must be named, and its name must match the request.
+7. Staff runs `/farm_approve server:local-dev`, then selects the requesting
+   Discord member, the named farm, and the observed player from the command's
+   pickers. Player choices display `Nickname: <nickname> | FS25 player ID:
+   <stable ID>`. Select the requester, never the bot account. Confirm
+   `identity_and_land_confirmed:true` only after verification. The selected
+   player must exist in the fresh roster, the farm must be named, and its name
+   must match the request.
 8. `/farm_status server:local-dev` shows the approved association and pending
    permission state. **Approval does not yet change game permissions.** The
    delivery/acknowledgment adapter is the next implementation milestone.
 
-To decline a request, staff uses `/farm_reject server request_id reason`. The
+To decline a request, staff uses `/farm_reject server member reason`. The
 requester can read its state and rejection reason using /farm_status.
 Repeated requests preserve the original record; editing/resubmitting after
 rejection needs a future explicit workflow. Staff role changes after association
