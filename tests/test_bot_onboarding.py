@@ -1,6 +1,6 @@
 import os
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from discord import app_commands
 
@@ -46,6 +46,18 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         option = next(item for item in command.to_dict(self.bot.tree)["options"] if item["name"] == "member")
         self.assertEqual(option["type"], 3)  # Discord string option with autocomplete, not guild-member picker.
         self.assertTrue(option["autocomplete"])
+
+    async def test_requester_picker_searches_display_name(self):
+        authorization = MagicMock()
+        authorization.requests.return_value = [{"discord_id": "123", "farm_name": "My farm"}]
+        self.bot.authorizations["local-dev"] = authorization
+        interaction = MagicMock()
+        interaction.namespace.server = "local-dev"
+        interaction.guild.fetch_member = AsyncMock(return_value=MagicMock(display_name="Repton", bot=False))
+        command = self.bot.tree.get_command("farm_approve")
+        choices = await command._params["member"].autocomplete(interaction, "rept")
+        self.assertEqual([(choice.name, choice.value) for choice in choices],
+                         [("Requester: Repton | Farm: My farm", "123")])
 
     async def test_player_picker_label_identifies_nickname_and_stable_id(self):
         self.assertEqual(player_choice_label("steam-123", "Repton"),

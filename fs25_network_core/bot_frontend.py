@@ -104,7 +104,14 @@ class NetworkBot(discord.Client):
                 return []
             choices = []
             for record in records:
-                label = f"Requester ID: {record['discord_id']} | Farm: {record['farm_name']}"
+                display_name = record["discord_id"]
+                try:
+                    member = await interaction.guild.fetch_member(int(record["discord_id"]))
+                    if not member.bot:
+                        display_name = member.display_name
+                except (AttributeError, TypeError, ValueError, discord.HTTPException):
+                    pass
+                label = f"Requester: {display_name} | Farm: {record['farm_name']}"
                 if current.lower() in label.lower():
                     choices.append(app_commands.Choice(name=label[:100], value=record["discord_id"]))
             return choices[:25]
