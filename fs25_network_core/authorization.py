@@ -45,6 +45,17 @@ class AuthorizationManager:
     def requests(self, server_id, save_id):
         return list(self.db.farm_requests.find(dict(server_id=server_id, save_id=save_id, state="requested")).sort("created_at", 1).limit(15))
 
+    def pending_request_for_user(self, discord_id, server_id, save_id):
+        request = self.db.farm_requests.find_one(dict(
+            _id=key(server_id, save_id, str(discord_id)),
+            server_id=server_id,
+            save_id=save_id,
+            state="requested",
+        ))
+        if not request:
+            raise ValueError("That member has no pending farm request for this server")
+        return request
+
     def approve_request(self, request_id, server_id, save_id, farm_id, player_id, snapshot, approved_by, confirmed):
         """Trusted staff boundary: snapshot comes from configured server transport, not Discord input.
 

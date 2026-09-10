@@ -58,6 +58,38 @@ class NetworkBot(discord.Client):
             require_operator(interaction.guild_id, self.guild.id,
                              [item.id for item in getattr(interaction.user, "roles", [])], self.operator_role_ids)
 
+        async def observed_players(interaction: discord.Interaction, current: str):
+            server = getattr(interaction.namespace, "server", None)
+            if not server or server not in self.servers:
+                return []
+            try:
+                snapshot = await asyncio.to_thread(ServerScraper(self.servers).snapshot, server)
+            except ValueError:
+                return []
+            choices = []
+            for player_id, name in snapshot["players"].items():
+                label = f"{name or 'Unnamed player'} ? {player_id}"
+                if current.lower() in label.lower():
+                    choices.append(app_commands.Choice(name=label[:100], value=player_id))
+            return choices[:25]
+
+        async def observed_farms(interaction: discord.Interaction, current: str):
+            server = getattr(interaction.namespace, "server", None)
+            if not server or server not in self.servers:
+                return []
+            try:
+                snapshot = await asyncio.to_thread(ServerScraper(self.servers).snapshot, server)
+            except ValueError:
+                return []
+            choices = []
+            for farm_id, name in snapshot["farms"].items():
+                if not name.strip():
+                    continue
+                label = f"Farm {farm_id} ? {name}"
+                if current.lower() in label.lower():
+                    choices.append(app_commands.Choice(name=label[:100], value=str(farm_id)))
+            return choices[:25]
+
         @self.tree.command(name="farm_request", description="Request a farm and starting field for staff review")
         @app_commands.check(channel_check)
         async def farm_request(interaction: discord.Interaction, server: str, farm_name: str, starting_field: str):
@@ -65,7 +97,10 @@ class NetworkBot(discord.Client):
             await interaction.response.defer(ephemeral=True)
             record = await asyncio.to_thread(auth_for(server).request_farm, str(interaction.user.id), server,
                                             config["save_id"], farm_name, starting_field)
-            await interaction.followup.send(f"Farm request `{record['_id']}`: {record['state']}. Staff will review the recorded farm and field. Repeated submissions keep the original request.", ephemeral=True)
+            await interaction.followup.send(
+                f"Your request for **{record['farm_name']}** at **{record['starting_field']}** is pending staff review. "
+                "Staff will create the farm and confirm your in-game identity. Repeated submissions keep this request.",
+                ephemeral=True)
 
         @self.tree.command(name="farm_requests", description="Staff: list pending farm requests")
         @app_commands.check(channel_check)
@@ -75,7 +110,8 @@ class NetworkBot(discord.Client):
             config = server_config(interaction, server)
             await interaction.response.defer(ephemeral=True)
             records = await asyncio.to_thread(auth_for(server).requests, server, config["save_id"])
-            rows = [f"{r['_id']} | Discord {r['discord_id']} | {r['farm_name']} | field: {r['starting_field']}" for r in records]
+            rows = [f"<@{r['discord_id']}> requested **{r['farm_name']}**; starting field: **{r['starting_field']}**. "
+                    "Use `/farm_approve` and select this member." for r in records]
             for row in rows or ["No pending requests."]:
                 await interaction.followup.send(row, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
@@ -95,25 +131,42 @@ class NetworkBot(discord.Client):
         @self.tree.command(name="farm_approve", description="Staff: associate a request with an observed player and created farm")
         @app_commands.check(channel_check)
         @app_commands.default_permissions(administrator=True)
-        async def farm_approve(interaction: discord.Interaction, server: str, request_id: str,
-                               farm_id: app_commands.Range[int, 1], player_id: str, identity_and_land_confirmed: bool):
+        async def farm_approve(interaction: discord.Interaction, server: str, member: discord.Member,
+                               farm_id: str, player_id: str, identity_and_land_confirmed: bool):
             staff_check(interaction)
             config = server_config(interaction, server)
             await interaction.response.defer(ephemeral=True)
             snapshot = await asyncio.to_thread(ServerScraper(self.servers).snapshot, server)
-            operation = await asyncio.to_thread(auth_for(server).approve_request, request_id, server, config["save_id"],
-                farm_id, player_id, snapshot, str(interaction.user.id), identity_and_land_confirmed)
-            await interaction.followup.send(f"Association approved. Permission operation `{operation}` is pending; game permissions have not yet been confirmed.", ephemeral=True)
+            request = await asyncio.to_thread(auth_for(server).pending_request_for_user, str(member.id), server, config["save_id"])
+            try:
+                selected_farm_id = int(farm_id)
+            except ValueError:
+                raise ValueError("Choose a farm from the suggestions") from None
+            operation = await asyncio.to_thread(auth_for(server).approve_request, request["_id"], server, config["save_id"],
+                selected_farm_id, player_id, snapshot, str(interaction.user.id), identity_and_land_confirmed)
+            await interaction.followup.send(
+                f"Approved **{member.display_name}** for **{request['farm_name']}**. "
+                f"Permission sync is pending (operation `{operation}`). The game has not applied permissions yet.",
+                ephemeral=True)
+
+        @farm_approve.autocomplete("farm_id")
+        async def farm_approve_farm_autocomplete(interaction: discord.Interaction, current: str):
+            return await observed_farms(interaction, current)
+
+        @farm_approve.autocomplete("player_id")
+        async def farm_approve_player_autocomplete(interaction: discord.Interaction, current: str):
+            return await observed_players(interaction, current)
 
         @self.tree.command(name="farm_reject", description="Staff: reject a pending farm request with a reason")
         @app_commands.check(channel_check)
         @app_commands.default_permissions(administrator=True)
-        async def farm_reject(interaction: discord.Interaction, server: str, request_id: str, reason: str):
+        async def farm_reject(interaction: discord.Interaction, server: str, member: discord.Member, reason: str):
             staff_check(interaction)
             config = server_config(interaction, server)
             await interaction.response.defer(ephemeral=True)
-            await asyncio.to_thread(auth_for(server).reject_request, request_id, server, config["save_id"], str(interaction.user.id), reason)
-            await interaction.followup.send("Farm request rejected.", ephemeral=True)
+            request = await asyncio.to_thread(auth_for(server).pending_request_for_user, str(member.id), server, config["save_id"])
+            await asyncio.to_thread(auth_for(server).reject_request, request["_id"], server, config["save_id"], str(interaction.user.id), reason)
+            await interaction.followup.send(f"Farm request for **{member.display_name}** rejected.", ephemeral=True)
 
         @self.tree.command(name="farm_status", description="View your farm assignment and permission sync state")
         @app_commands.check(channel_check)
