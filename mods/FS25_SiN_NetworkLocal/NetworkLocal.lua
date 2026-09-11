@@ -13,6 +13,7 @@ function FS25SiNNetworkLocal:loadMap()
     self.receiptDirectory = self.directory .. "permission-receipts/"
     createFolder(self.commandDirectory)
     createFolder(self.receiptDirectory)
+    self.systemFarmDiagnosticLogged = false
     Logging.info("[SiN (SimNet) Network Local] Loaded; telemetry directory: %s", self.directory)
 end
 
@@ -25,6 +26,11 @@ function FS25SiNNetworkLocal:update(dt)
         return
     end
     self.elapsed = 0
+    if not self.systemFarmDiagnosticLogged and g_farmManager ~= nil then
+        local systemFarm = g_farmManager:getFarmById(2)
+        Logging.info("[SiN (SimNet) Network Local] System farm diagnostic farm=2 exists=%s hasDemoteUser=%s hasSetUserPermission=%s", tostring(systemFarm ~= nil), tostring(systemFarm ~= nil and systemFarm.demoteUser ~= nil), tostring(systemFarm ~= nil and systemFarm.setUserPermission ~= nil))
+        self.systemFarmDiagnosticLogged = true
+    end
     local ok, errorMessage = pcall(self.exportSnapshot, self)
     if not ok then
         self.failed = true
