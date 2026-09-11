@@ -99,6 +99,19 @@ function FS25SiNNetworkLocal:processPermissionCommands()
 end
 
 function FS25SiNNetworkLocal:restoreApprovedManagers()
+    -- Farm 2 is the local-dev SiN JiN services farm. Joining it must never
+    -- confer manager status; FS25's demotion restores its normal non-manager
+    -- farm access without touching the player's home-farm authority.
+    local servicesFarm = g_farmManager:getFarmById(2)
+    if servicesFarm ~= nil then
+        for _, user in ipairs(g_currentMission.userManager:getUsers()) do
+            local userId = user:getId()
+            if g_farmManager:getFarmByUserId(userId) == servicesFarm and servicesFarm:isUserFarmManager(userId) then
+                servicesFarm:demoteUser(userId)
+                Logging.info("[SiN (SimNet) Network Local] Demoted player from SiN JiN services-farm manager")
+            end
+        end
+    end
     local path = self.directory .. "manager-authority.xml"
     if not fileExists(path) then return end
     local authority = XMLFile.load("networkLocalAuthority", path)
