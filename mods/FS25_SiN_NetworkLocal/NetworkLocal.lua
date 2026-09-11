@@ -9,6 +9,10 @@ function FS25SiNNetworkLocal:loadMap()
     self.directory = getUserProfileAppPath() .. "modSettings/FS25SiNNetworkLocal/"
     createFolder(getUserProfileAppPath() .. "modSettings/")
     createFolder(self.directory)
+    self.commandDirectory = self.directory .. "permission-commands/"
+    self.receiptDirectory = self.directory .. "permission-receipts/"
+    createFolder(self.commandDirectory)
+    createFolder(self.receiptDirectory)
     Logging.info("[SiN (SimNet) Network Local] Loaded; telemetry directory: %s", self.directory)
 end
 
@@ -26,6 +30,38 @@ function FS25SiNNetworkLocal:update(dt)
         self.failed = true
         Logging.error("[SiN (SimNet) Network Local] Export stopped: %s", tostring(errorMessage))
     end
+    local receiptOk, receiptError = pcall(self.processPermissionCommands, self)
+    if not receiptOk then
+        Logging.error("[SiN (SimNet) Network Local] Permission mailbox error: %s", tostring(receiptError))
+    end
+end
+
+function FS25SiNNetworkLocal:processPermissionCommands()
+    -- Receipt-only probe. Permission mutation remains disabled until its FS25
+    -- role API mapping is verified in the running game.
+    local manifestPath = self.commandDirectory .. "manifest.xml"
+    if not fileExists(manifestPath) then return end
+    local manifest = XMLFile.load("networkLocalManifest", manifestPath)
+    if manifest == nil then return end
+    local index = 0
+    while true do
+        local key = string.format("permissionCommands.command(%d)", index)
+        local operationId = manifest:getString(key .. "#operationId")
+        if operationId == nil then break end
+        local command = XMLFile.load("networkLocalCommand", self.commandDirectory .. operationId .. ".xml")
+        if command ~= nil and not fileExists(self.receiptDirectory .. operationId .. ".xml") then
+            local receipt = XMLFile.create("networkLocalReceipt", self.receiptDirectory .. operationId .. ".xml", "permissionReceipt")
+            receipt:setString("permissionReceipt#operation_id", operationId)
+            receipt:setString("permissionReceipt#server_id", command:getString("permissionCommand#server_id"))
+            receipt:setString("permissionReceipt#save_id", command:getString("permissionCommand#save_id"))
+            receipt:setString("permissionReceipt#revision", command:getString("permissionCommand#revision"))
+            receipt:setString("permissionReceipt#status", "pending_validation")
+            receipt:setString("permissionReceipt#receipt", "FS25 permission API validation is required")
+            receipt:save(); receipt:delete(); command:delete()
+        end
+        index = index + 1
+    end
+    manifest:delete()
 end
 
 function FS25SiNNetworkLocal:exportSnapshot()

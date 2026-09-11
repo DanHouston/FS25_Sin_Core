@@ -23,6 +23,10 @@ def player_choice_label(player_id, nickname):
     return f"Nickname: {nickname or 'Unnamed player'} | FS25 player ID: {player_id}"
 
 
+def approved_nickname(player_name, farm_name):
+    return f"{player_name or 'Player'} | {farm_name}"[:32]
+
+
 class NetworkBot(discord.Client):
     def __init__(self, bank, servers, guild_id, operator_role_ids=(), channels=None, authorizations=None):
         intents = discord.Intents.none()
@@ -170,9 +174,18 @@ class NetworkBot(discord.Client):
                 raise ValueError("Choose a farm from the suggestions") from None
             operation = await asyncio.to_thread(auth_for(server).approve_request, request["_id"], server, config["save_id"],
                 selected_farm_id, player_id, snapshot, str(interaction.user.id), identity_and_land_confirmed)
+            nickname = approved_nickname(snapshot["players"][player_id], request["farm_name"])
+            nickname_note = ""
+            try:
+                requester = await interaction.guild.fetch_member(int(member))
+                if requester.bot:
+                    raise ValueError("Bot accounts cannot receive farm assignments")
+                await requester.edit(nick=nickname, reason="SiN JiN farm approval")
+            except discord.Forbidden:
+                nickname_note = " Discord nickname was not set; grant SiN JiN Manage Nicknames and place its role above players."
             await interaction.followup.send(
                 f"Approved requester `{member}` for **{request['farm_name']}**. "
-                f"Permission sync is pending (operation `{operation}`). The game has not applied permissions yet.",
+                f"Discord name set to **{nickname}**. Permission sync is pending (operation `{operation}`). The game has not applied permissions yet.{nickname_note}",
                 ephemeral=True)
 
         @farm_approve.autocomplete("farm_id")
