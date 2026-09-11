@@ -14,7 +14,16 @@ function FS25SiNNetworkLocal:loadMap()
     createFolder(self.commandDirectory)
     createFolder(self.receiptDirectory)
     self.systemFarmDiagnosticLogged = false
+    addConsoleCommand("sinPermissions", "List FS25 farm permission keys", "consoleCommandPermissions", self)
     Logging.info("[SiN (SimNet) Network Local] Loaded; telemetry directory: %s", self.directory)
+end
+
+function FS25SiNNetworkLocal:consoleCommandPermissions()
+    if Farm == nil or Farm.PERMISSION == nil then return "Farm permissions are unavailable" end
+    local keys = {}
+    for permission, _ in pairs(Farm.PERMISSION) do table.insert(keys, tostring(permission)) end
+    table.sort(keys)
+    return "FS25 permission keys: " .. table.concat(keys, ", ")
 end
 
 function FS25SiNNetworkLocal:update(dt)
@@ -159,6 +168,7 @@ end
 
 function FS25SiNNetworkLocal:deleteMap()
     self.failed = true
+    removeConsoleCommand("sinPermissions")
 end
 
 addModEventListener(FS25SiNNetworkLocal)
