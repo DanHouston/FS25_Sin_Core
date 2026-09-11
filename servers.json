@@ -4,6 +4,8 @@
     "development": true,
     "snapshot_transport": "local-file",
     "savegame_index": 1,
+    "system_farm_id": 2,
+    "system_farm_name": "SiN JiN | SiNful Harvest",
     "withdrawals_enabled": false
   }
 }

@@ -129,6 +129,14 @@ rejected-job recovery and pending-job supersession need further workflows.
 
 ## Remaining game integration
 
+## SiN JiN services farm
+
+`local-dev` reserves Farm 2, **SiN JiN | SiNful Harvest**, as its system farm.
+It owns no land and is not a player home farm. It may own shared equipment.
+The system-farm ID and exact name are configured per server; player farm approval
+and manager restoration must never assign or promote a player as its manager.
+Contractor access for shared equipment is a separate engine-permission policy.
+
 Build a server-authoritative adapter that validates current save, identity and
 farm, applies absolute role permissions, persists operation/revision receipts,
 and acknowledges successful application. Unknown outcomes stay pending. Restart
