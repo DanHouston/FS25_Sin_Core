@@ -34,6 +34,10 @@ function FS25SiNNetworkLocal:update(dt)
     if not receiptOk then
         Logging.error("[SiN (SimNet) Network Local] Permission mailbox error: %s", tostring(receiptError))
     end
+    local restoreOk, restoreError = pcall(self.restoreApprovedManagers, self)
+    if not restoreOk then
+        Logging.error("[SiN (SimNet) Network Local] Manager restore error: %s", tostring(restoreError))
+    end
 end
 
 function FS25SiNNetworkLocal:processPermissionCommands()
@@ -76,6 +80,32 @@ function FS25SiNNetworkLocal:processPermissionCommands()
         index = index + 1
     end
     manifest:delete()
+end
+
+function FS25SiNNetworkLocal:restoreApprovedManagers()
+    local path = self.directory .. "manager-authority.xml"
+    if not fileExists(path) then return end
+    local authority = XMLFile.load("networkLocalAuthority", path)
+    if authority == nil then return end
+    local index = 0
+    while true do
+        local key = string.format("managerAuthority.manager(%d)", index)
+        local playerId = authority:getString(key .. "#gamePlayerId")
+        if playerId == nil then break end
+        local farmId = authority:getInt(key .. "#farmId")
+        local userId = nil
+        for _, user in ipairs(g_currentMission.userManager:getUsers()) do
+            if user:getUniqueUserId() == playerId then userId = user:getId(); break end
+        end
+        local farm = g_farmManager:getFarmById(farmId)
+        local currentFarm = userId ~= nil and g_farmManager:getFarmByUserId(userId) or nil
+        if farm ~= nil and currentFarm == farm and not farm:isUserFarmManager(userId) then
+            farm:promoteUser(userId)
+            Logging.info("[SiN (SimNet) Network Local] Restored approved manager for farm %s", tostring(farmId))
+        end
+        index = index + 1
+    end
+    authority:delete()
 end
 
 function FS25SiNNetworkLocal:exportSnapshot()

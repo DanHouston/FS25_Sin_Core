@@ -37,6 +37,15 @@ class LocalPermissionBridge:
         temporary = self.commands / "manifest.tmp"
         ET.ElementTree(manifest).write(temporary, encoding="utf-8", xml_declaration=True)
         temporary.replace(self.commands / "manifest.xml")
+        managers = self.authorization.db.memberships.find({"server_id": self.server_id,
+            "save_id": self.save_id, "state": "active", "desired_role": "farm_manager",
+            "applied_role": "farm_manager"})
+        authority = ET.Element("managerAuthority", schemaVersion="1")
+        for manager in managers:
+            ET.SubElement(authority, "manager", gamePlayerId=manager["game_player_id"], farmId=str(manager["farm_id"]))
+        temporary = self.directory / "manager-authority.tmp"
+        ET.ElementTree(authority).write(temporary, encoding="utf-8", xml_declaration=True)
+        temporary.replace(self.directory / "manager-authority.xml")
         return delivered
 
     def consume_receipts(self):
