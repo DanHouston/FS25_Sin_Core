@@ -1,6 +1,10 @@
 """Command channel boundaries, independent of Discord command visibility."""
 
 COMMAND_CHANNELS = {
+    "apply": "sin_apply",
+    "application_pending": "sin_applications",
+    "application_approve": "sin_applications",
+    "application_deny": "sin_applications",
     "farm_request": "link_account",
     "farm_requests": "farm_approvals",
     "farm_roster": "farm_approvals",

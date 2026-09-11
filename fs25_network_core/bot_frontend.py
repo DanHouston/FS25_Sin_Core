@@ -13,6 +13,7 @@ from .authorization import AuthorizationManager, require_operator, ROLES
 from .server_scraper import ServerScraper
 from .config import load_local_environment, required_setting, PROJECT_ROOT
 from .channel_policy import require_command_channel
+from .community import CommunityApplications
 
 
 class DiscordSetupError(RuntimeError):
@@ -28,9 +29,10 @@ def approved_nickname(player_name, farm_name):
 
 
 class NetworkBot(discord.Client):
-    def __init__(self, bank, servers, guild_id, operator_role_ids=(), channels=None, authorizations=None):
+    def __init__(self, bank, servers, guild_id, operator_role_ids=(), channels=None, authorizations=None, sin_member_role_id=None):
         intents = discord.Intents.none()
         intents.guilds = True
+        intents.members = True
         super().__init__(intents=intents)
         self.bank, self.servers = bank, servers
         self.guild = discord.Object(id=guild_id)
@@ -38,6 +40,8 @@ class NetworkBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
         self.authorization = AuthorizationManager(bank.database)
         self.authorizations = authorizations or {}
+        self.community = CommunityApplications(bank.database)
+        self.sin_member_role_id = int(sin_member_role_id) if sin_member_role_id else None
         role_override = os.environ.get("DISCORD_OPERATOR_ROLE_IDS")
         self.operator_role_ids = (
             {int(value.strip()) for value in role_override.split(",") if value.strip()}
@@ -65,6 +69,42 @@ class NetworkBot(discord.Client):
         def staff_check(interaction):
             require_operator(interaction.guild_id, self.guild.id,
                              [item.id for item in getattr(interaction.user, "roles", [])], self.operator_role_ids)
+
+        @self.tree.command(name="apply", description="Apply for SiN community membership")
+        @app_commands.check(channel_check)
+        async def apply(interaction, nickname: str, farm_name: str):
+            record = await asyncio.to_thread(self.community.apply, str(interaction.user.id), nickname, farm_name)
+            await interaction.response.send_message(f"Community application pending. Requested SiN display name: **{record['server_nickname']}**", ephemeral=True)
+
+        @self.tree.command(name="application_pending", description="Staff: list pending community applications")
+        @app_commands.check(channel_check)
+        async def application_pending(interaction):
+            staff_check(interaction); await interaction.response.defer(ephemeral=True)
+            rows = await asyncio.to_thread(self.community.pending)
+            await interaction.followup.send("\n".join(f"<@{r['discord_id']}> → **{r['server_nickname']}**" for r in rows) or "No pending applications.", ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+        @self.tree.command(name="application_approve", description="Staff: approve community membership")
+        @app_commands.check(channel_check)
+        async def application_approve(interaction, member: discord.Member):
+            staff_check(interaction)
+            if not self.sin_member_role_id: raise ValueError("Configure roles.sin_member with a Discord role ID")
+            record = await asyncio.to_thread(self.community.pending_for, str(member.id))
+            role = interaction.guild.get_role(self.sin_member_role_id)
+            if not role: raise ValueError("Configured SiN Member role is unavailable")
+            try:
+                await member.edit(nick=record['server_nickname'], reason="SiN community approval")
+                await member.add_roles(role, reason="SiN community approval")
+            except discord.Forbidden as error:
+                raise ValueError("SiN JiN needs Manage Nicknames and Manage Roles above the member role") from error
+            await asyncio.to_thread(self.community.approve, str(member.id), str(interaction.user.id))
+            await interaction.response.send_message(f"Approved **{record['server_nickname']}**.", ephemeral=True)
+
+        @self.tree.command(name="application_deny", description="Staff: deny community membership")
+        @app_commands.check(channel_check)
+        async def application_deny(interaction, member: discord.Member, reason: str):
+            staff_check(interaction)
+            await asyncio.to_thread(self.community.deny, str(member.id), str(interaction.user.id), reason)
+            await interaction.response.send_message("Community application denied.", ephemeral=True)
 
         async def observed_players(interaction: discord.Interaction, current: str):
             server = getattr(interaction.namespace, "server", None)
@@ -322,6 +362,12 @@ def main():
     # Do not reuse another guild's operator configuration when overriding guild ID.
     operator_role_ids = discord_config.get("operator_role_ids", []) if str(guild_id) == str(discord_config["guild_id"]) else []
     channels = discord_config.get("channels", {}) if str(guild_id) == str(discord_config["guild_id"]) else {}
+    try:
+        sin_member_role_id = int(discord_config.get("roles", {}).get("sin_member", ""))
+        for name in ("sin_apply", "sin_applications"):
+            int(channels[name])
+    except (KeyError, TypeError, ValueError) as error:
+        raise SystemExit("Configure numeric channels.sin_apply, channels.sin_applications, and roles.sin_member IDs in discord.json") from error
     with open(os.environ.get("FS25_SERVERS_FILE", PROJECT_ROOT / "servers.json"), encoding="utf-8") as stream:
         servers = json.load(stream)
     database = Database()
@@ -338,7 +384,7 @@ def main():
             test_database.initialize()
             authorizations[server_id] = AuthorizationManager(test_database)
     try:
-        NetworkBot(BankingEngine(database), servers, int(guild_id), operator_role_ids, channels, authorizations).run(token, log_handler=None)
+        NetworkBot(BankingEngine(database), servers, int(guild_id), operator_role_ids, channels, authorizations, sin_member_role_id).run(token, log_handler=None)
     except DiscordSetupError as error:
         raise SystemExit(str(error)) from None
 

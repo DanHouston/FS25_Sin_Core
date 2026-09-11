@@ -1,7 +1,10 @@
 {
   "guild_id": "1547411827539837081",
   "operator_role_ids": ["1547417095589994576"],
+  "roles": {"sin_member": "REPLACE_WITH_SIN_MEMBER_ROLE_ID"},
   "channels": {
+    "sin_apply": "REPLACE_WITH_SIN_APPLY_CHANNEL_ID",
+    "sin_applications": "REPLACE_WITH_SIN_APPLICATIONS_CHANNEL_ID",
     "link_account": "1547411943311024240",
     "bank": "1547412275462406205",
     "farm_approvals": "1547412673069584444",

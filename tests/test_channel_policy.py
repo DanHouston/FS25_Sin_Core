@@ -5,7 +5,7 @@ from fs25_network_core.channel_policy import COMMAND_CHANNELS, require_command_c
 
 class ChannelPolicyTests(unittest.TestCase):
     def test_each_command_accepts_its_designated_channel(self):
-        channels = {"link_account": 11, "bank": 12, "farm_approvals": 13}
+        channels = {"link_account": 11, "bank": 12, "farm_approvals": 13, "sin_apply": 14, "sin_applications": 15}
         for command, channel_key in COMMAND_CHANNELS.items():
             with self.subTest(command=command):
                 require_command_channel(command, 1, 1, channels[channel_key], channels)

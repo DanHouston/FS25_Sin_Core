@@ -1,0 +1,14 @@
+import unittest
+from unittest.mock import MagicMock
+from fs25_network_core.community import CommunityApplications, requested_server_nickname
+
+class CommunityTests(unittest.TestCase):
+    def setUp(self): self.db = MagicMock(); self.app = CommunityApplications(MagicMock(db=self.db))
+    def test_validation(self):
+        self.assertEqual(requested_server_nickname(' Repton ', ' Farm '), ('Repton','Farm','Repton | Farm'))
+        for values in [('', 'Farm'), ('Name',''), ('A|B','Farm'), ('A','x'*30)]:
+            with self.assertRaises(ValueError): requested_server_nickname(*values)
+    def test_identical_pending_is_idempotent_and_conflict_rejected(self):
+        self.db.community_applications.find_one.return_value = {'state':'pending','nickname':'R','farm_name':'F'}
+        self.assertEqual(self.app.apply('1','R','F')['state'], 'pending')
+        with self.assertRaises(ValueError): self.app.apply('1','Other','F')

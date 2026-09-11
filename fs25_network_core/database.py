@@ -26,6 +26,7 @@ class Database:
             unique=True, partialFilterExpression={"desired_role": "farm_manager"}, name="one_manager_per_farm")
         self.db.permission_jobs.create_index([("server_id", 1), ("save_id", 1), ("state", 1)])
         self.db.farm_requests.create_index([("server_id", 1), ("save_id", 1), ("state", 1), ("created_at", 1)])
+        self.db.community_applications.create_index([("state", 1), ("submitted_at", 1)])
 
     def atomic(self, callback):
         with self.client.start_session() as session:

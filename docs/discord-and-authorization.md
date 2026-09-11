@@ -6,6 +6,19 @@ command sync; old code-issuance and verification methods now reject all calls.
 
 ## Channels
 
+## Community membership before farms
+
+New Discord users first use `/apply nickname:<name> farm_name:<farm>` in
+`#sin-apply`. This creates only a community application; it grants no game,
+banking, farm, or wallet access. Network Admins review it in `#sin-applications`
+with `/application_pending`, `/application_approve`, or `/application_deny`.
+Approval sets the server nickname to `nickname | farm name` and grants the SiN
+Member role. Members must not have Change Nickname. SiN JiN needs Manage
+Nicknames and Manage Roles, with its role above SiN Member; do not grant
+Administrator. Discord channel/role overwrites control visibility; the bot never
+creates or dynamically hides channels or roles. Only after community approval may
+a member optionally use the separate `/farm_request` workflow below.
+
 | Channel | ID | Commands / purpose |
 | --- | --- | --- |
 | #link-account | 1547411943311024240 | /farm_request, /farm_status; private responses |
