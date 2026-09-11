@@ -50,13 +50,27 @@ function FS25SiNNetworkLocal:processPermissionCommands()
         if operationId == nil then break end
         local command = XMLFile.load("networkLocalCommand", self.commandDirectory .. operationId .. ".xml")
         if command ~= nil and not fileExists(self.receiptDirectory .. operationId .. ".xml") then
+            local playerId = command:getString("permissionCommand#game_player_id")
+            local farmId = command:getInt("permissionCommand#farm_id")
+            local userId = nil
+            if g_currentMission.userManager ~= nil then
+                for _, user in ipairs(g_currentMission.userManager:getUsers()) do
+                    if user:getUniqueUserId() == playerId then userId = user:getId(); break end
+                end
+            end
+            local farm = g_farmManager:getFarmById(farmId)
+            local currentFarm = userId ~= nil and g_farmManager:getFarmByUserId(userId) or nil
+            local manager = farm ~= nil and userId ~= nil and farm:isUserFarmManager(userId)
+            local requestedRole = command:getString("permissionCommand#role")
+            local applied = requestedRole == "farm_manager" and currentFarm ~= nil and currentFarm.farmId == farmId and manager
+            Logging.info("[SiN (SimNet) Network Local] Permission diagnostic operation=%s player=%s userId=%s farm=%s currentFarm=%s manager=%s hasSetUserPermission=%s", operationId, tostring(playerId), tostring(userId), tostring(farmId), tostring(currentFarm and currentFarm.farmId), tostring(manager), tostring(farm ~= nil and farm.setUserPermission ~= nil))
             local receipt = XMLFile.create("networkLocalReceipt", self.receiptDirectory .. operationId .. ".xml", "permissionReceipt")
             receipt:setString("permissionReceipt#operation_id", operationId)
             receipt:setString("permissionReceipt#server_id", command:getString("permissionCommand#server_id"))
             receipt:setString("permissionReceipt#save_id", command:getString("permissionCommand#save_id"))
             receipt:setString("permissionReceipt#revision", command:getString("permissionCommand#revision"))
-            receipt:setString("permissionReceipt#status", "pending_validation")
-            receipt:setString("permissionReceipt#receipt", "FS25 permission API validation is required")
+            receipt:setString("permissionReceipt#status", applied and "applied" or "pending_validation")
+            receipt:setString("permissionReceipt#receipt", "Verified FS25 state: userId=" .. tostring(userId) .. "; currentFarm=" .. tostring(currentFarm and currentFarm.farmId) .. "; manager=" .. tostring(manager))
             receipt:save(); receipt:delete(); command:delete()
         end
         index = index + 1
