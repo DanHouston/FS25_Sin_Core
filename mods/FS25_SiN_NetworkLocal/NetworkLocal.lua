@@ -774,10 +774,11 @@ function FS25SiNNetworkLocal:processFarmProvisionCommand(command, operationId, o
         if lookupError ~= nil then error(lookupError) end
         if farm == nil then
             if g_farmManager.createFarm == nil then error("FS25 FarmManager:createFarm is unavailable") end
-            -- FS25 exposes createFarm(name, color, password, farmId).  Leave
-            -- the ID to the game and re-enumerate the manager after creation;
-            -- never predict a numeric farm ID in SiN.
-            local created = g_farmManager:createFarm(farmName, 0, "", nil)
+            -- FS25 exposes createFarm(name, colorIndex, password, farmId).
+            -- Color is the saved multiplayer color index, not a texture path
+            -- or RGB value.  Index 1 is a valid built-in color; leave the ID
+            -- to the game and re-enumerate after creation.
+            local created = g_farmManager:createFarm(farmName, 1, "", nil)
             if type(created) == "number" then farmId = created end
             farm, lookupError = self:findFarmByName(farmName)
             if lookupError ~= nil then error(lookupError) end

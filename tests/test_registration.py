@@ -214,7 +214,8 @@ class RegistrationTests(unittest.TestCase):
     def test_networklocal_farm_operations_use_verified_authoritative_apis(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_NetworkLocal" / "NetworkLocal.lua").read_text(
             encoding="utf-8")
-        self.assertIn("g_farmManager:createFarm(farmName, 0, \"\", nil)", source)
+        self.assertIn("g_farmManager:createFarm(farmName, 1, \"\", nil)", source)
+        self.assertNotIn("g_farmManager:createFarm(farmName, 0, \"\", nil)", source)
         self.assertIn("g_farmManager:getFarmById(farmId)", source)
         self.assertIn("g_farmlandManager:setLandOwnership(farmlandId, farmId)", source)
         self.assertNotRegex(source, r"setLandOwnership\([^\n]*,[^\n]*,[^\n]*\)")

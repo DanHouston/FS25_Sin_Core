@@ -6,9 +6,12 @@ Pairing establishes server trust; it does not create a farm. Once an authenticat
 server heartbeat reaches the central API, SiN queues an idempotent bootstrap
 operation for the shared system farm **SiN Harvest**. The Agent delivers that
 operation through `permission-commands/`; the authoritative NetworkLocal server
-calls the verified `FarmManager:createFarm(name, color, password, farmId)` API,
-re-enumerates farms to learn the actual ID, and returns a durable receipt. A
-temporary FS25 outage leaves the operation pending.
+calls the verified `FarmManager:createFarm(name, colorIndex, password, farmId)`
+API using a valid built-in color index and an empty password, re-enumerates farms
+to learn the actual ID, and returns a durable receipt. A temporary FS25 outage
+leaves the operation pending. If FS25 already contains exactly one `SiN Harvest`
+farm, the next authenticated snapshot/reconcile adopts that actual ID instead of
+creating another farm; duplicates fail closed as `reconciliation_required`.
 
 Member farm requests use the approved application's farm name and a numeric
 starting farmland ID. `/farm_request` stores the friendly server selection and
@@ -26,6 +29,14 @@ resources for an already paired server. A failed or uncertain game mutation is
 recorded as `reconciliation_required`; operators must reconcile it before retrying.
 Ordinary members are never made managers of SiN Harvest, and registration alone
 still grants no farm, land, or manager authority.
+
+Farm membership and manager authority are separate. FS25's normal farm-selection
+flow removes the player from the old farm, sets the player's `farmId`, and adds
+the user to the selected farm with default permissions. SiN does not force an
+approved member into SiN Harvest and does not prevent a registered member from
+switching farms. The NetworkLocal authority loop only demotes a manager when no
+matching persisted SiN manager authorization exists; joining a farm never grants
+manager status. There is no SiN-specific contractor role in this path.
 
 Players request a farm. Only Network Admins associate Discord identities with
 observed game players and farms. `/link` is removed on the next successful guild

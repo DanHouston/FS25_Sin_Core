@@ -3,6 +3,7 @@ import io
 import sys
 import tempfile
 import unittest
+from urllib.error import HTTPError
 from pathlib import Path
 from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import MagicMock, patch
@@ -170,3 +171,25 @@ class AgentTests(unittest.TestCase):
             self.assertIn('operation_type="ensure_farm"', command.read_text(encoding="utf-8"))
             self.assertIn('canonical_name="SiN Harvest"', command.read_text(encoding="utf-8"))
             self.assertNotIn("pymongo", "".join(path.read_text(encoding="utf-8") for path in [Path(agent_module.__file__)]))
+
+    def test_failed_receipt_post_remains_queued_for_later_retry(self):
+        failure = HTTPError("https://central/api/server/operation-receipts", 500, "central failure", {}, None)
+        opener = MagicMock(side_effect=[failure, Response()])
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "serverBinding.xml").write_text(
+                '<serverBinding serverKey="server" credential="secret"/>', encoding="utf-8")
+            (root / "snapshot.xml").write_text(
+                '<networkLocal source="game" savegameIndex="1"/>', encoding="utf-8")
+            receipts = root / "permission-receipts"
+            receipts.mkdir()
+            receipt = receipts / "farm-op.xml"
+            receipt.write_text(
+                '<networkLocalReceipt operation_id="farm-op" operation_type="ensure_farm" '
+                'server_id="server" save_id="main" status="applied" farm_id="1"/>', encoding="utf-8")
+            agent = PairingAgent(root, "https://central", opener)
+            self.assertEqual(agent.process_receipts_once(), [])
+            self.assertTrue(receipt.exists())
+            failure.close()
+            self.assertEqual(agent.process_receipts_once(), [receipt.name])
+            self.assertFalse(receipt.exists())

@@ -353,8 +353,16 @@ class NetworkBot(discord.Client):
             server_config(interaction, server)
             await interaction.response.defer(ephemeral=True)
             results = await asyncio.to_thread(self.farm_lifecycle.ensure_for_server, server)
-            status = "active" if results and all(item.get("status") == "active" for item in results) else "pending"
-            await interaction.followup.send(f"Server reconciliation {status}. Required system farm: **{SYSTEM_FARM_NAME}**.", ephemeral=True)
+            statuses = {item.get("status") for item in results}
+            if "reconciliation_required" in statuses:
+                status = "reconciliation required; no farm was guessed or recreated"
+            elif results and statuses == {"active"}:
+                status = "active"
+            else:
+                status = "pending; the Agent must submit the current FS25 snapshot"
+            await interaction.followup.send(
+                f"Server reconciliation {status}. Required system farm: **{SYSTEM_FARM_NAME}**.",
+                ephemeral=True)
 
         @server_reconcile.autocomplete("server")
         async def server_reconcile_autocomplete(interaction: discord.Interaction, current: str):

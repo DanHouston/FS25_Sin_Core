@@ -65,6 +65,51 @@ class FarmLifecycleTests(unittest.TestCase):
         self.assertIn("awaiting_manager", [update.get("state") for update in request_updates])
         self.lifecycle.authorization.assign.assert_called_once()
 
+        mapping_update = self.db.sin_farms.update_one.call_args.args[1]
+        self.assertNotIn("fs25_farm_id", mapping_update["$setOnInsert"])
+        self.assertEqual(mapping_update["$set"]["fs25_farm_id"], 7)
+        self.assertTrue(set(mapping_update["$setOnInsert"]).isdisjoint(mapping_update["$set"]))
+
+    def test_duplicate_successful_receipt_is_idempotent(self):
+        operation = {"_id": "op", "operation_id": "op", "operation_type": "ensure_farm",
+                     "state": "dispatched", "payload": {"farm_type": "system",
+                     "canonical_name": SYSTEM_FARM_NAME}}
+        self.db.farm_operations.find_one.side_effect = [operation, dict(operation, state="succeeded"),
+                                                         dict(operation, state="succeeded")]
+        self.db.sin_farms.find.return_value = []
+        receipt = {"operation_id": "op", "operation_type": "ensure_farm", "status": "applied",
+                   "farm_id": "1", "receipt": "farm_exists_or_created"}
+        first = self.lifecycle.accept_receipt("server", "save", receipt)
+        second = self.lifecycle.accept_receipt("server", "save", receipt)
+        self.assertEqual(first["state"], "succeeded")
+        self.assertEqual(second["state"], "succeeded")
+        self.assertEqual(self.db.sin_farms.update_one.call_count, 1)
+
+    def test_existing_game_system_farm_is_adopted_without_queuing_creation(self):
+        operation = {"_id": "ensure-op", "operation_id": "ensure-op", "operation_type": "ensure_farm",
+                     "state": "dispatched", "payload": {"farm_type": "system",
+                     "canonical_name": SYSTEM_FARM_NAME}}
+        self.db.sin_farms.find.return_value = []
+        self.db.server_snapshots.find_one.return_value = {"farms": {"1": SYSTEM_FARM_NAME}}
+        self.db.farm_operations.find_one.return_value = operation
+        result = self.lifecycle.ensure_system_farm("server", "save")
+        self.assertEqual(result["status"], "active")
+        self.assertTrue(result["adopted"])
+        mapping_update = self.db.sin_farms.update_one.call_args.args[1]
+        self.assertEqual(mapping_update["$set"]["fs25_farm_id"], 1)
+        self.assertTrue(set(mapping_update["$setOnInsert"]).isdisjoint(mapping_update["$set"]))
+        operation_updates = [call.args[1].get("$set", {})
+                             for call in self.db.farm_operations.update_one.call_args_list]
+        self.assertIn("succeeded", [update.get("state") for update in operation_updates])
+
+    def test_duplicate_game_system_farms_require_reconciliation(self):
+        self.db.sin_farms.find.return_value = []
+        self.db.server_snapshots.find_one.return_value = {
+            "farms": {"1": SYSTEM_FARM_NAME, "2": SYSTEM_FARM_NAME}}
+        result = self.lifecycle.ensure_system_farm("server", "save")
+        self.assertEqual(result["status"], "reconciliation_required")
+        self.db.farm_operations.update_one.assert_not_called()
+
     def test_failed_game_mutation_becomes_reconciliation_required(self):
         operation = {"_id": "op", "operation_id": "op", "operation_type": "provision_farm",
                      "state": "dispatched", "payload": {"request_id": "request"}}

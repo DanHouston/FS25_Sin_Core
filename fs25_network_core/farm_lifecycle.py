@@ -67,13 +67,71 @@ class FarmLifecycle:
     def ensure_system_farm(self, server_key, save_key):
         scope = dict(self._scope(server_key, save_key), farm_type=SYSTEM_FARM_TYPE,
                      canonical_name=SYSTEM_FARM_NAME)
-        mapping = self.db.sin_farms.find_one(scope)
-        if mapping and mapping.get("fs25_farm_id") is not None and mapping.get("state") == "active":
-            return {"status": "active", "mapping": mapping}
+        mappings = list(self.db.sin_farms.find(scope))
+        if len(mappings) > 1:
+            return {"status": "reconciliation_required", "reason": "multiple system farm mappings"}
+        confirmed = [row for row in mappings
+                     if row.get("fs25_farm_id") is not None and row.get("state") == "active"]
+        confirmed_ids = {int(row["fs25_farm_id"]) for row in confirmed}
+        if len(confirmed) == 1 and len(confirmed_ids) == 1:
+            return {"status": "active", "mapping": confirmed[0]}
+        if len(confirmed_ids) > 1 or len(confirmed) > 1:
+            return {"status": "reconciliation_required", "reason": "multiple system farm mappings"}
+
+        # A game snapshot is authoritative for recovery after a receipt was
+        # applied in FS25 but central persistence failed.  Adopt only one exact
+        # name match; never infer a farm ID or choose between duplicates.
+        snapshot = self.latest_snapshot(server_key, save_key)
+        game_farms = snapshot.get("farms", {}) if snapshot else {}
+        matches = []
+        for farm_id, name in game_farms.items():
+            if str(name) == SYSTEM_FARM_NAME:
+                try:
+                    parsed_id = int(farm_id)
+                except (TypeError, ValueError):
+                    continue
+                if parsed_id > 0:
+                    matches.append(parsed_id)
+        if len(matches) > 1:
+            return {"status": "reconciliation_required", "reason": "multiple game system farms"}
+        if len(matches) == 1:
+            known_ids = {int(row["fs25_farm_id"]) for row in mappings
+                         if row.get("fs25_farm_id") is not None}
+            if known_ids and known_ids != {matches[0]}:
+                return {"status": "reconciliation_required", "reason": "central and game farm IDs disagree"}
+            mapping_id = mappings[0].get("_id") if mappings and mappings[0].get("_id") else _operation_id(
+                "farm", server_key, save_key, "ensure-system-farm")
+            now = self._now()
+            operation_id = _operation_id("ensure-system-farm", server_key, save_key)
+            mapping_values = {"_id": mapping_id, "server_key": server_key, "save_key": save_key,
+                              "canonical_name": SYSTEM_FARM_NAME, "farm_type": SYSTEM_FARM_TYPE,
+                              "owner_discord_id": None, "source_request_id": None,
+                              "state": "active", "operation_id": operation_id,
+                              "fs25_farm_id": matches[0], "updated_at": now}
+            self.db.sin_farms.update_one({"_id": mapping_id}, {
+                # Keep all fields in one operator to avoid MongoDB path
+                # conflicts when this adopts a record left by a failed receipt.
+                "$setOnInsert": {"_id": mapping_id},
+                "$set": {key: value for key, value in mapping_values.items() if key != "_id"}
+            }, upsert=True)
+            existing_operation = self._operation(operation_id)
+            if existing_operation and existing_operation.get("state") != "succeeded":
+                self.db.farm_operations.update_one({"_id": operation_id}, {"$set": {
+                    "state": "succeeded", "fs25_farm_id": matches[0],
+                    "receipt": {"status": "already_applied", "farm_id": matches[0],
+                                 "reason": "adopted_from_game_snapshot"}, "updated_at": now}})
+            return {"status": "active", "adopted": True,
+                    "mapping": mapping_values}
+
         operation_id = _operation_id("ensure-system-farm", server_key, save_key)
+        existing_operation = self._operation(operation_id)
+        if existing_operation and existing_operation.get("state") in {"succeeded", "reconciliation_required"}:
+            return {"status": "reconciliation_required", "operation": existing_operation,
+                    "mapping": mappings[0] if len(mappings) == 1 else None}
         operation = self._queue_operation(operation_id, "ensure_farm", server_key, save_key,
                                           {"farm_type": SYSTEM_FARM_TYPE, "canonical_name": SYSTEM_FARM_NAME})
-        return {"status": "pending", "operation": operation, "mapping": mapping}
+        return {"status": "pending", "operation": operation,
+                "mapping": mappings[0] if len(mappings) == 1 else None}
 
     def ensure_for_server(self, server_key):
         return [self.ensure_system_farm(server_key, row["save_key"])
@@ -185,8 +243,27 @@ class FarmLifecycle:
                     "state": "reconciliation_required", "receipt": receipt, "updated_at": self._now()}})
                 return self._operation(operation["_id"])
         mapping_id = _operation_id("farm", server_key, save_key, payload.get("request_id") or operation["operation_id"])
+        if operation.get("operation_type") == "ensure_farm":
+            existing_system = list(self.db.sin_farms.find({
+                "server_key": server_key, "save_key": save_key,
+                "farm_type": SYSTEM_FARM_TYPE, "canonical_name": SYSTEM_FARM_NAME}))
+            existing_ids = {int(row["fs25_farm_id"]) for row in existing_system
+                            if row.get("fs25_farm_id") is not None}
+            if len(existing_ids) > 1 or len(existing_system) > 1 and len(existing_ids) == 1:
+                self.db.farm_operations.update_one({"_id": operation["_id"]}, {"$set": {
+                    "state": "reconciliation_required", "receipt": receipt,
+                    "updated_at": self._now()}})
+                return self._operation(operation["_id"])
+            if existing_ids:
+                existing = next(row for row in existing_system if row.get("fs25_farm_id") is not None)
+                if int(next(iter(existing_ids))) != farm_id:
+                    self.db.farm_operations.update_one({"_id": operation["_id"]}, {"$set": {
+                        "state": "reconciliation_required", "receipt": receipt,
+                        "updated_at": self._now()}})
+                    return self._operation(operation["_id"])
+                mapping_id = existing["_id"]
         mapping = {"_id": mapping_id, "server_key": server_key, "save_key": save_key,
-                   "fs25_farm_id": farm_id, "canonical_name": payload.get("canonical_name"),
+                   "canonical_name": payload.get("canonical_name"),
                    "farm_type": payload.get("farm_type", MEMBER_FARM_TYPE),
                    "owner_discord_id": None, "source_request_id": payload.get("request_id"),
                    "state": "active" if operation["operation_type"] == "ensure_farm" else "provisioned",
