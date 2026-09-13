@@ -61,6 +61,19 @@ class ServerApiTests(unittest.TestCase):
         self.server.RequestHandlerClass.event_processor.process.assert_called_once_with(event)
         connection.close()
 
+    def test_event_endpoint_accepts_credential_in_auth_header(self):
+        connection = HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
+        event = {"event_id": "e-header", "event_type": "heartbeat", "server_key": "sin-fs25-01",
+                 "save_id": "1", "payload": {}}
+        connection.request("POST", "/api/server/events", json.dumps(event), {
+            "Content-Type": "application/json", "X-SiN-Server-Key": "sin-fs25-01",
+            "Authorization": "Bearer secret"})
+        response = connection.getresponse()
+        self.assertEqual(response.status, 200)
+        forwarded = self.server.RequestHandlerClass.event_processor.process.call_args.args[0]
+        self.assertEqual(forwarded["server_credential"], "secret")
+        connection.close()
+
     def test_clock_endpoint_authenticates_and_returns_policy(self):
         self.server.RequestHandlerClass.event_processor.registry.authenticate.return_value = {"server_key": "sin-fs25-01"}
         self.server.RequestHandlerClass.event_processor.registry.resolve_save.return_value = "main"

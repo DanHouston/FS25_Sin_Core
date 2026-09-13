@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from .activity import ActivityOutbox
 from .authorization import AuthorizationManager
 from .server_registry import ServerRegistry
+from pymongo.errors import DuplicateKeyError
 
 LOG = logging.getLogger(__name__)
 SUPPORTED_EVENTS = {"heartbeat", "player_connected", "player_disconnected"}
@@ -72,9 +73,8 @@ class CentralEventProcessor:
         try:
             self.db.processed_server_events.insert_one(
                 {"_id": event_id, "server_key": record["server_key"], "processed_at": now})
-        except Exception as error:
-            if "duplicate" not in str(error).lower():
-                raise
+        except DuplicateKeyError:
+            pass
         LOG.info("[SiN Events] processed type=%s serverKey=%s", event_type, record["server_key"])
         return {"status": "accepted", "duplicate": False, "save_key": save_key}
 

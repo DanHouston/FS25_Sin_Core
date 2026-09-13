@@ -1,4 +1,4 @@
-"""Mongo-free per-server Agent for the pairing-only mailbox slice."""
+"""Mongo-free per-server Agent for authenticated mailbox transport."""
 import argparse
 import json
 import logging
@@ -23,6 +23,20 @@ class PairingAgent:
         self.backend_url = self.backend_root + "/api/server/pair"
         self.opener = opener or urlopen
 
+    @staticmethod
+    def _quarantine(path):
+        """Move a poison mailbox item aside without blocking later items."""
+        destination = path.with_suffix(path.suffix + ".failed")
+        suffix = 1
+        while destination.exists():
+            destination = path.with_suffix(path.suffix + f".failed.{suffix}")
+            suffix += 1
+        try:
+            path.replace(destination)
+            return True
+        except OSError:
+            return False
+
     def _pair(self, pairing_code):
         body = json.dumps({"pairing_code": pairing_code}).encode("utf-8")
         request = Request(self.backend_url, data=body, headers={"Content-Type": "application/json"}, method="POST")
@@ -37,9 +51,16 @@ class PairingAgent:
         return server_key, credential
 
     def _post_event(self, event):
-        body = json.dumps(event).encode("utf-8")
+        transport_event = dict(event)
+        server_key = transport_event.get("server_key")
+        credential = transport_event.pop("server_credential", None)
+        headers = {"Content-Type": "application/json"}
+        if server_key and credential:
+            headers["X-SiN-Server-Key"] = str(server_key)
+            headers["Authorization"] = "Bearer " + str(credential)
+        body = json.dumps(transport_event).encode("utf-8")
         request = Request(self.backend_url.rsplit("/api/server/pair", 1)[0] + "/api/server/events",
-                          data=body, headers={"Content-Type": "application/json"}, method="POST")
+                          data=body, headers=headers, method="POST")
         with self.opener(request, timeout=10) as response:
             if response.status != 200:
                 raise RuntimeError("event API rejected request")
@@ -144,11 +165,7 @@ class PairingAgent:
                 processed.append(path.name)
                 LOG.info("pairing request completed; server binding response queued")
             except (ElementTree.ParseError, ValueError):
-                failed = path.with_suffix(path.suffix + ".failed")
-                try:
-                    path.replace(failed)
-                except OSError:
-                    pass
+                self._quarantine(path)
                 LOG.warning("malformed pairing request quarantined")
             except (HTTPError, URLError, TimeoutError, RuntimeError, json.JSONDecodeError, OSError):
                 # Leave the request in place so a transient API/network failure
@@ -175,12 +192,12 @@ class PairingAgent:
                 processed.append(path.name)
                 LOG.info("event delivered; local event removed")
             except (ElementTree.ParseError, ValueError):
-                path.replace(path.with_suffix(path.suffix + ".failed"))
+                self._quarantine(path)
                 LOG.warning("malformed event quarantined")
             except (HTTPError, URLError, TimeoutError, RuntimeError, json.JSONDecodeError, OSError) as error:
                 status = getattr(error, "code", None)
                 if status in {400, 401, 403, 404, 422}:
-                    path.replace(path.with_suffix(path.suffix + ".failed"))
+                    self._quarantine(path)
                     LOG.warning("event permanently rejected and quarantined")
                 else:
                     LOG.warning("event API unavailable; event retained for retry")
@@ -215,11 +232,11 @@ class PairingAgent:
                 processed.append(path.name)
                 LOG.info("registration state delivered; local request removed")
             except (ElementTree.ParseError, ValueError):
-                path.replace(path.with_suffix(path.suffix + ".failed"))
+                self._quarantine(path)
                 LOG.warning("malformed registration request quarantined")
             except (HTTPError, URLError, TimeoutError, RuntimeError, OSError, json.JSONDecodeError) as error:
                 if getattr(error, "code", None) in {400, 401, 403, 404, 422}:
-                    path.replace(path.with_suffix(path.suffix + ".failed"))
+                    self._quarantine(path)
                     LOG.warning("registration request permanently rejected and quarantined")
                 else:
                     LOG.warning("registration API unavailable; request retained for retry")

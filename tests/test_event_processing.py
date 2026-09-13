@@ -1,5 +1,6 @@
 import unittest
 from unittest.mock import MagicMock
+from pymongo.errors import DuplicateKeyError
 
 from fs25_network_core.event_processing import CentralEventProcessor, EventAuthenticationError, EventScopeError
 
@@ -46,3 +47,8 @@ class EventProcessingTests(unittest.TestCase):
         result = self.processor.process(self.event("player_connected"))
         self.assertTrue(result["duplicate"])
         self.database.db.activity_outbox.insert_one.assert_not_called()
+
+    def test_duplicate_processed_event_key_is_safe(self):
+        self.database.db.processed_server_events.insert_one.side_effect = DuplicateKeyError("duplicate key")
+        result = self.processor.process(self.event("heartbeat"))
+        self.assertEqual(result["status"], "accepted")

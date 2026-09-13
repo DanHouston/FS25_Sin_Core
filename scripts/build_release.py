@@ -12,6 +12,7 @@ from zipfile import ZipFile, ZIP_DEFLATED, ZipInfo
 ROOT = Path(__file__).resolve().parents[1]
 AGENT_FILES = ("fs25_network_core/__init__.py", "fs25_network_core/agent.py")
 MOD_ASSET = "FS25_SiN_NetworkLocal.zip"
+CLIENT_UPDATER_ASSET = "Update-SiN-Client.ps1"
 
 
 def git(*args):
@@ -85,6 +86,8 @@ def build(version, output):
     build_mod(mod)
     updater = output / "Update-SiN.ps1"
     shutil.copy2(ROOT / "scripts" / "Update-SiN.ps1", updater)
+    client_updater = output / CLIENT_UPDATER_ASSET
+    shutil.copy2(ROOT / "scripts" / CLIENT_UPDATER_ASSET, client_updater)
     manifest = {
         "version": version,
         "git_commit": commit,
@@ -93,6 +96,7 @@ def build(version, output):
         "agent_sha256": sha256(agent),
         "networklocal_sha256": sha256(mod),
         "updater_sha256": sha256(updater),
+        "client_updater_sha256": sha256(client_updater),
         "agent_entrypoint": "python -m fs25_network_core.agent --watch",
         "minimum_python": "3.11",
         "release_format_version": 1,
@@ -101,7 +105,7 @@ def build(version, output):
         "github_run_id": os.environ.get("GITHUB_RUN_ID"),
     }
     (output / "build-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    checksummed = (agent, mod, updater)
+    checksummed = (agent, mod, updater, client_updater)
     (output / "SHA256SUMS.txt").write_text(
         "".join(f"{sha256(path)}  {path.name}\n" for path in checksummed), encoding="utf-8")
     return output

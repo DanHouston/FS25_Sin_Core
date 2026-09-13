@@ -47,10 +47,12 @@ class RegistrationTests(unittest.TestCase):
                 self.updates = []
 
             def find_one(self, query):
-                now = query["expires_at"]["$gt"]
+                now = query.get("expires_at", {}).get("$gt")
                 for record in self.records:
-                    if all(record.get(key) == value for key, value in query.items()
-                           if key != "expires_at") and record["expires_at"] > now:
+                    if not all(record.get(key) == value for key, value in query.items()
+                               if key != "expires_at" and not isinstance(value, dict)):
+                        continue
+                    if now is None or record["expires_at"] > now:
                         return dict(record)
                 return None
 
@@ -90,8 +92,12 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(first["issued_at"], first_issued_at)
         self.assertGreater(first["updated_at"], first_updated_at)
         self.assertGreater(first["expires_at"], datetime.now(timezone.utc))
-        self.assertNotIn("issued_at", collection.updates[1]["$set"])
-        self.assertIn("issued_at", collection.updates[1].get("$setOnInsert", {}))
+        self.assertIn("issued_at", collection.updates[1]["$set"])
+
+        # A later active reuse derives the same token from the refreshed
+        # issuance timestamp, rather than the expired record's old timestamp.
+        reused = self.auth.registration_request("server", "save", "stable-id")
+        self.assertEqual(reused["code"], second_token)
 
     def test_register_identity_resolves_code_without_server_argument(self):
         registration = {"_id": "r1", "server_id": "server", "save_id": "save", "fs25_unique_user_id": "stable-id"}
@@ -143,6 +149,26 @@ class RegistrationTests(unittest.TestCase):
         )
         self.assertNotRegex(source, r"getFiles\([^,\r\n]+\)")
 
+    def test_networklocal_uses_giants_authorized_canonical_mailbox_root(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_NetworkLocal" / "NetworkLocal.lua").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('local NETWORKLOCAL_MAILBOX_NAME = "FS25_SiN_NetworkLocal"', source)
+        self.assertIn('"modSettings/" .. NETWORKLOCAL_MAILBOX_NAME .. "/"', source)
+        self.assertNotIn('"modSettings/FS25SiNNetworkLocal/"', source)
+
+    def test_updater_migration_is_opt_in_and_does_not_read_binding_contents(self):
+        source = (Path(__file__).parents[1] / "scripts" / "Update-SiN.ps1").read_text(encoding="utf-8")
+        self.assertIn('[switch]$MigrateLegacyMailbox', source)
+        self.assertIn('"FS25SiNNetworkLocal"', source)
+        self.assertIn('"serverBinding.xml"', source)
+        self.assertIn('Copy-Item -LiteralPath $item -Destination $target', source)
+        self.assertIn('Test-Path -LiteralPath $target', source)
+        self.assertNotIn('Get-ChildItem -LiteralPath $legacy -Force -Recurse', source)
+        self.assertNotIn('Get-Content -LiteralPath $item.FullName', source)
+        self.assertNotIn('Get-Content $item.FullName', source)
+        self.assertIn('FS25_SiN_NetworkLocal', source)
+
     def test_registration_response_callback_normalizes_full_paths_for_load_and_delete(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_NetworkLocal" / "NetworkLocal.lua").read_text(
             encoding="utf-8"
@@ -174,6 +200,15 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("self.registrationCode = nil", source)
         self.assertIn("if not self.registrationRequired or self.registrationCode == \"\"", source)
         self.assertIn("self:sendRegistrationState(uniqueId, state.status, state.code)", source)
+
+    def test_networklocal_snapshot_does_not_export_dedicated_server_pseudo_user(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_NetworkLocal" / "NetworkLocal.lua").read_text(
+            encoding="utf-8"
+        )
+        snapshot = source[source.index("function FS25SiNNetworkLocal:exportSnapshot()"):]
+        self.assertIn("local pseudo = self:isDedicatedServerUser(user, userFarm)", snapshot)
+        self.assertIn("if not pseudo then", snapshot)
+        self.assertIn("currentPlayers[identityKey]", snapshot)
 
     def test_networklocal_refreshes_required_registration_on_heartbeat_reconciliation(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_NetworkLocal" / "NetworkLocal.lua").read_text(

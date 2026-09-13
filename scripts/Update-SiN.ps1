@@ -6,12 +6,13 @@ param(
     [string]$DeployRoot = "C:\SiN\Deploy",
     [string]$BackupRoot = "C:\SiN\Backups",
     [string]$DownloadRoot = "C:\SiN\Downloads",
-    [string]$MailboxDir = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\modSettings\FS25SiNNetworkLocal",
+    [string]$MailboxDir = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\modSettings\FS25_SiN_NetworkLocal",
     [string]$ApiUrl = "http://192.168.1.185:8080",
     [double]$PollInterval = 2,
     [string]$ModsPath = $env:SIN_FS25_MODS_DIR,
     [int]$KeepBackups = 5,
-    [switch]$Rollback
+    [switch]$Rollback,
+    [switch]$MigrateLegacyMailbox
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,6 +23,53 @@ $logRoot = "C:\SiN\Logs"
 function Get-AgentProcess {
     @(Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" |
         Where-Object { $_.CommandLine -and $_.CommandLine -match "fs25_network_core\.agent" -and $_.CommandLine -match "--watch" })
+}
+
+function Assert-CanonicalMailbox {
+    $leaf = Split-Path -Leaf ($MailboxDir.TrimEnd([char]92, [char]47))
+    if ($leaf -eq "FS25SiNNetworkLocal") {
+        throw "The legacy mailbox root is not supported. Use modSettings\\FS25_SiN_NetworkLocal."
+    }
+}
+
+function Invoke-LegacyMailboxMigration {
+    param([Parameter(Mandatory = $true)][string]$Destination)
+
+    $destination = [IO.Path]::GetFullPath($Destination)
+    $parent = Split-Path -Parent $destination
+    $legacy = Join-Path $parent "FS25SiNNetworkLocal"
+    if (-not (Test-Path -LiteralPath $legacy -PathType Container)) {
+        Write-Host "Legacy mailbox not found; migration not needed."
+        return
+    }
+    if ([StringComparer]::OrdinalIgnoreCase.Equals($legacy, $destination)) {
+        throw "Legacy and canonical mailbox paths must be different."
+    }
+
+    # Copy only durable root state. Existing canonical files are authoritative
+    # and are never overwritten, which keeps this safe to repeat and protects
+    # a newer serverBinding.xml without reading or printing its contents.
+    # Transient request/response/event folders remain in the retained legacy
+    # directory and are deliberately not replayed into the active mailbox.
+    New-Item -ItemType Directory -Force -Path $destination | Out-Null
+    $durableFiles = @(
+        "serverBinding.xml",
+        "snapshot.xml",
+        "clock-policy.xml",
+        "manager-authority.xml",
+        "serverBindingDiagnostic.xml"
+    )
+    foreach ($name in $durableFiles) {
+        $item = Join-Path $legacy $name
+        if (-not (Test-Path -LiteralPath $item -PathType Leaf)) { continue }
+        $target = Join-Path $destination $name
+        if (Test-Path -LiteralPath $target) {
+            Write-Host "Preserved existing canonical mailbox file: $name"
+            continue
+        }
+        Copy-Item -LiteralPath $item -Destination $target
+    }
+    Write-Host "Durable mailbox state migrated to $destination. Transient legacy mailbox folders were retained for manual review."
 }
 
 function Stop-Agent {
@@ -170,6 +218,7 @@ function Invoke-Rollback {
 }
 
 try {
+    Assert-CanonicalMailbox
     Resolve-ModsPath
     if ($Rollback) { Invoke-Rollback; exit 0 }
     $release = Get-Release $Version
@@ -198,6 +247,7 @@ try {
     if (Test-Path "C:\SiN\deployment.json") { Copy-Item "C:\SiN\deployment.json" (Join-Path $backup "previous-deployment.json") }
 
     Stop-Agent
+    if ($MigrateLegacyMailbox) { Invoke-LegacyMailboxMigration -Destination $MailboxDir }
     if (Test-Path $liveCore) { Remove-Item -LiteralPath $liveCore -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $AgentRoot | Out-Null
     $agentExtract = Join-Path $downloadDirectory "agent-validate\fs25_network_core"

@@ -42,7 +42,7 @@ class ServerScraper:
                 documents = Path(buffer.value)
             else:
                 documents = Path.home() / "Documents"
-            path = documents / "My Games/FarmingSimulator2025/modSettings/FS25SiNNetworkLocal/snapshot.xml"
+            path = documents / "My Games/FarmingSimulator2025/modSettings/FS25_SiN_NetworkLocal/snapshot.xml"
         try:
             snapshot = read_snapshot(path)
         except (OSError, ValueError, KeyError) as error:

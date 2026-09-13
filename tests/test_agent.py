@@ -102,6 +102,8 @@ class AgentTests(unittest.TestCase):
             sent = json.loads(request.data)
             self.assertEqual(sent["event_id"], "event-1")
             self.assertEqual(sent["payload"]["unique_user_id"], "u1")
+            self.assertNotIn("secret-value", request.data.decode("utf-8"))
+            self.assertEqual(request.headers["Authorization"], "Bearer secret-value")
 
     def test_malformed_event_is_quarantined(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -111,6 +113,20 @@ class AgentTests(unittest.TestCase):
             event.write_text("not xml", encoding="utf-8")
             self.assertEqual(PairingAgent(folder, "http://localhost").process_events_once(), [])
             self.assertTrue((events / "bad.xml.failed").exists())
+
+    def test_existing_quarantine_name_does_not_block_other_events(self):
+        opener = MagicMock(return_value=Response())
+        with tempfile.TemporaryDirectory() as folder:
+            events = Path(folder) / "events"
+            events.mkdir()
+            bad = events / "bad.xml"
+            bad.write_text("not xml", encoding="utf-8")
+            (events / "bad.xml.failed").write_text("previous", encoding="utf-8")
+            good = events / "good.xml"
+            good.write_text('<serverEvent event_id="event-2" event_type="heartbeat" server_key="oak-ridge" server_credential="secret-value" save_id="1"/>', encoding="utf-8")
+            processed = PairingAgent(folder, "http://central", opener).process_events_once()
+            self.assertEqual(processed, ["good.xml"])
+            self.assertTrue((events / "bad.xml.failed.1").exists())
 
     def test_clock_policy_is_fetched_from_binding_and_written(self):
         opener = MagicMock(return_value=Response())

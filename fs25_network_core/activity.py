@@ -3,6 +3,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 import discord
+from pymongo.errors import DuplicateKeyError
 
 LOG = logging.getLogger(__name__)
 
@@ -13,8 +14,8 @@ class ActivityOutbox:
                "server_key": server_key, "activity_type": activity_type, "message": message,
                "created_at": datetime.now(timezone.utc), "status": "pending", "attempts": 0}
         try: self.db.activity_outbox.insert_one(doc)
-        except Exception as error:
-            if "duplicate" not in str(error).lower(): raise
+        except DuplicateKeyError:
+            pass
         return doc
 
 class ActivityPublisher:

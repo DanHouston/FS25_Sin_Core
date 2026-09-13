@@ -18,7 +18,7 @@ compatible local testing; that exception does not affect central services.
 
 NetworkLocal uses the FS25 profile-level writable path returned by
 `getUserProfileAppPath()`, specifically
-`modSettings/FS25SiNNetworkLocal/serverBindingDiagnostic.xml`. On startup it
+`modSettings/FS25_SiN_NetworkLocal/serverBindingDiagnostic.xml`. On startup it
 creates a diagnostic ID if absent and logs `[SiN Server Binding] persistence
 diagnostic created`; later startups load and log the same ID. This is only a
 storage proof, not server pairing or credential storage. Test it by stopping
@@ -45,7 +45,7 @@ The mod has been renamed to follow the `FS25_SiN_<Purpose>` convention. When
 upgrading from the original package, remove the old `FS25_NetworkLocal.zip` from
 your game mods folder while FS25 is closed, then install the renamed package.
 Enable the new mod entry in your disposable save; FS25 treats it as a different
-mod. Its telemetry now lives under `modSettings/FS25SiNNetworkLocal/`.
+mod. Its telemetry now lives under `modSettings/FS25_SiN_NetworkLocal/`.
 
 1. Copy `dist/FS25_SiN_NetworkLocal.zip` into your actual FS25 mods directory, normally
    `Documents/My Games/FarmingSimulator2025/mods`. OneDrive or a custom mods
@@ -56,7 +56,7 @@ mod. Its telemetry now lives under `modSettings/FS25SiNNetworkLocal/`.
    pause menus. Open another PowerShell window and run:
 
 ```powershell
-python -m fs25_network_core.local_test inspect "$([Environment]::GetFolderPath('MyDocuments'))/My Games/FarmingSimulator2025/modSettings/FS25SiNNetworkLocal/snapshot.xml"
+python -m fs25_network_core.local_test inspect "$([Environment]::GetFolderPath('MyDocuments'))/My Games/FarmingSimulator2025/modSettings/FS25_SiN_NetworkLocal/snapshot.xml"
 ```
 
 Adjust that path if your game profile is elsewhere. Expected output includes
@@ -125,7 +125,7 @@ point it at the FS25 profile mailbox. The Agent requires no `MONGODB_URI` or
 
 ```powershell
 $env:SIN_BACKEND_URL = "https://central.example"
-$env:SIN_MAILBOX_DIR = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\modSettings\FS25SiNNetworkLocal"
+$env:SIN_MAILBOX_DIR = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\modSettings\FS25_SiN_NetworkLocal"
 $env:SIN_POLL_INTERVAL = "2"
 
 # Preferred headless-server bootstrap; no GIANTS interactive console is needed.
@@ -171,7 +171,7 @@ On the persistent `SiN-FS25-01` VM:
 
 ```powershell
 $env:SIN_BACKEND_URL = "http://192.168.1.185:8080"
-$env:SIN_MAILBOX_DIR = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\modSettings\FS25SiNNetworkLocal"
+$env:SIN_MAILBOX_DIR = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\modSettings\FS25_SiN_NetworkLocal"
 $env:SIN_POLL_INTERVAL = "2"
 python -m fs25_network_core.agent --watch
 ```
@@ -250,7 +250,7 @@ python -m fs25_network_core.server_api
 
 # dedicated-server VM
 $env:SIN_BACKEND_URL = "http://192.168.1.185:8080"
-$env:SIN_MAILBOX_DIR = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\modSettings\FS25SiNNetworkLocal"
+$env:SIN_MAILBOX_DIR = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\modSettings\FS25_SiN_NetworkLocal"
 python -m fs25_network_core.agent --watch
 ```
 

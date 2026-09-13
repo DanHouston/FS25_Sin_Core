@@ -14,8 +14,8 @@ community application approval and farm authorization; it grants neither a
 farm nor manager permissions. The server key is internal metadata and is not a
 Discord command argument.
 
-New Discord users first use `/apply nickname:<name> farm_name:<farm>` in
-`#sin-apply`. This creates only a community application; it grants no game,
+New Discord users first use `/apply nickname:<name> farm_name:<farm>` in any
+channel in the configured guild. This creates only a community application; it grants no game,
 banking, farm, or wallet access. Network Admins review it in `#sin-applications`
 with `/application_pending`, `/application_approve`, or `/application_deny`.
 Approval sets the server nickname to `nickname | farm name` and grants the SiN
@@ -27,8 +27,8 @@ a member optionally use the separate `/farm_request` workflow below.
 
 | Channel | ID | Commands / purpose |
 | --- | --- | --- |
-| #link-account | 1547411943311024240 | /farm_request, /farm_status; private responses |
-| #bank | 1547412275462406205 | /balance, /deposit, /withdraw; private responses |
+| #link-account | 1547411943311024240 | Legacy organization channel; member responses are private |
+| #bank | 1547412275462406205 | Legacy organization channel; member responses are private |
 | #farm-approvals | 1547412673069584444 | Staff review, roster, approval, rejection, role changes |
 | #audit-log | 1547412783564324956 | Reserved for future audit publishing |
 | #bridge-alerts | 1547412813390291044 | Reserved for future bridge alerts |
@@ -39,15 +39,17 @@ per-server chat/voice. No automatic channel creation or background posting occur
 The bot responds privately to commands. Staff inspects the request queue with
 /farm_requests; requests are not automatically posted to a channel.
 
-The existing #link-account channel can keep its name; its purpose is now farm
-requests and status. Role and channel IDs live in `discord.json`.
+The existing #link-account and #bank channels can keep their names for
+organization, but member self-service commands are no longer restricted to
+them. Role and channel IDs live in `discord.json`.
 
 ## Authorization boundaries
 
 Network Admin role `1547417095589994576` is authorized in guild
 `1547411827539837081`. `DISCORD_OPERATOR_ROLE_IDS`, when set, overrides the role
 list; an empty value denies all operators. Every staff command verifies the role
-and guild at execution. Every command enforces its configured channel ID.
+and guild at execution. Staff commands enforce their configured channel ID;
+member self-service commands only require the configured guild.
 
 Under Discord Server Settings → Integrations → FS25 Network, allow the Network
 Admin role to use all `farm_*` staff commands. Their default visibility requires
@@ -67,7 +69,7 @@ See [Discord application commands](https://docs.discord.com/developers/interacti
    legacy local mailbox bridge is the only component that may explicitly use
    **fs25_network_local_test** for backward-compatible local testing.
    The Atlas database user must have access to this test database.
-3. In #link-account, submit:
+3. In any channel in the configured guild, submit:
 
    `/farm_request server:local-dev starting_field:<your field>`
 
@@ -102,7 +104,7 @@ use `/farm_assign`; it cannot create identities or bypass onboarding.
 ## Snapshot configuration and trust
 
 The local adapter reads the game's redirected Documents directory at
-`My Games/FarmingSimulator2025/modSettings/FS25SiNNetworkLocal/snapshot.xml`.
+`My Games/FarmingSimulator2025/modSettings/FS25_SiN_NetworkLocal/snapshot.xml`.
 Set `FS25_LOCAL_SNAPSHOT` in `.env` to the exact path if using a custom profile.
 Snapshots must be from the game, be less than thirty seconds old, and match the
 configured save slot. Keep the game simulation running during approval.

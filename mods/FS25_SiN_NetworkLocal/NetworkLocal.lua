@@ -1,5 +1,11 @@
--- Local development telemetry only. No credentials or gameplay mutations.
+-- SiN server-side mailbox transport and authority integration. No direct HTTP.
 FS25SiNNetworkLocal = {}
+local NETWORKLOCAL_MAILBOX_NAME = "FS25_SiN_NetworkLocal"
+
+function FS25SiNNetworkLocal:shortIdentity(value)
+    local text = tostring(value or "")
+    return string.len(text) > 8 and string.sub(text, 1, 8) .. "..." or text
+end
 
 function FS25SiNNetworkLocal:loadMap()
     self.elapsed = 0
@@ -7,7 +13,7 @@ function FS25SiNNetworkLocal:loadMap()
     self.eventSequence = 0
     self.failed = false
     self.session = getDate("%Y%m%d%H%M%S")
-    self.directory = getUserProfileAppPath() .. "modSettings/FS25SiNNetworkLocal/"
+    self.directory = getUserProfileAppPath() .. "modSettings/" .. NETWORKLOCAL_MAILBOX_NAME .. "/"
     createFolder(getUserProfileAppPath() .. "modSettings/")
     createFolder(self.directory)
     self.commandDirectory = self.directory .. "permission-commands/"
@@ -150,7 +156,7 @@ function FS25SiNNetworkLocal:enforceFarmChange(player)
         manager = true
     end
     Logging.info("[SiN Authorization] farm change uniqueUserId=%s farmId=%s authorizedManager=%s resultingManager=%s",
-        tostring(user:getUniqueUserId()), tostring(farm.farmId), tostring(authorized), tostring(manager))
+        self:shortIdentity(user:getUniqueUserId()), tostring(farm.farmId), tostring(authorized), tostring(manager))
 end
 
 function FS25SiNNetworkLocal:isDedicatedServerUser(user, farm)
@@ -226,7 +232,7 @@ function FS25SiNNetworkLocal:onPlayerConnected(user, connection, farmId)
     self.connectedPlayers[uniqueId] = record
     self.previousPlayers[uniqueId] = {name=record.name, user_id=record.user_id, farm_id=record.farm_id}
     if not wasTracked then
-        Logging.info("[SiN Player] connected uniqueUserId=%s userId=%s", uniqueId, tostring(record.user_id))
+        Logging.info("[SiN Player] connected uniqueUserId=%s userId=%s", self:shortIdentity(uniqueId), tostring(record.user_id))
         self:emitServerEvent("player_connected", {unique_user_id=uniqueId, user_id=record.user_id,
             farm_id=record.farm_id, display_name=record.name})
     end
@@ -259,7 +265,7 @@ function FS25SiNNetworkLocal:onPlayerDisconnected(userId)
     self.connectedPlayers[uniqueId] = nil
     self.previousPlayers[uniqueId] = nil
     self.registrationPromptAt[uniqueId] = nil
-    Logging.info("[SiN Player] disconnected uniqueUserId=%s userId=%s", uniqueId, matchId)
+    Logging.info("[SiN Player] disconnected uniqueUserId=%s userId=%s", self:shortIdentity(uniqueId), matchId)
     self:emitServerEvent("player_disconnected", {unique_user_id=uniqueId, user_id=record.user_id,
         farm_id=record.farm_id, display_name=record.name})
 end
@@ -751,7 +757,7 @@ function FS25SiNNetworkLocal:processNameAlignment(command, operationId)
         end
     end
     if matched == nil then
-        Logging.info("[SiN Identity] uniqueUserId=%s canonicalName=%s nameAligned=false reason=not_connected", tostring(uniqueId), tostring(canonical))
+        Logging.info("[SiN Identity] uniqueUserId=%s canonicalName=%s nameAligned=false reason=not_connected", self:shortIdentity(uniqueId), tostring(canonical))
         command:delete()
         return
     end
@@ -764,10 +770,10 @@ function FS25SiNNetworkLocal:processNameAlignment(command, operationId)
     end
     if observed ~= canonical and player ~= nil and g_currentMission.setPlayerNickname ~= nil then
         local ok, errorMessage = pcall(g_currentMission.setPlayerNickname, g_currentMission, player, canonical, matched:getId())
-        if not ok then Logging.error("[SiN Identity] uniqueUserId=%s nameAligned=false error=%s", tostring(uniqueId), tostring(errorMessage)) end
+        if not ok then Logging.error("[SiN Identity] uniqueUserId=%s nameAligned=false error=%s", self:shortIdentity(uniqueId), tostring(errorMessage)) end
     end
     local aligned = matched:getNickname() == canonical
-    Logging.info("[SiN Identity] uniqueUserId=%s observedName=%s canonicalName=%s nameAligned=%s", tostring(uniqueId), tostring(observed), tostring(canonical), tostring(aligned))
+    Logging.info("[SiN Identity] uniqueUserId=%s observedName=%s canonicalName=%s nameAligned=%s", self:shortIdentity(uniqueId), tostring(observed), tostring(canonical), tostring(aligned))
     command:delete()
 end
 
@@ -841,7 +847,7 @@ function FS25SiNNetworkLocal:restoreApprovedManagers()
         if farm ~= nil and farm:isUserFarmManager(userId) and authorized[tostring(user:getUniqueUserId())] ~= farm.farmId then
             farm:demoteUser(userId)
             Logging.info("[SiN Authorization] farm switch uniqueUserId=%s farmId=%s authorizedManager=false resultingManager=false",
-                tostring(user:getUniqueUserId()), tostring(farm.farmId))
+                self:shortIdentity(user:getUniqueUserId()), tostring(farm.farmId))
         end
     end
     if authority == nil then return end
@@ -860,7 +866,7 @@ function FS25SiNNetworkLocal:restoreApprovedManagers()
         if farm ~= nil and currentFarm == farm and not farm:isUserFarmManager(userId) then
             farm:promoteUser(userId)
             Logging.info("[SiN Authorization] farm switch uniqueUserId=%s farmId=%s authorizedManager=true resultingManager=true",
-                tostring(playerId), tostring(farmId))
+                self:shortIdentity(playerId), tostring(farmId))
         end
         index = index + 1
     end
@@ -899,29 +905,27 @@ function FS25SiNNetworkLocal:exportSnapshot()
         for _, user in ipairs(users) do
             local uniqueId = user:getUniqueUserId()
             if uniqueId ~= nil and tostring(uniqueId) ~= "" then
-                local key = string.format("networkLocal.players.player(%d)", playerIndex)
-                xml:setString(key .. "#uniqueId", tostring(uniqueId))
-                xml:setString(key .. "#name", user:getNickname() or "")
-                xml:setInt(key .. "#userId", user:getId())
                 local userFarm = g_farmManager:getFarmByUserId(user:getId())
-                xml:setInt(key .. "#farmId", userFarm ~= nil and userFarm.farmId or 0)
-                xml:setBool(key .. "#connected", true)
-                local identityKey = tostring(uniqueId)
-                currentPlayers[identityKey] = {name=user:getNickname() or "", user_id=user:getId(),
-                    farm_id=userFarm ~= nil and userFarm.farmId or 0}
                 local pseudo = self:isDedicatedServerUser(user, userFarm)
-                if pseudo then
-                    currentPlayers[identityKey] = nil
-                    xml:setBool(key .. "#connected", false)
+                if not pseudo then
+                    local key = string.format("networkLocal.players.player(%d)", playerIndex)
+                    xml:setString(key .. "#uniqueId", tostring(uniqueId))
+                    xml:setString(key .. "#name", user:getNickname() or "")
+                    xml:setInt(key .. "#userId", user:getId())
+                    xml:setInt(key .. "#farmId", userFarm ~= nil and userFarm.farmId or 0)
+                    xml:setBool(key .. "#connected", true)
+                    local identityKey = tostring(uniqueId)
+                    currentPlayers[identityKey] = {name=user:getNickname() or "", user_id=user:getId(),
+                        farm_id=userFarm ~= nil and userFarm.farmId or 0}
+                    self.identityNames[identityKey] = user:getNickname() or ""
+                    local identityValue = tostring(user:getNickname() or "") .. ":" .. tostring(userFarm ~= nil and userFarm.farmId or 0)
+                    if self.identitySeen[identityKey] ~= identityValue then
+                        Logging.info("[SiN Identity] user=%s userId=%s uniqueUserId=%s farmId=%s connected=true",
+                            tostring(user:getNickname() or ""), tostring(user:getId()), self:shortIdentity(identityKey), tostring(userFarm ~= nil and userFarm.farmId or 0))
+                        self.identitySeen[identityKey] = identityValue
+                    end
+                    playerIndex = playerIndex + 1
                 end
-                self.identityNames[identityKey] = user:getNickname() or ""
-                local identityValue = tostring(user:getNickname() or "") .. ":" .. tostring(userFarm ~= nil and userFarm.farmId or 0)
-                if self.identitySeen[identityKey] ~= identityValue then
-                    Logging.info("[SiN Identity] user=%s userId=%s uniqueUserId=%s farmId=%s connected=true",
-                        tostring(user:getNickname() or ""), tostring(user:getId()), identityKey, tostring(userFarm ~= nil and userFarm.farmId or 0))
-                    self.identitySeen[identityKey] = identityValue
-                end
-                playerIndex = playerIndex + 1
             end
         end
     end

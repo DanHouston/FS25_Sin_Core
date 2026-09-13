@@ -158,6 +158,18 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
         except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
             _json_response(self, 400, {"error": "malformed_event"})
             return
+        # New Agents send the credential through the authenticated header so
+        # it is not duplicated in event JSON. Accept the older body field
+        # during rollout for already-deployed Agents.
+        header_server_key = self.headers.get("X-SiN-Server-Key")
+        header_credential = self.headers.get("Authorization", "")
+        if header_credential.startswith("Bearer "):
+            header_credential = header_credential[7:]
+        if header_server_key or header_credential:
+            if not isinstance(event, dict) or event.get("server_key") != header_server_key or not header_credential:
+                _json_response(self, 401, {"error": "invalid_server_authentication"})
+                return
+            event["server_credential"] = header_credential
         try:
             result = self.event_processor.process(event)
         except EventAuthenticationError:

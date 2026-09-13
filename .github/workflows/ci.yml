@@ -37,8 +37,11 @@ jobs:
               assert actual == manifest["agent_sha256" if name == "sin-agent.zip" else "networklocal_sha256"]
           assert (root / "Update-SiN.ps1").is_file()
           assert hashlib.sha256((root / "Update-SiN.ps1").read_bytes()).hexdigest() == manifest["updater_sha256"]
+          assert (root / "Update-SiN-Client.ps1").is_file()
+          assert hashlib.sha256((root / "Update-SiN-Client.ps1").read_bytes()).hexdigest() == manifest["client_updater_sha256"]
           checksums = (root / "SHA256SUMS.txt").read_text()
           assert "Update-SiN.ps1" in checksums
+          assert "Update-SiN-Client.ps1" in checksums
           with ZipFile(root / "sin-agent.zip") as archive:
               assert set(archive.namelist()) == {"fs25_network_core/__init__.py", "fs25_network_core/agent.py"}
           with ZipFile(root / "FS25_SiN_NetworkLocal.zip") as archive:

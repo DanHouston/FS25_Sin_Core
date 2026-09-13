@@ -93,20 +93,30 @@ class AuthorizationManager:
 
     def create_registration_code(self, server_id, save_id, unique_user_id, ttl_seconds=900):
         now = datetime.now(timezone.utc)
-        active = self.db.registration_codes.find_one({
-            "server_id": server_id, "save_id": save_id, "fs25_unique_user_id": unique_user_id,
-            "state": "pending", "expires_at": {"$gt": now}})
+        scope = {"server_id": server_id, "save_id": save_id,
+                 "fs25_unique_user_id": unique_user_id, "state": "pending"}
+        active = self.db.registration_codes.find_one(dict(scope, expires_at={"$gt": now}))
         if active and active.get("issued_at") is not None:
             token = self._registration_code(server_id, save_id, unique_user_id, active["issued_at"])
             return token, active["expires_at"]
         issued_at = int(now.timestamp())
         token = self._registration_code(server_id, save_id, unique_user_id, issued_at)
         token_hash = hashlib.sha256(token.encode()).hexdigest()
-        self.db.registration_codes.update_one(
-            {"server_id": server_id, "save_id": save_id, "fs25_unique_user_id": unique_user_id, "state": "pending"},
-            {"$set": {"token_hash": token_hash,
-                       "expires_at": now + timedelta(seconds=ttl_seconds), "updated_at": now},
-             "$setOnInsert": {"_id": key(server_id, save_id, unique_user_id), "issued_at": issued_at}}, upsert=True)
+        values = {"token_hash": token_hash, "expires_at": now + timedelta(seconds=ttl_seconds), "updated_at": now}
+        pending = self.db.registration_codes.find_one(scope)
+        if pending and pending.get("expires_at") is not None and pending["expires_at"] <= now:
+            # This is a replacement issuance, not an update to an active
+            # pending record. Refresh issued_at here so future status polls
+            # derive the same token hash that was stored for the new window.
+            values["issued_at"] = issued_at
+            self.db.registration_codes.update_one(
+                {"_id": pending["_id"], "state": "pending", "expires_at": pending["expires_at"]},
+                {"$set": values})
+        else:
+            self.db.registration_codes.update_one(
+                scope,
+                {"$set": values,
+                 "$setOnInsert": {"_id": key(server_id, save_id, unique_user_id), "issued_at": issued_at}}, upsert=True)
         return token, now + timedelta(seconds=ttl_seconds)
 
     def registration_request(self, server_id, save_id, unique_user_id, observed_name=None, transient_user_id=None):
