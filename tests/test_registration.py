@@ -221,6 +221,17 @@ class RegistrationTests(unittest.TestCase):
         self.assertNotRegex(source, r"setLandOwnership\([^\n]*,[^\n]*,[^\n]*\)")
         self.assertIn('operationType == "ensure_farm" or operationType == "provision_farm"', source)
 
+    def test_networklocal_rejects_malformed_farm_visual_state_before_operations(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_NetworkLocal" / "NetworkLocal.lua").read_text(
+            encoding="utf-8")
+        self.assertIn("function FS25SiNNetworkLocal:isFarmVisualStateValid(farm)", source)
+        self.assertIn("farm.color < 1", source)
+        self.assertIn("farm.getIconSliceId", source)
+        self.assertIn("farm.getIconUVs", source)
+        self.assertIn("self:isFarmVisualStateValid(farm)", source)
+        self.assertIn('error("farm visual state invalid: " .. tostring(visualStateError))', source)
+        self.assertIn("invalid visual state farmId=", source)
+
     def test_networklocal_refreshes_required_registration_on_heartbeat_reconciliation(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_NetworkLocal" / "NetworkLocal.lua").read_text(
             encoding="utf-8"

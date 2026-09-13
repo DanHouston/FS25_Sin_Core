@@ -49,6 +49,7 @@ function FS25SiNNetworkLocal:loadMap()
     self.clockMode = "synced"
     self.clockPolicyGeneratedAt = nil
     self.clockHardFallbackLogged = false
+    self.invalidFarmVisualStateLogged = {}
     self:installLifecycleHooks()
     addConsoleCommand("sinPermissions", "List FS25 farm permission keys", "consoleCommandPermissions", self)
     addConsoleCommand("sinPair", "Pair this server with a SiN pairing code", "consoleCommandPair", self)
@@ -427,6 +428,7 @@ function FS25SiNNetworkLocal:update(dt)
         return
     end
     self.elapsed = 0
+    self:validateLoadedFarmVisualStates()
     self:processRegistrationResponses()
     if not self.systemFarmDiagnosticLogged and g_farmManager ~= nil then
         local systemFarm = g_farmManager:getFarmById(2)
@@ -759,6 +761,54 @@ function FS25SiNNetworkLocal:findFarmByName(name)
     return found, nil
 end
 
+-- FarmManager:createFarm() persists a numeric color index.  The FS25 map
+-- hotspot code later resolves the farm color/icon from that index, so do not
+-- allow a malformed farm to proceed into a SiN operation.  There is no
+-- documented Farm color setter in the FS25 API; this is deliberately a
+-- validation guard, not an in-place save repair.
+function FS25SiNNetworkLocal:isFarmVisualStateValid(farm)
+    if farm == nil then return false, "farm is missing" end
+    local farmId = tonumber(farm.farmId)
+    if farmId == nil or farmId <= 0 or farmId >= 255 then
+        return false, "farm ID is outside the multiplayer range"
+    end
+    if farm.color ~= nil and (type(farm.color) ~= "number" or farm.color < 1) then
+        return false, "farm color index is invalid"
+    end
+    if farm.getColor == nil or farm.getIconSliceId == nil or farm.getIconUVs == nil then
+        return false, "farm visual API is unavailable"
+    end
+    local colorOk, color = pcall(farm.getColor, farm)
+    if not colorOk or type(color) ~= "table"
+        or type(color[1]) ~= "number" or type(color[2]) ~= "number" or type(color[3]) ~= "number" then
+        return false, "farm color cannot be resolved"
+    end
+    local sliceOk, sliceId = pcall(farm.getIconSliceId, farm)
+    if not sliceOk or sliceId == nil or tostring(sliceId) == "" then
+        return false, "farm icon slice cannot be resolved"
+    end
+    local uvsOk, uvs = pcall(farm.getIconUVs, farm)
+    if not uvsOk or type(uvs) ~= "table" then
+        return false, "farm icon UVs cannot be resolved"
+    end
+    return true, nil
+end
+
+function FS25SiNNetworkLocal:validateLoadedFarmVisualStates()
+    if g_farmManager == nil then return end
+    for farmId = 1, 254 do
+        local farm = g_farmManager:getFarmById(farmId)
+        if farm ~= nil then
+            local valid, reason = self:isFarmVisualStateValid(farm)
+            if not valid and not self.invalidFarmVisualStateLogged[tostring(farmId)] then
+                self.invalidFarmVisualStateLogged[tostring(farmId)] = true
+                Logging.error("[SiN Farm] invalid visual state farmId=%s name=%s reason=%s; refusing farm operations",
+                    tostring(farmId), tostring(farm.name or ""), tostring(reason))
+            end
+        end
+    end
+end
+
 function FS25SiNNetworkLocal:processFarmProvisionCommand(command, operationId, operationType)
     local prefix = "[SiN Farm Operation]"
     local serverId = command:getString("networkLocalCommand#server_id")
@@ -785,6 +835,8 @@ function FS25SiNNetworkLocal:processFarmProvisionCommand(command, operationId, o
             if farm == nil then error("farm creation did not produce a discoverable farm") end
         end
         farmId = farm.farmId
+        local visualStateValid, visualStateError = self:isFarmVisualStateValid(farm)
+        if not visualStateValid then error("farm visual state invalid: " .. tostring(visualStateError)) end
         if operationType == "provision_farm" then
             if g_farmlandManager == nil then error("farmland manager unavailable") end
             if farmlandId == nil or not g_farmlandManager:getIsValidFarmlandId(farmlandId) then error("invalid farmland ID") end
