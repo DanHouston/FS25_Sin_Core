@@ -102,10 +102,8 @@ a separate policy and game integration.
    For a local replica set, explicitly use
    `MONGODB_URI=mongodb://localhost:27017/?replicaSet=rs0` instead. There is no
    automatic localhost fallback.
-3. `servers.json` contains `local-dev`, configured for test save slot 1. Central
-   services use `MONGODB_DATABASE` (normally `fs25_network`). The legacy local
-   mailbox bridge may explicitly use its separate `fs25_network_local_test` database.
-   When ready,
+3. `servers.json` contains `local-dev`, configured for test save slot 1. Its
+   onboarding records use a separate `fs25_network_local_test` database. When ready,
    add production entries using `servers.example.json` as a template,
    configure real snapshot paths and unique save IDs, and keep
    `withdrawals_enabled` false until delivery works.

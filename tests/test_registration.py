@@ -214,18 +214,45 @@ class RegistrationTests(unittest.TestCase):
     def test_networklocal_farm_operations_use_verified_authoritative_apis(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_NetworkLocal" / "NetworkLocal.lua").read_text(
             encoding="utf-8")
-        self.assertIn("g_farmManager:createFarm(farmName, 1, \"\", nil)", source)
+        self.assertIn("g_farmManager:createFarm(farmName, colorIndex, \"\", nil)", source)
+        self.assertNotIn("g_farmManager:createFarm(farmName, 1, \"\", nil)", source)
         self.assertNotIn("g_farmManager:createFarm(farmName, 0, \"\", nil)", source)
+        self.assertIn("type(Farm.COLORS) ~= \"table\"", source)
+        self.assertIn("nextAvailableFarmId", source)
+        self.assertIn("selectFarmColor(preferredFarmId)", source)
+        self.assertIn("not used[preferredFarmId]", source)
         self.assertIn("g_farmManager:getFarmById(farmId)", source)
         self.assertIn("g_farmlandManager:setLandOwnership(farmlandId, farmId)", source)
+        self.assertIn("FarmlandStateEvent.new(farmlandId, farmId, 0)", source)
+        self.assertIn("g_server:broadcastEvent", source)
         self.assertNotRegex(source, r"setLandOwnership\([^\n]*,[^\n]*,[^\n]*\)")
         self.assertIn('operationType == "ensure_farm" or operationType == "provision_farm"', source)
+
+    def test_networklocal_color_policy_never_mutates_existing_farm_colors(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_NetworkLocal" / "NetworkLocal.lua").read_text(
+            encoding="utf-8")
+        selector = source[source.index("function FS25SiNNetworkLocal:selectFarmColor") :]
+        selector = selector[:selector.index("function FS25SiNNetworkLocal:nextAvailableFarmId")]
+        self.assertIn("used[farm.color] = true", selector)
+        self.assertIn("return preferredFarmId, nil", selector)
+        self.assertIn("return nil, \"no unused FS25 farm color is available\"", selector)
+        self.assertNotIn("setColor", selector)
+
+    def test_networklocal_land_receipt_requires_client_replication_event(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_NetworkLocal" / "NetworkLocal.lua").read_text(
+            encoding="utf-8")
+        helper = source[source.index("function FS25SiNNetworkLocal:setAndReplicateLandOwnership") :]
+        helper = helper[:helper.index("function FS25SiNNetworkLocal:processFarmProvisionCommand")]
+        self.assertIn("getFarmlandOwner(farmlandId)", helper)
+        self.assertIn("FarmlandStateEvent.new(farmlandId, farmId, 0)", helper)
+        self.assertIn("farmland replication event is unavailable", helper)
 
     def test_networklocal_rejects_malformed_farm_visual_state_before_operations(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_NetworkLocal" / "NetworkLocal.lua").read_text(
             encoding="utf-8")
         self.assertIn("function FS25SiNNetworkLocal:isFarmVisualStateValid(farm)", source)
         self.assertIn("farm.color < 1", source)
+        self.assertIn("Farm.COLORS[farm.color]", source)
         self.assertIn("farm.getIconSliceId", source)
         self.assertIn("farm.getIconUVs", source)
         self.assertIn("self:isFarmVisualStateValid(farm)", source)

@@ -13,6 +13,38 @@ from xml.etree import ElementTree
 LOG = logging.getLogger(__name__)
 
 
+class MailboxWriteError(OSError):
+    """A central request succeeded but its local mailbox publication failed."""
+
+
+def _atomic_replace(temporary, destination, attempts=5, initial_backoff=0.05):
+    """Atomically publish a mailbox file, tolerating a short Windows lock race."""
+    delay = initial_backoff
+    try:
+        for attempt in range(attempts):
+            try:
+                temporary.replace(destination)
+                return
+            except PermissionError as error:
+                # FS25 can briefly hold a mailbox file while enumerating or
+                # opening it.  Retry only the Windows-style access-denied
+                # replacement case; all other failures remain immediate.
+                if not (os.name == "nt" or getattr(error, "winerror", None) == 5):
+                    raise
+                if attempt == attempts - 1:
+                    raise
+                time.sleep(delay)
+                delay *= 2
+    except Exception:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            LOG.warning("could not remove temporary mailbox file after failed atomic replace")
+        raise
+
+
 class PairingAgent:
     def __init__(self, mailbox_dir, backend_url, opener=None):
         self.directory = Path(mailbox_dir)
@@ -89,7 +121,7 @@ class PairingAgent:
             key: str(value).lower() if isinstance(value, bool) else str(value)
             for key, value in result.items() if value is not None})
         ElementTree.ElementTree(root).write(temporary, encoding="utf-8", xml_declaration=True)
-        temporary.replace(destination)
+        _atomic_replace(temporary, destination)
 
     def _binding(self):
         root = ElementTree.parse(self.directory / "serverBinding.xml").getroot()
@@ -183,14 +215,14 @@ class PairingAgent:
                                            **{key: str(value) for key, value in values.items() if value is not None})
                 temporary = destination.with_suffix(".tmp")
                 ElementTree.ElementTree(root).write(temporary, encoding="utf-8", xml_declaration=True)
-                temporary.replace(destination)
+                _atomic_replace(temporary, destination)
             delivered.append(operation_id)
         manifest = ElementTree.Element("permissionCommands", schemaVersion="1")
         for operation_id in delivered:
             ElementTree.SubElement(manifest, "command", operationId=operation_id)
         temporary = self.commands / "manifest.tmp"
         ElementTree.ElementTree(manifest).write(temporary, encoding="utf-8", xml_declaration=True)
-        temporary.replace(self.commands / "manifest.xml")
+        _atomic_replace(temporary, self.commands / "manifest.xml")
         return delivered
 
     def process_receipts_once(self):
@@ -243,7 +275,7 @@ class PairingAgent:
             destination = self.directory / "manager-authority.xml"
             temporary = destination.with_suffix(".tmp")
             ElementTree.ElementTree(root).write(temporary, encoding="utf-8", xml_declaration=True)
-            temporary.replace(destination)
+            _atomic_replace(temporary, destination)
             return True
         except (ElementTree.ParseError, ValueError, OSError, HTTPError, URLError, TimeoutError, RuntimeError, json.JSONDecodeError):
             return False
@@ -271,7 +303,7 @@ class PairingAgent:
         root = ElementTree.Element("clockPolicy", **{key: str(value).lower() if isinstance(value, bool) else str(value)
                                                        for key, value in policy.items()})
         ElementTree.ElementTree(root).write(temporary, encoding="utf-8", xml_declaration=True)
-        temporary.replace(destination)
+        _atomic_replace(temporary, destination)
 
     def process_clock_once(self):
         try:
@@ -296,14 +328,17 @@ class PairingAgent:
         temporary = destination.with_suffix(".tmp")
         root = ElementTree.Element("serverPairingResponse", serverKey=server_key, credential=credential)
         ElementTree.ElementTree(root).write(temporary, encoding="utf-8", xml_declaration=True)
-        temporary.replace(destination)
+        _atomic_replace(temporary, destination)
 
     def pair_once(self, pairing_code):
         """Pair directly from the CLI and write the response consumed by Lua."""
         if not isinstance(pairing_code, str) or not pairing_code.strip():
             raise ValueError("pairing code is required")
         server_key, credential = self._pair(pairing_code.strip().upper())
-        self._write_response(server_key, credential)
+        try:
+            self._write_response(server_key, credential)
+        except OSError as error:
+            raise MailboxWriteError("pairing response mailbox write failed") from error
         return server_key
 
     def process_once(self):
@@ -315,18 +350,26 @@ class PairingAgent:
                 pairing_code = root.get("code") if root.tag == "serverPairingRequest" else None
                 if not isinstance(pairing_code, str) or not pairing_code.strip():
                     raise ValueError("missing pairing code")
-                server_key, credential = self._pair(pairing_code.strip().upper())
-                self._write_response(server_key, credential)
-                path.unlink()
+                try:
+                    server_key, credential = self._pair(pairing_code.strip().upper())
+                except (HTTPError, URLError, TimeoutError, RuntimeError, OSError, json.JSONDecodeError):
+                    LOG.warning("pairing API unavailable or rejected request; will retry")
+                    continue
+                try:
+                    self._write_response(server_key, credential)
+                except OSError:
+                    LOG.warning("pairing response mailbox write failed; will retry")
+                    continue
+                try:
+                    path.unlink()
+                except OSError:
+                    LOG.warning("pairing request cleanup failed; will retry")
+                    continue
                 processed.append(path.name)
                 LOG.info("pairing request completed; server binding response queued")
             except (ElementTree.ParseError, ValueError):
                 self._quarantine(path)
                 LOG.warning("malformed pairing request quarantined")
-            except (HTTPError, URLError, TimeoutError, RuntimeError, json.JSONDecodeError, OSError):
-                # Leave the request in place so a transient API/network failure
-                # can be retried on the next poll.
-                LOG.warning("pairing API unavailable or rejected request; will retry")
         return processed
 
     def process_events_once(self):
@@ -444,10 +487,17 @@ def main():
             print(json.dumps({"processed": agent.process_once()}))
         return 0
     except (HTTPError, URLError, TimeoutError):
-        print("Pairing failed: central API is unreachable or rejected the request", file=__import__("sys").stderr)
+        if args.pair is not None:
+            print("Pairing failed: central API is unreachable or rejected the request", file=__import__("sys").stderr)
+        else:
+            print("Agent mailbox processing failed: central API is unreachable or rejected the request", file=__import__("sys").stderr)
+        return 1
+    except MailboxWriteError as error:
+        print(f"Agent mailbox write failed: {error}", file=__import__("sys").stderr)
         return 1
     except (RuntimeError, ValueError, OSError, json.JSONDecodeError) as error:
-        print(f"Pairing failed: {error}", file=__import__("sys").stderr)
+        prefix = "Pairing failed" if args.pair is not None else "Agent mailbox processing failed"
+        print(f"{prefix}: {error}", file=__import__("sys").stderr)
         return 1
 
 

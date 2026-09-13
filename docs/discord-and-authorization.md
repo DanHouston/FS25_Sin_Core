@@ -19,9 +19,13 @@ field choice; it never creates a farm or grants authority. Staff uses
 `/farm_approve` to queue a `provision_farm` operation. NetworkLocal creates or
 adopts the exact named farm, verifies that the requested field is unowned, and
 calls `g_farmlandManager:setLandOwnership(farmlandId, farmId)` only when safe.
+It then broadcasts the supported `FarmlandStateEvent` so connected clients
+receive the same ownership state used by the authoritative server snapshot.
 The receipt must prove the actual farm and field owner before SiN queues the
-requester's manager permission. Until that permission receipt is applied, the
-request remains `awaiting_manager`; only then does it become `active`.
+requester's manager permission. The persisted pending manager authorization is
+delivered to NetworkLocal before its permission receipt is acknowledged; until
+that receipt is applied, the request remains `awaiting_manager`, and only then
+does it become `active`.
 
 `/farm_status` takes no server argument and resolves the caller's latest request.
 `/server_reconcile server:<friendly selection>` safely re-queues missing system
@@ -168,7 +172,8 @@ After `/farm_approve`, the backend writes an idempotent
 `operation_type=provision_farm` command into the existing permission mailbox.
 The trusted mod validates or creates the exact named farm and farmland state, calls the verified
 `g_farmlandManager:setLandOwnership(farmlandId, farmId)` API only for
-unowned land, verifies the resulting owner, and writes a matching receipt.
+unowned land, broadcasts `FarmlandStateEvent` to replicate the change, verifies
+the resulting authoritative owner, and writes a matching receipt.
 Already-owned target land is acknowledged idempotently; land owned by another
 farm is rejected and never transferred. The older `assign_farmland` operation
 remains supported for compatible existing records. Authorization remains

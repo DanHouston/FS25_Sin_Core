@@ -5,3 +5,4 @@ atlas-credentials.env
 .test-deps/
 dist/
 local-test/
+deployment_notes.txt

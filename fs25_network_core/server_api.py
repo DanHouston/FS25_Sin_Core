@@ -85,7 +85,16 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/server/manager-authority":
                 managers = self.event_processor.authorization.db.memberships.find({
                     "server_id": record["server_key"], "save_id": save_key,
-                    "state": "active", "desired_role": "farm_manager", "applied_role": "farm_manager"})
+                    # A pending manager assignment is already a persisted SiN
+                    # authorization created only after the game confirmed the
+                    # exact farm and starting farmland.  The game must receive
+                    # that desired authority before it can produce the
+                    # permission receipt that transitions the request active.
+                    # Filtering only applied memberships creates a deadlock:
+                    # empty authority XML prevents the game from applying the
+                    # pending job in the first place.
+                    "state": {"$in": ["pending", "active"]},
+                    "desired_role": "farm_manager"})
                 _json_response(self, 200, {"save_key": save_key, "managers": [
                     {"game_player_id": row["game_player_id"], "farm_id": row["farm_id"]} for row in managers]})
                 return

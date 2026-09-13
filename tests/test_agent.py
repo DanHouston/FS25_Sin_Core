@@ -172,6 +172,87 @@ class AgentTests(unittest.TestCase):
             self.assertIn('canonical_name="SiN Harvest"', command.read_text(encoding="utf-8"))
             self.assertNotIn("pymongo", "".join(path.read_text(encoding="utf-8") for path in [Path(agent_module.__file__)]))
 
+    def test_permission_manifest_replace_retries_transient_windows_access_denied(self):
+        class OperationResponse:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self):
+                return json.dumps({"operations": [{
+                    "operation_id": "op-retry", "operation_type": "ensure_farm",
+                    "save_key": "main", "payload": {"canonical_name": "SiN Harvest"}
+                }]}).encode()
+
+        opener = MagicMock(return_value=OperationResponse())
+        original_replace = Path.replace
+        replace_attempts = {"manifest": 0}
+
+        def replace(path, destination):
+            if path.name == "manifest.tmp":
+                replace_attempts["manifest"] += 1
+                if replace_attempts["manifest"] < 3:
+                    raise PermissionError(5, "Access is denied")
+            return original_replace(path, destination)
+
+        with tempfile.TemporaryDirectory() as folder, patch.object(Path, "replace", replace), \
+                patch.object(agent_module.time, "sleep") as sleep, patch.object(agent_module.os, "name", "nt"):
+            root = Path(folder)
+            (root / "serverBinding.xml").write_text(
+                '<serverBinding serverKey="server" credential="secret"/>', encoding="utf-8")
+            (root / "snapshot.xml").write_text(
+                '<networkLocal source="game" savegameIndex="1"/>', encoding="utf-8")
+            agent = PairingAgent(root, "https://central", opener)
+            self.assertEqual(agent.process_operations_once(), ["op-retry"])
+            self.assertEqual(replace_attempts["manifest"], 3)
+            self.assertTrue((root / "permission-commands/manifest.xml").exists())
+            self.assertFalse((root / "permission-commands/manifest.tmp").exists())
+            self.assertEqual(sleep.call_count, 2)
+
+    def test_permission_manifest_permanent_failure_is_clear_and_cleans_temp(self):
+        class OperationResponse:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self):
+                return json.dumps({"operations": [{
+                    "operation_id": "op-fail", "operation_type": "ensure_farm",
+                    "save_key": "main", "payload": {}
+                }]}).encode()
+
+        opener = MagicMock(return_value=OperationResponse())
+        original_replace = Path.replace
+
+        def replace(path, destination):
+            if path.name == "manifest.tmp":
+                raise PermissionError(5, "Access is denied")
+            return original_replace(path, destination)
+
+        with tempfile.TemporaryDirectory() as folder, patch.object(Path, "replace", replace), \
+                patch.object(agent_module.time, "sleep"), patch.object(agent_module.os, "name", "nt"):
+            root = Path(folder)
+            (root / "serverBinding.xml").write_text(
+                '<serverBinding serverKey="server" credential="secret"/>', encoding="utf-8")
+            (root / "snapshot.xml").write_text(
+                '<networkLocal source="game" savegameIndex="1"/>', encoding="utf-8")
+            destination = root / "permission-commands/manifest.xml"
+            destination.parent.mkdir(parents=True)
+            destination.write_text("old", encoding="utf-8")
+            with self.assertRaises(PermissionError):
+                PairingAgent(root, "https://central", opener).process_operations_once()
+            self.assertEqual(destination.read_text(encoding="utf-8"), "old")
+            self.assertFalse((destination.parent / "manifest.tmp").exists())
+
+    def test_watch_failure_is_not_reported_as_pairing_failure(self):
+        fake_agent = MagicMock()
+        fake_agent.watch.side_effect = OSError("Access is denied")
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(agent_module, "PairingAgent", return_value=fake_agent), \
+                patch.object(sys, "argv", ["agent", "--watch", "--backend-url", "https://central.example", "--mailbox-dir", "C:/mailbox"]), \
+                redirect_stdout(stdout), redirect_stderr(stderr):
+            self.assertEqual(agent_module.main(), 1)
+        self.assertNotIn("Pairing failed", stderr.getvalue())
+        self.assertIn("Agent mailbox processing failed", stderr.getvalue())
+
     def test_failed_receipt_post_remains_queued_for_later_retry(self):
         failure = HTTPError("https://central/api/server/operation-receipts", 500, "central failure", {}, None)
         opener = MagicMock(side_effect=[failure, Response()])

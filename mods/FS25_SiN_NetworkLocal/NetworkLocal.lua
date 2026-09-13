@@ -772,7 +772,8 @@ function FS25SiNNetworkLocal:isFarmVisualStateValid(farm)
     if farmId == nil or farmId <= 0 or farmId >= 255 then
         return false, "farm ID is outside the multiplayer range"
     end
-    if farm.color ~= nil and (type(farm.color) ~= "number" or farm.color < 1) then
+    if farm.color ~= nil and (type(farm.color) ~= "number" or farm.color < 1
+        or Farm == nil or type(Farm.COLORS) ~= "table" or type(Farm.COLORS[farm.color]) ~= "table") then
         return false, "farm color index is invalid"
     end
     if farm.getColor == nil or farm.getIconSliceId == nil or farm.getIconUVs == nil then
@@ -809,6 +810,74 @@ function FS25SiNNetworkLocal:validateLoadedFarmVisualStates()
     end
 end
 
+-- FarmManager:createFarm() stores a Farm.COLORS index.  Farm.COLORS is the
+-- authoritative runtime color table; using it avoids guessing the supported
+-- range.  Existing colors are never changed.  The next free farm ID is used
+-- only as a preference for the color index; the game still assigns the farm ID
+-- because the createFarm fourth argument remains nil.
+function FS25SiNNetworkLocal:selectFarmColor(preferredFarmId)
+    if Farm == nil or type(Farm.COLORS) ~= "table" then
+        return nil, "FS25 Farm.COLORS is unavailable"
+    end
+    local used = {}
+    if g_farmManager ~= nil then
+        for farmId = 1, 254 do
+            local farm = g_farmManager:getFarmById(farmId)
+            if farm ~= nil and type(farm.color) == "number" and farm.color > 0 then
+                used[farm.color] = true
+            end
+        end
+    end
+    if preferredFarmId ~= nil and type(Farm.COLORS[preferredFarmId]) == "table"
+        and not used[preferredFarmId] then
+        return preferredFarmId, nil
+    end
+    local candidates = {}
+    for colorIndex, _ in pairs(Farm.COLORS) do
+        if type(colorIndex) == "number" and colorIndex > 0 then
+            table.insert(candidates, colorIndex)
+        end
+    end
+    table.sort(candidates)
+    for _, colorIndex in ipairs(candidates) do
+        if not used[colorIndex] then return colorIndex, nil end
+    end
+    return nil, "no unused FS25 farm color is available"
+end
+
+function FS25SiNNetworkLocal:nextAvailableFarmId()
+    if g_farmManager == nil then return nil end
+    for farmId = 1, 254 do
+        if g_farmManager:getFarmById(farmId) == nil then return farmId end
+    end
+    return nil
+end
+
+-- setLandOwnership updates the authoritative server mapping and publishes a
+-- local message, but the normal FS25 buy path also sends FarmlandStateEvent so
+-- connected clients update their own farmland mapping.  Broadcast the same
+-- supported event after the server-side mutation; otherwise snapshots can
+-- report the new owner while a client Field Info view still shows the old one.
+function FS25SiNNetworkLocal:setAndReplicateLandOwnership(farmlandId, farmId)
+    if g_farmlandManager == nil or g_farmlandManager.setLandOwnership == nil then
+        error("FS25 farmland ownership API is unavailable")
+    end
+    local changed = g_farmlandManager:setLandOwnership(farmlandId, farmId)
+    local owner = g_farmlandManager:getFarmlandOwner(farmlandId)
+    if changed ~= true or owner ~= farmId then
+        error("ownership change was not verified on the authoritative server")
+    end
+    if g_server == nil or g_server.broadcastEvent == nil or FarmlandStateEvent == nil
+        or FarmlandStateEvent.new == nil then
+        error("FS25 farmland replication event is unavailable")
+    end
+    local broadcastOk, broadcastError = pcall(function()
+        g_server:broadcastEvent(FarmlandStateEvent.new(farmlandId, farmId, 0))
+    end)
+    if not broadcastOk then error("farmland replication failed: " .. tostring(broadcastError)) end
+    return owner
+end
+
 function FS25SiNNetworkLocal:processFarmProvisionCommand(command, operationId, operationType)
     local prefix = "[SiN Farm Operation]"
     local serverId = command:getString("networkLocalCommand#server_id")
@@ -826,9 +895,12 @@ function FS25SiNNetworkLocal:processFarmProvisionCommand(command, operationId, o
             if g_farmManager.createFarm == nil then error("FS25 FarmManager:createFarm is unavailable") end
             -- FS25 exposes createFarm(name, colorIndex, password, farmId).
             -- Color is the saved multiplayer color index, not a texture path
-            -- or RGB value.  Index 1 is a valid built-in color; leave the ID
-            -- to the game and re-enumerate after creation.
-            local created = g_farmManager:createFarm(farmName, 1, "", nil)
+            -- or RGB value. Leave the ID to the game and re-enumerate after
+            -- creation; the next free ID is only a color preference.
+            local preferredFarmId = self:nextAvailableFarmId()
+            local colorIndex, colorError = self:selectFarmColor(preferredFarmId)
+            if colorIndex == nil then error(colorError) end
+            local created = g_farmManager:createFarm(farmName, colorIndex, "", nil)
             if type(created) == "number" then farmId = created end
             farm, lookupError = self:findFarmByName(farmName)
             if lookupError ~= nil then error(lookupError) end
@@ -843,14 +915,11 @@ function FS25SiNNetworkLocal:processFarmProvisionCommand(command, operationId, o
             owner = g_farmlandManager:getFarmlandOwner(farmlandId)
             local noOwner = FarmlandManager.NO_OWNER_FARM_ID or 0
             if owner ~= noOwner and owner ~= farmId then error("farmland is owned by another farm") end
-            if owner == farmId then
-                reason = "already_owned_by_target"
-            else
-                local changed = g_farmlandManager:setLandOwnership(farmlandId, farmId)
-                owner = g_farmlandManager:getFarmlandOwner(farmlandId)
-                if changed ~= true or owner ~= farmId then error("ownership change was not verified") end
-                reason = "assigned_and_verified"
-            end
+            local alreadyOwned = owner == farmId
+            -- Re-broadcast an already-applied assignment as well. This repairs
+            -- a client that joined after the original mutation.
+            owner = self:setAndReplicateLandOwnership(farmlandId, farmId)
+            reason = alreadyOwned and "already_owned_by_target" or "assigned_and_verified"
         else
             reason = "farm_exists_or_created"
         end
@@ -926,16 +995,10 @@ function FS25SiNNetworkLocal:processLandCommand(command, operationId)
         owner = g_farmlandManager:getFarmlandOwner(farmlandId)
         local noOwner = FarmlandManager.NO_OWNER_FARM_ID or 0
         if owner ~= noOwner and owner ~= farmId then error("farmland is owned by another farm") end
-        if owner == farmId then
-            status = "applied"
-            reason = "already_owned_by_target"
-        else
-            local changed = g_farmlandManager:setLandOwnership(farmlandId, farmId)
-            owner = g_farmlandManager:getFarmlandOwner(farmlandId)
-            if changed ~= true or owner ~= farmId then error("ownership change was not verified") end
-            status = "applied"
-            reason = "assigned_and_verified"
-        end
+        local alreadyOwned = owner == farmId
+        owner = self:setAndReplicateLandOwnership(farmlandId, farmId)
+        status = "applied"
+        reason = alreadyOwned and "already_owned_by_target" or "assigned_and_verified"
     end)
     if not ok then reason = tostring(errorMessage) end
     Logging.info("%s operation=%s server=%s save=%s farmland=%s farm=%s status=%s owner=%s reason=%s",
