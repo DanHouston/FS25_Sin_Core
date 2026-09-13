@@ -85,11 +85,15 @@ metadata is diagnostic, not a permanent authenticated identity or save ID.
 The XML can briefly be incomplete while the game writes it; the inspector reports
 a parse error and can be rerun on the next heartbeat. Files are local, untrusted
 telemetry: they must never authorize wallet credits or permission acknowledgments.
-No local test server is added to the production `servers.json` yet.
+No local test server is added to the production registry by default.  The
+Discord bot discovers production choices from Mongo-backed `sin_servers` and
+`sin_saves`.  For the legacy local-development adapter only, start the bot
+with `FS25_SERVERS_FILE=servers.json` explicitly.
 
 Version 0.2.0.0 also exports stable player IDs and display names from the game's
 user manager. There is no player code-entry menu: staff controls associations.
-The bot reads this local roster for `local-dev`, using the separate
+When that explicit local adapter is enabled, the bot reads this local roster
+for `local-dev`, using the separate
 `fs25_network_local_test` database. See the admin workflow in
 [Discord and authorization](discord-and-authorization.md).
 Actual permission application and acknowledgments remain unimplemented. Keep

@@ -11,7 +11,7 @@ from fs25_network_core.channel_policy import COMMAND_CHANNELS
 class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         with patch.dict(os.environ, {"DISCORD_OPERATOR_ROLE_IDS": "42"}):
-            self.bot = NetworkBot(MagicMock(), {"local-dev": {"save_id": "test"}}, 1,
+            self.bot = NetworkBot(MagicMock(), {"local-dev": {"save_id": "test", "development": True}}, 1,
                                   channels={"link_account": 10, "farm_approvals": 11, "bank": 12})
 
     async def asyncTearDown(self):
@@ -58,6 +58,7 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.bot.authorizations["local-dev"] = authorization
         interaction = MagicMock()
         interaction.namespace.server = "local-dev"
+        interaction.guild_id = 1
         interaction.guild.fetch_member = AsyncMock(return_value=MagicMock(display_name="Repton", bot=False))
         command = self.bot.tree.get_command("farm_approve")
         choices = await command._params["member"].autocomplete(interaction, "rept")

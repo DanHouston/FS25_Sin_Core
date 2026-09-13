@@ -39,6 +39,88 @@ class ServerRegistry:
     def info(self, server_key):
         return self.db.sin_servers.find_one({"server_key": server_key})
 
+    @staticmethod
+    def _available_snapshot_fields(snapshot):
+        """Return valid, unowned numeric farmland IDs from a game snapshot."""
+        if not isinstance(snapshot, dict):
+            return []
+        fields = snapshot.get("farmlands") or {}
+        available = []
+        if not isinstance(fields, dict):
+            return available
+        for field_id, owner in fields.items():
+            try:
+                parsed_id = int(field_id)
+                parsed_owner = int(owner or 0)
+            except (TypeError, ValueError):
+                continue
+            if parsed_id > 0 and parsed_owner == 0:
+                available.append(parsed_id)
+        return sorted(set(available))
+
+    def eligible_servers(self, purpose="reconcile"):
+        """Return dynamic Discord server choices from the central registry.
+
+        The legacy ``servers.json`` roster is deliberately not consulted here.
+        It remains an explicit local-development adapter, while production
+        Discord choices are derived from paired central records and their save
+        state.
+
+        ``info`` includes enabled records for staff inspection, ``reconcile``
+        requires a paired server with at least one configured save, and
+        ``farm_request`` additionally requires a current snapshot containing at
+        least one available numeric farmland.
+        """
+        if purpose not in {"info", "reconcile", "farm_request"}:
+            raise ValueError("Unknown server discovery purpose")
+
+        records = []
+        for server in self.db.sin_servers.find({"enabled": True}):
+            if not isinstance(server, dict) or not server.get("enabled"):
+                continue
+            paired = bool(server.get("credential_hash"))
+            if purpose != "info" and not paired:
+                continue
+
+            saves = []
+            for save in self.db.sin_saves.find({"server_key": server.get("server_key")}):
+                if not isinstance(save, dict) or not save.get("save_key"):
+                    continue
+                if save.get("fs25_save_id") is None or str(save.get("fs25_save_id")).strip() == "":
+                    continue
+                save_choice = {"save_key": save["save_key"], "fs25_save_id": str(save["fs25_save_id"])}
+                if purpose == "farm_request":
+                    snapshot = self.db.server_snapshots.find_one(
+                        {"server_key": server["server_key"], "save_key": save["save_key"]},
+                        sort=[("received_at", -1)],
+                    )
+                    available = self._available_snapshot_fields(snapshot)
+                    if not available:
+                        continue
+                    save_choice["available_fields"] = available
+                saves.append(save_choice)
+
+            if purpose == "reconcile" and not saves:
+                continue
+            if purpose == "farm_request" and not saves:
+                continue
+            records.append({
+                "server_key": server["server_key"],
+                "display_name": server.get("display_name") or server["server_key"],
+                "enabled": True,
+                "paired": paired,
+                "saves": saves,
+            })
+        return sorted(records, key=lambda record: (record["display_name"].lower(), record["server_key"]))
+
+    def eligible_server(self, server_key, purpose="reconcile"):
+        """Resolve one server choice and fail closed for stale/manual values."""
+        matches = [record for record in self.eligible_servers(purpose)
+                   if record.get("server_key") == server_key]
+        if not matches:
+            raise ValueError("Unknown or ineligible game server")
+        return matches[0]
+
     def pair(self, server_key, pairing_code):
         now = datetime.now(timezone.utc)
         record = self.db.sin_servers.find_one({"server_key": server_key, "enabled": True,

@@ -101,7 +101,9 @@ See [Discord application commands](https://docs.discord.com/developers/interacti
 1. Close FS25 and install `dist/FS25_SiN_NetworkLocal.zip` version **0.2.0.0**.
    Remove the old `FS25_NetworkLocal.zip` and enable the renamed mod in the test
    save. This update adds player observations; previous exports have no roster.
-2. Restart the bot. `servers.json` now registers **local-dev**, save slot **1**,
+2. For this legacy local adapter, set `FS25_SERVERS_FILE=servers.json` before
+   starting the bot, then restart it. This explicitly registers **local-dev**,
+   save slot **1**,
    logical save ID **local-dev-save-001**. All its onboarding records go to
    the configured central `MONGODB_DATABASE` (normally **fs25_network**). The
    legacy local mailbox bridge is the only component that may explicitly use
