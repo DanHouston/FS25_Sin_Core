@@ -1,0 +1,41 @@
+name: SiN CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate-and-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run tests
+        run: python -m unittest discover -s tests
+      - name: Compile Python
+        run: python -m compileall -q fs25_network_core tests scripts
+      - name: Check patch
+        run: git diff --check
+      - name: Build release artifacts
+        run: python scripts/build_release.py --version ci-${{ github.sha }} --output ci-release
+      - name: Verify release artifacts
+        shell: python
+        run: |
+          import hashlib, json
+          from pathlib import Path
+          from zipfile import ZipFile
+          root = Path("ci-release")
+          manifest = json.loads((root / "build-manifest.json").read_text())
+          assert manifest["release_format_version"] == 1
+          for name in ("sin-agent.zip", "FS25_SiN_NetworkLocal.zip"):
+              assert (root / name).is_file()
+              actual = hashlib.sha256((root / name).read_bytes()).hexdigest()
+              assert actual == manifest["agent_sha256" if name == "sin-agent.zip" else "networklocal_sha256"]
+          with ZipFile(root / "sin-agent.zip") as archive:
+              assert set(archive.namelist()) == {"fs25_network_core/__init__.py", "fs25_network_core/agent.py"}
+          with ZipFile(root / "FS25_SiN_NetworkLocal.zip") as archive:
+              assert {"modDesc.xml", "NetworkLocal.lua"}.issubset(archive.namelist())

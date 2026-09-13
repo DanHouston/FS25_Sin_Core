@@ -12,3 +12,12 @@ class CommunityTests(unittest.TestCase):
         self.db.community_applications.find_one.return_value = {'state':'pending','nickname':'R','farm_name':'F'}
         self.assertEqual(self.app.apply('1','R','F')['state'], 'pending')
         with self.assertRaises(ValueError): self.app.apply('1','Other','F')
+
+    def test_approval_is_idempotent_after_authoritative_state_is_committed(self):
+        result = MagicMock(modified_count=0)
+        self.db.community_applications.update_one.return_value = result
+        self.db.community_applications.find_one.side_effect = [
+            {'_id': '1', 'state': 'approved', 'server_nickname': 'R | F'},
+            {'_id': '1', 'state': 'approved', 'server_nickname': 'R | F'}]
+        record = self.app.approve('1', 'staff')
+        self.assertEqual(record['state'], 'approved')

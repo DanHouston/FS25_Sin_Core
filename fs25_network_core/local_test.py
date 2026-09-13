@@ -4,7 +4,7 @@ import json
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from zipfile import ZipFile, ZIP_DEFLATED
+from zipfile import ZipFile, ZIP_DEFLATED, ZipInfo
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -41,12 +41,17 @@ def read_snapshot(path, max_age=30):
             raise ValueError(f"Farm record {index}: farmId {farm_id} is missing its name attribute")
         farms[farm_id] = node.attrib["name"]
     players = {}
+    observed_users = []
     for node in root.findall("./players/player"):
         player_id = node.get("uniqueId", "").strip()
         if not player_id or player_id in players:
             raise ValueError("Missing or duplicate player identity")
         players[player_id] = node.get("name", "")
+        observed_users.append(dict(unique_user_id=player_id, user_id=node.get("userId"),
+                                   name=node.get("name", ""), farm_id=int(node.get("farmId", "0")),
+                                   connected=node.get("connected", "true") == "true"))
     return dict(source=source, session=root.attrib["session"], sequence=sequence, players=players,
+                observed_users=observed_users,
                 savegame_index=int(root.attrib["savegameIndex"]), farms=farms,
                 unnamed_farm_ids=[farm_id for farm_id, name in farms.items() if not name.strip()])
 
@@ -64,9 +69,9 @@ def simulate(path):
     return read_snapshot(path)
 
 
-def build_mod():
+def build_mod(destination=None):
     source = ROOT / "mods" / "FS25_SiN_NetworkLocal"
-    destination = ROOT / "dist" / "FS25_SiN_NetworkLocal.zip"
+    destination = Path(destination) if destination else ROOT / "dist" / "FS25_SiN_NetworkLocal.zip"
     destination.parent.mkdir(exist_ok=True)
     descriptor = ET.parse(source / "modDesc.xml")
     icon = descriptor.findtext("iconFilename")
@@ -74,7 +79,10 @@ def build_mod():
         raise ValueError("Mod descriptor must name an existing icon in the mod root")
     with ZipFile(destination, "w", ZIP_DEFLATED) as archive:
         for filename in ("modDesc.xml", "NetworkLocal.lua", icon):
-            archive.write(source / filename, filename)
+            info = ZipInfo(filename, date_time=(2020, 1, 1, 0, 0, 0))
+            info.compress_type = ZIP_DEFLATED
+            info.external_attr = 0o644 << 16
+            archive.writestr(info, (source / filename).read_bytes())
     return destination
 
 

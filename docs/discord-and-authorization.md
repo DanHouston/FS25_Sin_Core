@@ -8,6 +8,12 @@ command sync; old code-issuance and verification methods now reject all calls.
 
 ## Community membership before farms
 
+Players link their stable FS25 identity with `/register code:<CODE>` after the
+server-side SiN registration prompt. This identity link is independent of
+community application approval and farm authorization; it grants neither a
+farm nor manager permissions. The server key is internal metadata and is not a
+Discord command argument.
+
 New Discord users first use `/apply nickname:<name> farm_name:<farm>` in
 `#sin-apply`. This creates only a community application; it grants no game,
 banking, farm, or wallet access. Network Admins review it in `#sin-applications`
@@ -57,11 +63,13 @@ See [Discord application commands](https://docs.discord.com/developers/interacti
    save. This update adds player observations; previous exports have no roster.
 2. Restart the bot. `servers.json` now registers **local-dev**, save slot **1**,
    logical save ID **local-dev-save-001**. All its onboarding records go to
-   **fs25_network_local_test**, separate from the central wallet database.
+   the configured central `MONGODB_DATABASE` (normally **fs25_network**). The
+   legacy local mailbox bridge is the only component that may explicitly use
+   **fs25_network_local_test** for backward-compatible local testing.
    The Atlas database user must have access to this test database.
 3. In #link-account, submit:
 
-   `/farm_request server:local-dev farm_name:My farm starting_field:<your field>`
+   `/farm_request server:local-dev starting_field:<your field>`
 
    Use the exact created farm name for this test. The requester comes from the
    Discord interaction; players cannot submit another Discord identity, a game
@@ -69,9 +77,7 @@ See [Discord application commands](https://docs.discord.com/developers/interacti
 4. Staff opens #farm-approvals and runs `/farm_requests server:local-dev`.
    It lists the first 15 pending requests, including requester, farm name, and
    starting field. Requests persist in MongoDB.
-5. Staff reviews the field choice, creates the named farm, and assigns the
-   starting land in game. For the existing disposable save, inspect farm 1 and
-   its land instead of creating an unnecessary second farm.
+5. Staff reviews the field choice and creates the named farm in game.
 6. With the save running, staff runs `/farm_roster server:local-dev`. It lists
    actual farm IDs and stable game player IDs from the mod. Confirm which game
    player corresponds to the Discord requester; a matching display name alone
@@ -84,9 +90,8 @@ See [Discord application commands](https://docs.discord.com/developers/interacti
    `identity_and_land_confirmed:true` only after verification. The selected
    player must exist in the fresh roster, the farm must be named, and its name
    must match the request.
-8. `/farm_status server:local-dev` shows the approved association and pending
-   permission state. **Approval does not yet change game permissions.** The
-   delivery/acknowledgment adapter is the next implementation milestone.
+8. `/farm_status server:local-dev` shows the land-pending association. The mod
+   must acknowledge the exact land operation before authorization becomes active.
 
 To decline a request, staff uses `/farm_reject server member reason`. The
 requester can read its state and rejection reason using /farm_status.
@@ -112,6 +117,24 @@ The roster uses the engine's stable unique user ID, not a transient session ID.
 The implementation follows [GIANTS FS25 user-manager usage](https://gdn.giants-software.com/documentation_scripting_fs25.php?category=1&class=113&version=script).
 Its behavior still needs validation in singleplayer and multiplayer on your game.
 
+## Read-only farmland API diagnostic
+
+The local mod includes a disabled-by-default, read-only farmland diagnostic.
+From the authoritative FS25 server console, run `sinFarmlandDiagnostic`, then
+search the server log for `[SiN Farmland Diagnostic]`. The probe reports only
+objects, bounded field and metatable names, and readable
+land/farm/owner/purchase metadata; it does not invoke discovered methods or
+change the save.
+
+After `/farm_approve`, the backend writes an idempotent
+`operation_type=assign_farmland` command into the existing permission mailbox.
+The trusted mod validates the live farm and farmland state, calls the verified
+`g_farmlandManager:setLandOwnership(farmlandId, farmId, false)` API only for
+unowned land, verifies the resulting owner, and writes a matching receipt.
+Already-owned target land is acknowledged idempotently; land owned by another
+farm is rejected and never transferred. Authorization remains pending until
+the authoritative receipt is processed.
+
 ## Records and transaction behavior
 
 - `farm_requests`: requester, requested server/save, farm name, starting field,
@@ -126,8 +149,18 @@ in a single MongoDB transaction. Existing conflicting identities are rejected;
 the same game identity cannot be claimed twice in a server/save. Old self-linked
 identities without staff approval cannot be used for assignments.
 
-Starting-field ownership is confirmed manually by staff; the backend records the
-confirmation but does not purchase, assign, or validate land through telemetry.
+Starting-field ownership is assigned by a durable server-authoritative operation
+and remains pending until the mod acknowledges the exact server, save, farm,
+field, and operation ID. Staff do not join the farm, add money, or purchase the
+starting field manually.
+
+Manager authorization is also enforced immediately from FS25's
+`MessageType.PLAYER_FARM_CHANGED` message, after the engine publishes the farm
+transition. The mod resolves the affected user by `uniqueUserId`, demotes
+unauthorized managers, and promotes only persisted SiN-authorized managers.
+The existing periodic reconciliation remains a backstop. FS25 does not expose a
+pre-transition hook here, so the engine may still establish its initial manager
+state before this post-transition callback runs.
 Requests never establish land reservations. Managers can later change game assets.
 
 Only active, mod-confirmed farm managers can use farm banking. Pending permission

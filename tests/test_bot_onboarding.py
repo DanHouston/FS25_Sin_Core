@@ -26,6 +26,10 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
             # Exercise discord.py's option serialization without syncing to Discord.
             self.assertEqual(command.to_dict(self.bot.tree)["name"], command.name)
 
+    async def test_register_exposes_only_code(self):
+        command = self.bot.tree.get_command("register")
+        self.assertEqual([option["name"] for option in command.to_dict(self.bot.tree)["options"]], ["code"])
+
     async def test_staff_callbacks_deny_non_operator_before_reading_data(self):
         interaction = MagicMock()
         interaction.guild_id = 1
@@ -33,7 +37,7 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         commands = [
             ("farm_requests", ("local-dev",)),
             ("farm_roster", ("local-dev",)),
-            ("farm_approve", ("local-dev", "request", 1, "player", True)),
+            ("farm_approve", ("local-dev", "request", 1, True)),
             ("farm_reject", ("local-dev", "request", "reason")),
             ("farm_assign", (MagicMock(), "local-dev", 1, app_commands.Choice(name="worker", value="worker"))),
         ]

@@ -1,0 +1,48 @@
+import unittest
+from unittest.mock import MagicMock
+
+from fs25_network_core.event_processing import CentralEventProcessor, EventAuthenticationError, EventScopeError
+
+
+class EventProcessingTests(unittest.TestCase):
+    def setUp(self):
+        self.database = MagicMock()
+        self.database.db.processed_server_events.find_one.return_value = None
+        self.database.db.sin_servers = MagicMock()
+        self.processor = CentralEventProcessor(self.database)
+        self.processor.registry = MagicMock()
+        self.processor.authorization = MagicMock()
+        self.processor.registry.authenticate.return_value = {
+            "_id": "sin-fs25-01", "server_key": "sin-fs25-01", "online": False,
+            "display_name": "SiN FS25 01"
+        }
+        self.processor.registry.resolve_save.return_value = "main-save"
+        self.processor.authorization.resolve_player_identity.return_value = {"fully_registered": False}
+
+    def event(self, event_type):
+        return {"event_id": "event-1", "event_type": event_type, "server_key": "sin-fs25-01",
+                "server_credential": "secret", "save_id": "1",
+                "payload": {"unique_user_id": "u1", "display_name": "Observed"}}
+
+    def test_supported_events_process_and_enqueue_activity(self):
+        for event_type in ("heartbeat", "player_connected", "player_disconnected"):
+            with self.subTest(event_type=event_type):
+                self.database.db.processed_server_events.find_one.return_value = None
+                result = self.processor.process(self.event(event_type))
+                self.assertEqual(result["status"], "accepted")
+        self.assertEqual(self.processor.registry.resolve_save.call_count, 3)
+
+    def test_authentication_and_save_errors_are_typed(self):
+        self.processor.registry.authenticate.side_effect = ValueError("auth")
+        with self.assertRaises(EventAuthenticationError):
+            self.processor.process(self.event("heartbeat"))
+        self.processor.registry.authenticate.side_effect = None
+        self.processor.registry.resolve_save.side_effect = ValueError("save")
+        with self.assertRaises(EventScopeError):
+            self.processor.process(self.event("heartbeat"))
+
+    def test_duplicate_is_accepted_without_new_activity(self):
+        self.database.db.processed_server_events.find_one.return_value = {"_id": "event-1"}
+        result = self.processor.process(self.event("player_connected"))
+        self.assertTrue(result["duplicate"])
+        self.database.db.activity_outbox.insert_one.assert_not_called()

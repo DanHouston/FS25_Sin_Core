@@ -40,7 +40,10 @@ class CommunityApplications:
         return record
     def approve(self, discord_id, reviewer):
         result = self.db.community_applications.update_one({"_id": str(discord_id), "state": "pending"}, {"$set": {"state": "approved", "reviewed_by": str(reviewer), "reviewed_at": datetime.now(timezone.utc)}})
-        if result.modified_count != 1: raise ValueError("Application is no longer pending")
+        if result.modified_count != 1:
+            existing = self.db.community_applications.find_one({"_id": str(discord_id), "state": "approved"})
+            if not existing: raise ValueError("Application is no longer pending")
+        return self.db.community_applications.find_one({"_id": str(discord_id)})
     def deny(self, discord_id, reviewer, reason):
         if not reason.strip(): raise ValueError("A denial reason is required")
         result = self.db.community_applications.update_one({"_id": str(discord_id), "state": "pending"}, {"$set": {"state": "denied", "reviewed_by": str(reviewer), "reviewed_at": datetime.now(timezone.utc), "denial_reason": reason.strip()}})

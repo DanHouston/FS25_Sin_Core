@@ -14,6 +14,8 @@ from .server_scraper import ServerScraper
 from .config import load_local_environment, required_setting, PROJECT_ROOT
 from .channel_policy import require_command_channel
 from .community import CommunityApplications
+from .server_registry import ServerRegistry
+from .activity import ActivityPublisher
 
 
 class DiscordSetupError(RuntimeError):
@@ -41,6 +43,8 @@ class NetworkBot(discord.Client):
         self.authorization = AuthorizationManager(bank.database)
         self.authorizations = authorizations or {}
         self.community = CommunityApplications(bank.database)
+        self.server_registry = ServerRegistry(bank.database)
+        self.activity_publisher = ActivityPublisher(self, bank.database)
         self.sin_member_role_id = int(sin_member_role_id) if sin_member_role_id else None
         role_override = os.environ.get("DISCORD_OPERATOR_ROLE_IDS")
         self.operator_role_ids = (
@@ -87,17 +91,34 @@ class NetworkBot(discord.Client):
         @app_commands.check(channel_check)
         async def application_approve(interaction, member: discord.Member):
             staff_check(interaction)
-            if not self.sin_member_role_id: raise ValueError("Configure roles.sin_member with a Discord role ID")
             record = await asyncio.to_thread(self.community.pending_for, str(member.id))
-            role = interaction.guild.get_role(self.sin_member_role_id)
-            if not role: raise ValueError("Configured SiN Member role is unavailable")
+            # Persist the authoritative SiN decision before attempting any
+            # Discord presentation work. Discord hierarchy is not an auth
+            # transaction and must never roll back membership approval.
+            await asyncio.to_thread(self.community.approve, str(member.id), str(interaction.user.id))
+            warnings = []
+            nickname_synced = False
+            role_synced = False
             try:
                 await member.edit(nick=record['server_nickname'], reason="SiN community approval")
-                await member.add_roles(role, reason="SiN community approval")
-            except discord.Forbidden as error:
-                raise ValueError("SiN JiN needs Manage Nicknames and Manage Roles above the member role") from error
-            await asyncio.to_thread(self.community.approve, str(member.id), str(interaction.user.id))
-            await interaction.response.send_message(f"Approved **{record['server_nickname']}**.", ephemeral=True)
+                nickname_synced = True
+            except (discord.Forbidden, discord.HTTPException):
+                warnings.append("JiN could not update the Discord nickname due to Discord hierarchy or permissions.")
+            role = interaction.guild.get_role(self.sin_member_role_id) if self.sin_member_role_id else None
+            if role is None:
+                warnings.append("JiN could not assign the SiN Member role; manual Discord role correction is required.")
+            else:
+                try:
+                    await member.add_roles(role, reason="SiN community approval")
+                    role_synced = True
+                except (discord.Forbidden, discord.HTTPException):
+                    warnings.append("JiN could not assign the SiN Member role; manual Discord role correction is required.")
+            message = f"Application approved for **{record['server_nickname']}**."
+            if not warnings:
+                message += " Discord nickname and SiN Member role synchronized."
+            else:
+                message += " Warning: " + " ".join(warnings)
+            await interaction.response.send_message(message, ephemeral=True)
 
         @self.tree.command(name="application_deny", description="Staff: deny community membership")
         @app_commands.check(channel_check)
@@ -105,6 +126,44 @@ class NetworkBot(discord.Client):
             staff_check(interaction)
             await asyncio.to_thread(self.community.deny, str(member.id), str(interaction.user.id), reason)
             await interaction.response.send_message("Community application denied.", ephemeral=True)
+
+        @self.tree.command(name="register", description="Link your observed FS25 identity to SiN")
+        @app_commands.check(channel_check)
+        async def register(interaction, code: str):
+            if interaction.guild_id != self.guild.id:
+                raise ValueError("Use this command in the configured Discord server")
+            identity = await asyncio.to_thread(self.authorization.register_identity, str(interaction.user.id), code)
+            await interaction.response.send_message(
+                "Registration complete. Your Discord account is now linked to your Farming Simulator identity.",
+                ephemeral=True)
+
+        @self.tree.command(name="server_register", description="Staff: register a SiN FS25 server")
+        @app_commands.check(channel_check)
+        async def server_register(interaction, server_key: str, name: str, activity_channel: discord.TextChannel):
+            staff_check(interaction)
+            if activity_channel.guild.id != self.guild.id:
+                raise ValueError("Activity channel must belong to the configured Discord server")
+            record, pairing = await asyncio.to_thread(self.server_registry.register, server_key, name,
+                self.guild.id, activity_channel.id)
+            message = f"Server `{record['server_key']}` is configured for {activity_channel.mention}."
+            if pairing:
+                message += f" Pairing code (one-time, expires in 30 minutes): `{pairing}`"
+            else:
+                message += " Existing pairing was preserved."
+            await interaction.response.send_message(message, ephemeral=True)
+
+        @self.tree.command(name="server_info", description="Staff: view SiN server configuration")
+        @app_commands.check(channel_check)
+        async def server_info(interaction, server_key: str):
+            staff_check(interaction)
+            record = await asyncio.to_thread(self.server_registry.info, server_key)
+            if not record: raise ValueError("Unknown SiN server")
+            channel = self.guild.get_channel(int(record["discord_activity_channel_id"]))
+            await interaction.response.send_message(
+                f"Server: {record['display_name']}\nKey: {record['server_key']}\n"
+                f"Activity Channel: {channel.mention if channel else record['discord_activity_channel_id']}\n"
+                f"Enabled: {'Yes' if record.get('enabled') else 'No'}\nPaired: {'Yes' if record.get('credential_hash') else 'No'}",
+                ephemeral=True)
 
         async def observed_players(interaction: discord.Interaction, current: str):
             server = getattr(interaction.namespace, "server", None)
@@ -114,8 +173,19 @@ class NetworkBot(discord.Client):
                 snapshot = await asyncio.to_thread(ServerScraper(self.servers).snapshot, server)
             except ValueError:
                 return []
+            member = getattr(interaction.namespace, "member", None)
+            if member:
+                try:
+                    await asyncio.to_thread(auth_for(server).pending_request_for_user, member, server, self.servers[server]["save_id"])
+                except ValueError:
+                    return []
+            assigned = set()
+            if hasattr(auth_for(server).db.game_identities, "find"):
+                assigned = {r.get("game_player_id") for r in auth_for(server).db.game_identities.find({"server_id": server, "save_id": self.servers[server]["save_id"]})}
             choices = []
             for player_id, name in snapshot["players"].items():
+                if player_id in assigned:
+                    continue
                 label = player_choice_label(player_id, name)
                 if current.lower() in label.lower():
                     choices.append(app_commands.Choice(name=label[:100], value=player_id))
@@ -162,11 +232,11 @@ class NetworkBot(discord.Client):
 
         @self.tree.command(name="farm_request", description="Request a farm and starting field for staff review")
         @app_commands.check(channel_check)
-        async def farm_request(interaction: discord.Interaction, server: str, farm_name: str, starting_field: str):
+        async def farm_request(interaction: discord.Interaction, server: str, starting_field: str):
             config = server_config(interaction, server)
             await interaction.response.defer(ephemeral=True)
             record = await asyncio.to_thread(auth_for(server).request_farm, str(interaction.user.id), server,
-                                            config["save_id"], farm_name, starting_field)
+                                            config["save_id"], starting_field)
             await interaction.followup.send(
                 f"Your request for **{record['farm_name']}** at **{record['starting_field']}** is pending staff review. "
                 "Staff will create the farm and confirm your in-game identity. Repeated submissions keep this request.",
@@ -193,6 +263,7 @@ class NetworkBot(discord.Client):
             server_config(interaction, server)
             await interaction.response.defer(ephemeral=True)
             snapshot = await asyncio.to_thread(ServerScraper(self.servers).snapshot, server)
+            await asyncio.to_thread(auth_for(server).observe_players, server, config["save_id"], snapshot)
             rows = [f"Farm {farm_id}: {name or '(unnamed; cannot approve)'}" for farm_id, name in snapshot["farms"].items()]
             rows += [f"Player ID: {player_id} | name: {name}" for player_id, name in snapshot["players"].items()]
             for row in rows or ["No farms or players reported."]:
@@ -202,7 +273,7 @@ class NetworkBot(discord.Client):
         @app_commands.check(channel_check)
         @app_commands.default_permissions(administrator=True)
         async def farm_approve(interaction: discord.Interaction, server: str, member: str,
-                               farm_id: str, player_id: str, identity_and_land_confirmed: bool):
+                               farm_id: str, identity_and_land_confirmed: bool):
             staff_check(interaction)
             config = server_config(interaction, server)
             await interaction.response.defer(ephemeral=True)
@@ -212,6 +283,13 @@ class NetworkBot(discord.Client):
                 selected_farm_id = int(farm_id)
             except ValueError:
                 raise ValueError("Choose a farm from the suggestions") from None
+            identity = await asyncio.to_thread(auth_for(server).db.game_identities.find_one,
+                {"server_id": server, "save_id": config["save_id"], "discord_id": str(member)})
+            if not identity:
+                raise ValueError(f"{member} has not linked an FS25 player identity yet; have them join and use /register.")
+            player_id = identity.get("fs25_unique_user_id") or identity.get("game_player_id")
+            if player_id not in snapshot.get("players", {}):
+                raise ValueError(f"{member}'s registered FS25 identity has not been observed on this server/save yet.")
             operation = await asyncio.to_thread(auth_for(server).approve_request, request["_id"], server, config["save_id"],
                 selected_farm_id, player_id, snapshot, str(interaction.user.id), identity_and_land_confirmed)
             nickname = approved_nickname(snapshot["players"][player_id], request["farm_name"])
@@ -231,10 +309,6 @@ class NetworkBot(discord.Client):
         @farm_approve.autocomplete("farm_id")
         async def farm_approve_farm_autocomplete(interaction: discord.Interaction, current: str):
             return await observed_farms(interaction, current)
-
-        @farm_approve.autocomplete("player_id")
-        async def farm_approve_player_autocomplete(interaction: discord.Interaction, current: str):
-            return await observed_players(interaction, current)
 
         @farm_approve.autocomplete("member")
         async def farm_approve_member_autocomplete(interaction: discord.Interaction, current: str):
@@ -346,6 +420,11 @@ class NetworkBot(discord.Client):
 
     async def on_ready(self):
         logging.info("Discord bot connected as %s (ID %s)", self.user, self.user.id)
+        self.activity_publisher.start()
+
+    async def close(self):
+        await self.activity_publisher.stop()
+        await super().close()
 
 
 def main():
@@ -370,19 +449,23 @@ def main():
         raise SystemExit("Configure numeric channels.sin_apply, channels.sin_applications, and roles.sin_member IDs in discord.json") from error
     with open(os.environ.get("FS25_SERVERS_FILE", PROJECT_ROOT / "servers.json"), encoding="utf-8") as stream:
         servers = json.load(stream)
+    # Central services share the configured environment database. Per-server
+    # config must not redirect JiN into a legacy local-test database.
     database = Database()
     database.initialize()
+    logging.info("[SiN DB] environment=bot database=%s", database.name)
+    registry = ServerRegistry(database)
+    for server_key, config in servers.items():
+        if config.get("fs25_save_id") is not None and config.get("save_id"):
+            registry.configure_save(server_key, config["save_id"], config["fs25_save_id"])
     authorizations = {}
     for server_id, config in servers.items():
         if config.get("development"):
-            test_name = "fs25_network_local_test"
-            if database.db.name == test_name:
-                raise SystemExit("The central database must differ from fs25_network_local_test")
             if config.get("withdrawals_enabled"):
                 raise SystemExit("Withdrawals must remain disabled for development servers")
-            test_database = Database(name=test_name)
-            test_database.initialize()
-            authorizations[server_id] = AuthorizationManager(test_database)
+            authorizations[server_id] = AuthorizationManager(database)
+            logging.info("[SiN DB] environment=%s community=%s authorization=%s banking=%s",
+                         server_id, database.name, database.name, database.name)
     try:
         NetworkBot(BankingEngine(database), servers, int(guild_id), operator_role_ids, channels, authorizations, sin_member_role_id).run(token, log_handler=None)
     except DiscordSetupError as error:

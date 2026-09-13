@@ -1,6 +1,7 @@
 {
-  "local-dev": {
+    "local-dev": {
     "save_id": "local-dev-save-001",
+    "fs25_save_id": "1",
     "development": true,
     "snapshot_transport": "local-file",
     "savegame_index": 1,
