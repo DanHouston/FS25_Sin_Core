@@ -30,6 +30,16 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(len(first["code"]), 8)
         self.assertNotIn("code", self.database.db.registration_codes.update_one.call_args.args[1]["$set"])
 
+    def test_registered_identity_refresh_returns_completed_without_new_code(self):
+        self.database.db.game_identities.find.return_value.limit.return_value = [{
+            "server_id": "server", "save_id": "save", "fs25_unique_user_id": "stable-id",
+            "discord_id": "discord-user"}]
+        with patch.object(self.auth, "create_registration_code") as create_code:
+            result = self.auth.registration_request("server", "save", "stable-id", "Observed", "12")
+        self.assertEqual(result, {"status": "registered", "fs25_unique_user_id": "stable-id"})
+        create_code.assert_not_called()
+        self.database.db.observed_fs25_identities.update_one.assert_not_called()
+
     def test_registration_code_upsert_preserves_first_issued_at_without_operator_conflict(self):
         class RegistrationCodes:
             def __init__(self):
@@ -159,3 +169,14 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("InitEventClass(SiNRegistrationWarningEvent", event)
         self.assertIn("streamWriteBool", event)
         self.assertIn("streamWriteString", event)
+        self.assertIn("self.registrationWarning = nil", source)
+
+    def test_networklocal_refreshes_required_registration_on_heartbeat_reconciliation(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_NetworkLocal" / "NetworkLocal.lua").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('elseif existing.status == "registration_required" and refreshRequired ~= true then', source)
+        self.assertIn('elseif state.status == "registration_required" then', source)
+        self.assertIn('self:queueRegistrationRequest(user, farm, true)', source)
+        self.assertIn('or fileExists(self.registrationResponseDirectory .. requestId .. ".xml")', source)
+        self.assertIn('self:enforceRegistration(user, farm)', source)

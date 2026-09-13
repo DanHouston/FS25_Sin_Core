@@ -29,6 +29,7 @@ function FS25SiNNetworkLocal:loadMap()
     self.connectedPlayers = {}
     self.identityNames = {}
     self.registrationState = {}
+    self.registrationQuarantined = {}
     self.registrationPromptAt = {}
     self.registrationClock = 0
     self.registrationWarning = nil
@@ -155,14 +156,29 @@ function FS25SiNNetworkLocal:isDedicatedServerUser(user, farm)
         and tostring(user:getNickname() or ""):lower() == "server"
 end
 
-function FS25SiNNetworkLocal:queueRegistrationRequest(user, farm)
+function FS25SiNNetworkLocal:registrationRequestOutstanding(state)
+    if state == nil or state.requestId == nil then return false end
+    local requestId = tostring(state.requestId)
+    return fileExists(self.registrationRequestDirectory .. requestId .. ".xml")
+        or fileExists(self.registrationResponseDirectory .. requestId .. ".xml")
+end
+
+function FS25SiNNetworkLocal:queueRegistrationRequest(user, farm, refreshRequired)
     if user == nil or self.serverKey == nil or self.registrationRequestDirectory == nil
         or self:isDedicatedServerUser(user, farm) then return end
     local uniqueId = tostring(user:getUniqueUserId() or "")
     if uniqueId == "" then return end
     local existing = self.registrationState[uniqueId]
     if existing ~= nil then
-        if existing.status ~= "pending" or self.registrationClock - (existing.requestedAt or self.registrationClock) < 900000 then
+        if existing.status == "registered" then
+            return
+        end
+        if self:registrationRequestOutstanding(existing) then return end
+        if existing.status == "pending" then
+            if self.registrationClock - (existing.requestedAt or self.registrationClock) < 900000 then
+                return
+            end
+        elseif existing.status == "registration_required" and refreshRequired ~= true then
             return
         end
         self.registrationState[uniqueId] = nil
@@ -185,6 +201,14 @@ function FS25SiNNetworkLocal:queueRegistrationRequest(user, farm)
     self.registrationState[uniqueId] = {status="pending", requestId=requestId, requestedAt=self.registrationClock}
 end
 
+function FS25SiNNetworkLocal:findConnectedUser(uniqueId)
+    if g_currentMission == nil or g_currentMission.userManager == nil then return nil end
+    for _, user in ipairs(g_currentMission.userManager:getUsers() or {}) do
+        if tostring(user:getUniqueUserId() or "") == tostring(uniqueId) then return user end
+    end
+    return nil
+end
+
 function FS25SiNNetworkLocal:onPlayerConnected(user, connection, farmId)
     if user == nil or g_currentMission == nil or not g_currentMission:getIsServer() then return end
     local farm = g_farmManager ~= nil and g_farmManager:getFarmByUserId(user:getId()) or nil
@@ -204,7 +228,7 @@ function FS25SiNNetworkLocal:onPlayerConnected(user, connection, farmId)
         self:emitServerEvent("player_connected", {unique_user_id=uniqueId, user_id=record.user_id,
             farm_id=record.farm_id, display_name=record.name})
     end
-    self:queueRegistrationRequest(user, farm)
+    self:queueRegistrationRequest(user, farm, true)
     self:enforceRegistration(user, farm)
     local state = self.registrationState[uniqueId]
     if state ~= nil and state.status ~= "pending" then
@@ -315,6 +339,14 @@ function FS25SiNNetworkLocal:processRegistrationResponses()
                 self.registrationState[uniqueId] = {status=status, code=code,
                     requestedAt=(self.registrationState[uniqueId] or {}).requestedAt or self.registrationClock}
                 self:sendRegistrationState(uniqueId, status, code)
+                if status == "registered" then
+                    Logging.info("[SiN Registration] player registration completed; clearing warning")
+                    local user = self:findConnectedUser(uniqueId)
+                    if user ~= nil then
+                        local farm = g_farmManager ~= nil and g_farmManager:getFarmByUserId(user:getId()) or nil
+                        self:enforceRegistration(user, farm)
+                    end
+                end
                 deleteFile(path)
             end
         end
@@ -327,12 +359,16 @@ function FS25SiNNetworkLocal:enforceRegistration(user, farm)
     local uniqueId = tostring(user:getUniqueUserId() or "")
     local state = self.registrationState[uniqueId]
     if state == nil or state.status ~= "registered" then
+        self.registrationQuarantined[uniqueId] = true
         if farm ~= nil and farm.farmId > 0 then
             if farm:isUserFarmManager(user:getId()) then farm:demoteUser(user:getId()) end
             if g_farmManager.removeUserFromFarm ~= nil then
                 g_farmManager:removeUserFromFarm(user:getId())
             end
         end
+    elseif self.registrationQuarantined[uniqueId] then
+        self.registrationQuarantined[uniqueId] = nil
+        Logging.info("[SiN Registration] quarantine released userId=%s", tostring(user:getId()))
     end
 end
 
@@ -454,7 +490,13 @@ function FS25SiNNetworkLocal:reconcileConnectedPlayers()
                 local record = {name=user:getNickname() or "", user_id=user:getId(),
                     farm_id=farm ~= nil and farm.farmId or 0}
                 currentPlayers[uniqueId] = record
-                self:queueRegistrationRequest(user, farm)
+                local state = self.registrationState[uniqueId]
+                if state == nil then
+                    self:queueRegistrationRequest(user, farm, false)
+                elseif state.status == "registration_required" then
+                    Logging.info("[SiN Registration] refreshing required player userId=%s", tostring(user:getId()))
+                    self:queueRegistrationRequest(user, farm, true)
+                end
                 self:enforceRegistration(user, farm)
             end
         end
