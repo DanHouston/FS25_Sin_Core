@@ -30,6 +30,59 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(len(first["code"]), 8)
         self.assertNotIn("code", self.database.db.registration_codes.update_one.call_args.args[1]["$set"])
 
+    def test_registration_code_upsert_preserves_first_issued_at_without_operator_conflict(self):
+        class RegistrationCodes:
+            def __init__(self):
+                self.records = []
+                self.updates = []
+
+            def find_one(self, query):
+                now = query["expires_at"]["$gt"]
+                for record in self.records:
+                    if all(record.get(key) == value for key, value in query.items()
+                           if key != "expires_at") and record["expires_at"] > now:
+                        return dict(record)
+                return None
+
+            def update_one(self, query, update, upsert=False):
+                set_paths = set(update.get("$set", {}))
+                insert_paths = set(update.get("$setOnInsert", {}))
+                if set_paths & insert_paths:
+                    raise AssertionError("Mongo update path conflict")
+                self.updates.append(update)
+                record = next((item for item in self.records
+                               if all(item.get(key) == value for key, value in query.items())), None)
+                inserted = record is None
+                if inserted:
+                    if not upsert:
+                        raise AssertionError("expected upsert")
+                    record = dict(query)
+                    self.records.append(record)
+                    record.update(update.get("$setOnInsert", {}))
+                record.update(update.get("$set", {}))
+                return type("Result", (), {"upserted_id": record.get("_id"), "modified_count": 1})()
+
+        collection = RegistrationCodes()
+        self.database.db.registration_codes = collection
+        first_token, first_expiry = self.auth.create_registration_code("server", "save", "stable-id")
+        first = collection.records[0]
+        first_issued_at = first["issued_at"]
+        first_updated_at = first["updated_at"]
+        self.assertTrue(first_token)
+        self.assertIn("issued_at", first)
+        self.assertEqual(collection.updates[0]["$setOnInsert"]["issued_at"], first_issued_at)
+        self.assertNotIn("issued_at", collection.updates[0]["$set"])
+
+        first["expires_at"] = datetime.now(timezone.utc) - timedelta(seconds=1)
+        second_token, second_expiry = self.auth.create_registration_code("server", "save", "stable-id")
+        self.assertTrue(second_token)
+        self.assertGreater(second_expiry, first_expiry)
+        self.assertEqual(first["issued_at"], first_issued_at)
+        self.assertGreater(first["updated_at"], first_updated_at)
+        self.assertGreater(first["expires_at"], datetime.now(timezone.utc))
+        self.assertNotIn("issued_at", collection.updates[1]["$set"])
+        self.assertIn("issued_at", collection.updates[1].get("$setOnInsert", {}))
+
     def test_register_identity_resolves_code_without_server_argument(self):
         registration = {"_id": "r1", "server_id": "server", "save_id": "save", "fs25_unique_user_id": "stable-id"}
         self.database.db.registration_codes.find.return_value.limit.return_value = [registration]

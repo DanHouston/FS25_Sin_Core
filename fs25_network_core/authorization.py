@@ -104,7 +104,7 @@ class AuthorizationManager:
         token_hash = hashlib.sha256(token.encode()).hexdigest()
         self.db.registration_codes.update_one(
             {"server_id": server_id, "save_id": save_id, "fs25_unique_user_id": unique_user_id, "state": "pending"},
-            {"$set": {"token_hash": token_hash, "issued_at": issued_at,
+            {"$set": {"token_hash": token_hash,
                        "expires_at": now + timedelta(seconds=ttl_seconds), "updated_at": now},
              "$setOnInsert": {"_id": key(server_id, save_id, unique_user_id), "issued_at": issued_at}}, upsert=True)
         return token, now + timedelta(seconds=ttl_seconds)
