@@ -169,8 +169,16 @@ function FS25SiNNetworkLocal:sendRegistrationPrompt(user, code)
     end
 end
 
+function FS25SiNNetworkLocal:collectRegistrationResponseFile(path)
+    if path == nil or string.sub(path, -4) ~= ".xml" then return end
+    table.insert(self.registrationResponseFiles, path)
+end
+
 function FS25SiNNetworkLocal:processRegistrationResponses()
-    for _, path in ipairs(getFiles(self.registrationResponseDirectory .. "*.xml") or {}) do
+    self.registrationResponseFiles = {}
+    getFiles(self.registrationResponseDirectory, "collectRegistrationResponseFile", self)
+    table.sort(self.registrationResponseFiles)
+    for _, path in ipairs(self.registrationResponseFiles) do
         local xml = XMLFile.load("networkLocalRegistrationResponse", path)
         if xml ~= nil then
             local uniqueId = xml:getString("registrationResponse#fs25_unique_user_id")
@@ -184,6 +192,7 @@ function FS25SiNNetworkLocal:processRegistrationResponses()
             end
         end
     end
+    self.registrationResponseFiles = nil
 end
 
 function FS25SiNNetworkLocal:enforceRegistration(user, farm)

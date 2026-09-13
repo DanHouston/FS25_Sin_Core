@@ -69,3 +69,13 @@ class RegistrationTests(unittest.TestCase):
             response = ElementTree.parse(root / "registration-responses" / "request-1.xml").getroot()
             self.assertEqual(response.get("status"), "registration_required")
             self.assertFalse((request_dir / "request-1.xml").exists())
+
+    def test_networklocal_uses_callback_based_get_files_for_registration_responses(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_NetworkLocal" / "NetworkLocal.lua").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'getFiles(self.registrationResponseDirectory, "collectRegistrationResponseFile", self)',
+            source,
+        )
+        self.assertNotRegex(source, r"getFiles\([^,\r\n]+\)")
