@@ -59,6 +59,39 @@ class AuthorizationTests(unittest.TestCase):
         self.assertIsNone(record["applied_role"])
         self.assertEqual(record["operation_id"], operation)
 
+    def test_provisioned_manager_assignment_accepts_registered_identity_link(self):
+        self.db.game_identities.find_one.return_value = {
+            "discord_id": "123", "game_player_id": "player", "fs25_unique_user_id": "player",
+            "registered_at": "now"}
+        self.db.memberships.find_one.return_value = None
+
+        operation = self.auth.assign("123", "server", "save", 2, "farm_manager", {2: "Farm"},
+                                    "farm-approval", allow_unapproved_identity=True, idempotent=True)
+
+        self.assertTrue(operation)
+        record = self.db.memberships.replace_one.call_args.args[1]
+        self.assertEqual(record["state"], "pending")
+        self.assertEqual(record["desired_role"], "farm_manager")
+        self.assertEqual(record["farm_id"], 2)
+        self.db.permission_jobs.insert_one.assert_called_once()
+
+    def test_idempotent_pending_assignment_repairs_missing_permission_job(self):
+        self.db.game_identities.find_one.return_value = {
+            "discord_id": "123", "game_player_id": "player", "fs25_unique_user_id": "player"}
+        self.db.memberships.find_one.return_value = {
+            "_id": "membership", "state": "pending", "farm_id": 2,
+            "desired_role": "farm_manager", "operation_id": "existing-op", "revision": 1}
+        self.db.permission_jobs.find_one.return_value = None
+
+        operation = self.auth.assign("123", "server", "save", 2, "farm_manager", {2: "Farm"},
+                                    "farm-approval", allow_unapproved_identity=True, idempotent=True)
+
+        self.assertEqual(operation, "existing-op")
+        self.db.memberships.replace_one.assert_not_called()
+        self.db.permission_jobs.update_one.assert_called_once()
+        update = self.db.permission_jobs.update_one.call_args.args[1]
+        self.assertIn("$setOnInsert", update)
+
     def test_wrong_server_acknowledgment_does_not_activate(self):
         self.db.permission_jobs.find_one.return_value = None
         with self.assertRaises(ValueError):

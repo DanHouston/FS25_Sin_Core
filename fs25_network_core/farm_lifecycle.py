@@ -137,6 +137,74 @@ class FarmLifecycle:
         return [self.ensure_system_farm(server_key, row["save_key"])
                 for row in self.db.sin_saves.find({"server_key": server_key})]
 
+    def _manager_authorization_error(self, request_id, farm_id, mapping_id, error):
+        """Keep a failed manager handoff explicitly recoverable.
+
+        Farm and farmland confirmation is durable independently of the permission
+        handoff.  A failed handoff must therefore never look like a request that
+        is merely waiting for a game receipt; the next normal operations poll can
+        retry it safely.
+        """
+        message = str(error).strip() or "manager authorization could not be created"
+        self.db.farm_requests.update_one({"_id": request_id}, {"$set": {
+            "state": "manager_authorization_required", "farm_id": farm_id,
+            "mapping_id": mapping_id, "manager_authorization_error": message[:300],
+            "updated_at": self._now()}})
+
+    def _ensure_manager_authorization(self, request, server_key, save_key, farm_id, mapping_id, farm_name):
+        """Create or repair the owner assignment after game-side provisioning.
+
+        The durable farm lifecycle uses the registered Discord/game identity and
+        the explicit farm approval as its authorization boundary.  This is
+        intentionally separate from the older operator assignment path, which
+        still requires an identity record marked with ``approved_by``.
+        """
+        request_id = request.get("_id")
+        if not request_id:
+            return None
+        try:
+            membership_operation = self.authorization.assign(
+                request["discord_id"], server_key, save_key, int(farm_id),
+                "farm_manager", {int(farm_id): farm_name or ""},
+                request.get("approved_by") or "farm-provisioning",
+                allow_unapproved_identity=True, idempotent=True)
+            membership = self.db.memberships.find_one({
+                "server_id": server_key, "save_id": save_key,
+                "discord_id": str(request["discord_id"]), "farm_id": int(farm_id),
+                "desired_role": "farm_manager"})
+            state = "active" if isinstance(membership, dict) and membership.get("state") == "active" \
+                and membership.get("applied_role") == "farm_manager" else "awaiting_manager"
+            values = {"state": state, "farm_id": int(farm_id), "mapping_id": mapping_id,
+                      "manager_authorization_error": None, "updated_at": self._now()}
+            if membership_operation:
+                values["permission_operation_id"] = membership_operation
+            self.db.farm_requests.update_one({"_id": request_id}, {"$set": values})
+            if state == "active":
+                self.db.sin_farms.update_one({"_id": mapping_id}, {"$set": {
+                    "state": "active", "owner_discord_id": request.get("discord_id"),
+                    "updated_at": self._now()}})
+            return membership_operation
+        except Exception as error:
+            self._manager_authorization_error(request_id, farm_id, mapping_id, error)
+            return None
+
+    def _repair_manager_authorizations(self, server_key, save_key):
+        """Retry missing owner assignments during the existing Agent poll."""
+        requests = self.db.farm_requests.find({
+            "server_key": server_key, "save_key": save_key,
+            "state": {"$in": ["awaiting_manager", "manager_authorization_required"]},
+            "farm_id": {"$exists": True}}).sort("updated_at", 1).limit(50)
+        for request in list(requests):
+            operation_id = request.get("operation_id")
+            if operation_id:
+                operation = self.db.farm_operations.find_one({"_id": operation_id,
+                    "server_key": server_key, "save_key": save_key})
+                if isinstance(operation, dict) and operation.get("state") != "succeeded":
+                    continue
+            self._ensure_manager_authorization(
+                request, server_key, save_key, request.get("farm_id"),
+                request.get("mapping_id"), request.get("farm_name"))
+
     def available_fields(self, server_key, save_key):
         snapshot = self.latest_snapshot(server_key, save_key)
         if not snapshot:
@@ -210,6 +278,10 @@ class FarmLifecycle:
         return operation_id
 
     def operations_for(self, server_key, save_key):
+        # Registration/permission completion is not pushed from Discord to the
+        # game server.  Reuse this existing Agent poll as the repair cadence for
+        # a provisioned farm whose owner assignment is missing or incomplete.
+        self._repair_manager_authorizations(server_key, save_key)
         rows = list(self.db.farm_operations.find({"server_key": server_key, "save_key": save_key,
             "state": {"$in": ["pending", "dispatched"]}}).sort("created_at", 1).limit(50))
         for row in rows:
@@ -224,6 +296,13 @@ class FarmLifecycle:
         if not operation:
             raise ValueError("unknown farm operation")
         if operation.get("state") == "succeeded":
+            request_id = (operation.get("payload") or {}).get("request_id")
+            if request_id and operation.get("operation_type") == "provision_farm":
+                request = self.db.farm_requests.find_one({"_id": request_id})
+                if isinstance(request, dict) and request.get("farm_id") is not None:
+                    self._ensure_manager_authorization(
+                        request, server_key, save_key, request["farm_id"],
+                        request.get("mapping_id"), (operation.get("payload") or {}).get("canonical_name"))
             return operation
         if receipt.get("status") not in {"applied", "already_applied"}:
             self.db.farm_operations.update_one({"_id": operation["_id"]}, {"$set": {
@@ -278,17 +357,10 @@ class FarmLifecycle:
         request_id = payload.get("request_id")
         if request_id:
             request = self.db.farm_requests.find_one({"_id": request_id})
-            self.db.farm_requests.update_one({"_id": request_id}, {"$set": {
-                "state": "awaiting_manager", "farm_id": farm_id, "mapping_id": mapping_id, "updated_at": self._now()}})
             if request:
-                identity = self.db.game_identities.find_one({"server_id": server_key, "save_id": save_key,
-                    "discord_id": request["discord_id"]})
-                if identity:
-                    membership_operation = self.authorization.assign(request["discord_id"], server_key, save_key,
-                        farm_id, "farm_manager", {farm_id: payload.get("canonical_name") or ""},
-                        request.get("approved_by") or "farm-provisioning")
-                    self.db.farm_requests.update_one({"_id": request_id}, {"$set": {
-                        "permission_operation_id": membership_operation, "updated_at": self._now()}})
+                self._ensure_manager_authorization(
+                    request, server_key, save_key, farm_id, mapping_id,
+                    payload.get("canonical_name") or request.get("farm_name"))
         return self._operation(operation["_id"])
 
     def permission_applied(self, operation_id):

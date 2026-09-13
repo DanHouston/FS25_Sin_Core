@@ -290,7 +290,8 @@ class AuthorizationManager:
         if result.modified_count != 1:
             raise ValueError("Request is unknown or already reviewed")
 
-    def assign(self, discord_id, server_id, save_id, farm_id, role, farms, approved_by, session=None):
+    def assign(self, discord_id, server_id, save_id, farm_id, role, farms, approved_by,
+               session=None, allow_unapproved_identity=False, idempotent=False):
         """Called only after the Discord/operator boundary authorizes approved_by."""
         if role not in ROLES or type(farm_id) is not int or farm_id <= 0 or not approved_by:
             raise ValueError("Invalid farm, role, or approver")
@@ -302,9 +303,33 @@ class AuthorizationManager:
 
         def assign(session):
             identity = self.db.game_identities.find_one(dict(server_id=server_id, save_id=save_id, discord_id=user), session=session)
-            if not identity or not identity.get("approved_by"):
+            if not identity:
+                raise ValueError("A registered game identity is required before manager authority can be assigned")
+            if not allow_unapproved_identity and not identity.get("approved_by"):
                 raise ValueError("Staff must approve the player's game identity through a farm request first")
+            if allow_unapproved_identity and not (identity.get("fs25_unique_user_id") or identity.get("game_player_id")):
+                raise ValueError("A registered game identity is required before manager authority can be assigned")
             old = self.db.memberships.find_one({"_id": membership_id}, session=session)
+            if idempotent and old and old.get("farm_id") == farm_id and old.get("desired_role") == role:
+                if old.get("state") == "pending":
+                    existing_operation_id = old.get("operation_id")
+                    if not existing_operation_id:
+                        raise ValueError("Existing manager membership requires reconciliation")
+                    existing_job = self.db.permission_jobs.find_one(
+                        {"_id": existing_operation_id, "membership_id": membership_id}, session=session)
+                    if not existing_job:
+                        self.db.permission_jobs.update_one(
+                            {"_id": existing_operation_id},
+                            {"$setOnInsert": dict(
+                                _id=existing_operation_id, membership_id=membership_id,
+                                server_id=server_id, save_id=save_id,
+                                game_player_id=identity["game_player_id"], farm_id=farm_id,
+                                role=role, revision=old["revision"], state="pending",
+                                approved_by=str(approved_by), created_at=datetime.now(timezone.utc))},
+                            upsert=True, session=session)
+                    return existing_operation_id
+                if old.get("state") == "active" and old.get("applied_role") == role:
+                    return old.get("operation_id")
             if old and old["state"] == "pending":
                 raise ValueError("Reconcile the pending permission operation first")
             if old and old["farm_id"] != farm_id:
