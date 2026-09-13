@@ -187,15 +187,20 @@ class AgentTests(unittest.TestCase):
         original_replace = Path.replace
         replace_attempts = {"manifest": 0}
 
+        def windows_access_denied():
+            error = PermissionError(13, "Access is denied")
+            error.winerror = 5
+            return error
+
         def replace(path, destination):
             if path.name == "manifest.tmp":
                 replace_attempts["manifest"] += 1
                 if replace_attempts["manifest"] < 3:
-                    raise PermissionError(5, "Access is denied")
+                    raise windows_access_denied()
             return original_replace(path, destination)
 
         with tempfile.TemporaryDirectory() as folder, patch.object(Path, "replace", replace), \
-                patch.object(agent_module.time, "sleep") as sleep, patch.object(agent_module.os, "name", "nt"):
+                patch.object(agent_module.time, "sleep") as sleep:
             root = Path(folder)
             (root / "serverBinding.xml").write_text(
                 '<serverBinding serverKey="server" credential="secret"/>', encoding="utf-8")
@@ -222,13 +227,18 @@ class AgentTests(unittest.TestCase):
         opener = MagicMock(return_value=OperationResponse())
         original_replace = Path.replace
 
+        def windows_access_denied():
+            error = PermissionError(13, "Access is denied")
+            error.winerror = 5
+            return error
+
         def replace(path, destination):
             if path.name == "manifest.tmp":
-                raise PermissionError(5, "Access is denied")
+                raise windows_access_denied()
             return original_replace(path, destination)
 
         with tempfile.TemporaryDirectory() as folder, patch.object(Path, "replace", replace), \
-                patch.object(agent_module.time, "sleep"), patch.object(agent_module.os, "name", "nt"):
+                patch.object(agent_module.time, "sleep"):
             root = Path(folder)
             (root / "serverBinding.xml").write_text(
                 '<serverBinding serverKey="server" credential="secret"/>', encoding="utf-8")
