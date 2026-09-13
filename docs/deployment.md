@@ -32,25 +32,35 @@ requests only run CI/package proof; they do not publish a release.
 
 ## One-time VM bootstrap
 
-Using the existing emergency/manual transfer if necessary, create
-`C:\SiN\Deploy` and copy the `Update-SiN.ps1` asset there as
-`C:\SiN\Deploy\Update-SiN.ps1`. Set the FS25 mods directory either as
-`SIN_FS25_MODS_DIR` or pass `-ModsPath`; the updater intentionally does not
-guess an installation path. This bootstrap does not copy `serverBinding.xml`.
+The VM currently has the v0.1.0 updater. That updater predates the required
+updater asset download and cannot deploy v0.1.1 safely by itself. After v0.1.1
+is published, bootstrap the corrected updater directly over HTTPS:
+
+```powershell
+New-Item -ItemType Directory -Force C:\SiN\Deploy | Out-Null
+Invoke-WebRequest `
+  -Uri "https://github.com/DanHouston/FS25_SiN_Core/releases/download/v0.1.1/Update-SiN.ps1" `
+  -OutFile "C:\SiN\Deploy\Update-SiN.ps1"
+```
+
+This does not copy or inspect `serverBinding.xml`. Set the FS25 mods directory
+either as `SIN_FS25_MODS_DIR` or pass `-ModsPath`; the updater intentionally does
+not guess an installation path.
 
 ## Normal VM deployment
 
 On `SiN-FS25-01`, with the required FS25 mods directory configured:
 
 ```powershell
-$env:SIN_FS25_MODS_DIR = "C:\path\to\FarmingSimulator2025\mods"
-C:\SiN\Deploy\Update-SiN.ps1
+$env:SIN_FS25_MODS_DIR = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\mods"
+powershell.exe -ExecutionPolicy Bypass -File "C:\SiN\Deploy\Update-SiN.ps1"
 ```
 
 Specific release:
 
 ```powershell
-C:\SiN\Deploy\Update-SiN.ps1 -Version v0.1.0 -ModsPath $env:SIN_FS25_MODS_DIR
+$env:SIN_FS25_MODS_DIR = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\mods"
+powershell.exe -ExecutionPolicy Bypass -File "C:\SiN\Deploy\Update-SiN.ps1" -Version v0.1.1
 ```
 
 The updater resolves public GitHub Releases over HTTPS, downloads all assets to
@@ -72,7 +82,8 @@ currently running script is not replaced mid-execution.
 Rollback uses the most recent backup:
 
 ```powershell
-C:\SiN\Deploy\Update-SiN.ps1 -Rollback -ModsPath $env:SIN_FS25_MODS_DIR
+$env:SIN_FS25_MODS_DIR = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\mods"
+powershell.exe -ExecutionPolicy Bypass -File "C:\SiN\Deploy\Update-SiN.ps1" -Rollback
 ```
 
 Rollback restores the Agent and mod ZIP, restarts only the Agent watcher, and

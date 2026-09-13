@@ -76,6 +76,8 @@ def build(version, output):
     mod = output / MOD_ASSET
     build_agent(agent)
     build_mod(mod)
+    updater = output / "Update-SiN.ps1"
+    shutil.copy2(ROOT / "scripts" / "Update-SiN.ps1", updater)
     manifest = {
         "version": version,
         "git_commit": commit,
@@ -83,6 +85,7 @@ def build(version, output):
         "build_time_utc": datetime.now(timezone.utc).isoformat(),
         "agent_sha256": sha256(agent),
         "networklocal_sha256": sha256(mod),
+        "updater_sha256": sha256(updater),
         "agent_entrypoint": "python -m fs25_network_core.agent --watch",
         "minimum_python": "3.11",
         "release_format_version": 1,
@@ -91,10 +94,9 @@ def build(version, output):
         "github_run_id": os.environ.get("GITHUB_RUN_ID"),
     }
     (output / "build-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    checksummed = (agent, mod)
+    checksummed = (agent, mod, updater)
     (output / "SHA256SUMS.txt").write_text(
         "".join(f"{sha256(path)}  {path.name}\n" for path in checksummed), encoding="utf-8")
-    shutil.copy2(ROOT / "scripts" / "Update-SiN.ps1", output / "Update-SiN.ps1")
     return output
 
 

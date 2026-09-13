@@ -15,7 +15,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$assets = @("sin-agent.zip", "FS25_SiN_NetworkLocal.zip", "build-manifest.json", "SHA256SUMS.txt")
+$assets = @("sin-agent.zip", "FS25_SiN_NetworkLocal.zip", "build-manifest.json", "SHA256SUMS.txt", "Update-SiN.ps1")
+$checksumAssets = @("sin-agent.zip", "FS25_SiN_NetworkLocal.zip", "Update-SiN.ps1")
 $logRoot = "C:\SiN\Logs"
 
 function Get-AgentProcess {
@@ -60,7 +61,7 @@ function Get-Release($releaseVersion) {
 
 function Download-Asset($release, $name, $destination) {
     $asset = @($release.assets | Where-Object { $_.name -eq $name })
-    if ($asset.Count -ne 1) { throw "Release is missing required asset: $name" }
+    if ($asset.Count -ne 1) { throw "Required release asset missing: $name" }
     try {
         Invoke-WebRequest -Uri $asset[0].browser_download_url -OutFile $destination -UseBasicParsing
     } catch {
@@ -70,7 +71,7 @@ function Download-Asset($release, $name, $destination) {
 
 function Verify-Checksums($directory) {
     $lines = Get-Content -LiteralPath (Join-Path $directory "SHA256SUMS.txt")
-    foreach ($name in $assets[0..1]) {
+    foreach ($name in $checksumAssets) {
         $line = $lines | Where-Object { $_ -match ("\s" + [regex]::Escape($name) + "$") } | Select-Object -First 1
         if (-not $line -or $line -notmatch '^([0-9a-fA-F]{64})\s+(.+)$') { throw "Checksum entry missing for $name" }
         $expected = $Matches[1].ToLowerInvariant()
@@ -182,7 +183,10 @@ try {
     if ([int]$manifest.release_format_version -ne 1) { throw "Unsupported release format" }
     if ($manifest.agent_sha256.ToLowerInvariant() -ne (Get-FileHash (Join-Path $downloadDirectory "sin-agent.zip")).Hash.ToLowerInvariant()) { throw "Agent manifest hash mismatch" }
     if ($manifest.networklocal_sha256.ToLowerInvariant() -ne (Get-FileHash (Join-Path $downloadDirectory "FS25_SiN_NetworkLocal.zip")).Hash.ToLowerInvariant()) { throw "NetworkLocal manifest hash mismatch" }
+    if ($manifest.updater_sha256.ToLowerInvariant() -ne (Get-FileHash (Join-Path $downloadDirectory "Update-SiN.ps1")).Hash.ToLowerInvariant()) { throw "Updater manifest hash mismatch" }
     Test-AgentPackage $downloadDirectory
+    New-Item -ItemType Directory -Force -Path $DeployRoot | Out-Null
+    Copy-Item -LiteralPath (Join-Path $downloadDirectory "Update-SiN.ps1") -Destination (Join-Path $DeployRoot "Update-SiN.next.ps1") -Force
 
     $timestamp = (Get-Date).ToUniversalTime().ToString("yyyyMMdd-HHmmss")
     $backup = Join-Path $BackupRoot "$timestamp-$resolvedVersion"
@@ -203,8 +207,6 @@ try {
     Copy-Item -LiteralPath (Join-Path $downloadDirectory "FS25_SiN_NetworkLocal.zip") -Destination $targetMod -Force
     $newModHash = (Get-FileHash $targetMod).Hash
     $modChanged = $oldModHash.ToLowerInvariant() -ne $newModHash.ToLowerInvariant()
-    New-Item -ItemType Directory -Force -Path $DeployRoot | Out-Null
-    Copy-Item -LiteralPath (Join-Path $downloadDirectory "Update-SiN.ps1") -Destination (Join-Path $DeployRoot "Update-SiN.next.ps1") -Force
     Write-Deployment $release $manifest $manifest.agent_sha256 $newModHash $modChanged $backup
     Start-Agent
     $apiReachable = Test-ApiReachable
