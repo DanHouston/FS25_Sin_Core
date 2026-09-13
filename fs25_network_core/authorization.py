@@ -190,14 +190,15 @@ class AuthorizationManager:
                 "reason": "approved", "match_count": 1}
 
     def requests(self, server_id, save_id):
-        return list(self.db.farm_requests.find(dict(server_id=server_id, save_id=save_id, state="requested")).sort("created_at", 1).limit(15))
+        return list(self.db.farm_requests.find(dict(server_id=server_id, save_id=save_id,
+            state={"$in": ["requested", "pending"]})).sort("created_at", 1).limit(15))
 
     def pending_request_for_user(self, discord_id, server_id, save_id):
         request = self.db.farm_requests.find_one(dict(
             _id=key(server_id, save_id, str(discord_id)),
             server_id=server_id,
             save_id=save_id,
-            state="requested",
+            state={"$in": ["requested", "pending"]},
         ))
         if not request:
             raise ValueError("That member has no pending farm request for this server")
@@ -339,6 +340,18 @@ class AuthorizationManager:
             if result.modified_count != 1:
                 raise ValueError("Stale permission operation")
             self.db.permission_jobs.update_one({"_id": operation_id}, {"$set": {"state": "applied", "receipt": receipt}}, session=session)
+            # FarmLifecycle owns the request transition after the persisted
+            # manager permission receipt.  Keep this hook optional so the
+            # authorization manager remains usable by existing callers.
+            request = self.db.farm_requests.find_one({"permission_operation_id": operation_id}, session=session)
+            if request and request.get("state") == "awaiting_manager":
+                now = datetime.now(timezone.utc)
+                self.db.farm_requests.update_one({"_id": request["_id"], "state": "awaiting_manager"},
+                    {"$set": {"state": "active", "activated_at": now, "updated_at": now}}, session=session)
+                if request.get("mapping_id"):
+                    self.db.sin_farms.update_one({"_id": request["mapping_id"]}, {"$set": {
+                        "state": "active", "owner_discord_id": request.get("discord_id"),
+                        "activated_at": now, "updated_at": now}}, session=session)
             return "applied"
         return self.database.atomic(acknowledge)
 

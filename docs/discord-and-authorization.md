@@ -1,5 +1,32 @@
 # Admin-controlled farm onboarding
 
+## Durable farm lifecycle
+
+Pairing establishes server trust; it does not create a farm. Once an authenticated
+server heartbeat reaches the central API, SiN queues an idempotent bootstrap
+operation for the shared system farm **SiN Harvest**. The Agent delivers that
+operation through `permission-commands/`; the authoritative NetworkLocal server
+calls the verified `FarmManager:createFarm(name, color, password, farmId)` API,
+re-enumerates farms to learn the actual ID, and returns a durable receipt. A
+temporary FS25 outage leaves the operation pending.
+
+Member farm requests use the approved application's farm name and a numeric
+starting farmland ID. `/farm_request` stores the friendly server selection and
+field choice; it never creates a farm or grants authority. Staff uses
+`/farm_approve` to queue a `provision_farm` operation. NetworkLocal creates or
+adopts the exact named farm, verifies that the requested field is unowned, and
+calls `g_farmlandManager:setLandOwnership(farmlandId, farmId)` only when safe.
+The receipt must prove the actual farm and field owner before SiN queues the
+requester's manager permission. Until that permission receipt is applied, the
+request remains `awaiting_manager`; only then does it become `active`.
+
+`/farm_status` takes no server argument and resolves the caller's latest request.
+`/server_reconcile server:<friendly selection>` safely re-queues missing system
+resources for an already paired server. A failed or uncertain game mutation is
+recorded as `reconciliation_required`; operators must reconcile it before retrying.
+Ordinary members are never made managers of SiN Harvest, and registration alone
+still grants no farm, land, or manager authority.
+
 Players request a farm. Only Network Admins associate Discord identities with
 observed game players and farms. `/link` is removed on the next successful guild
 command sync; old code-issuance and verification methods now reject all calls.
@@ -79,21 +106,17 @@ See [Discord application commands](https://docs.discord.com/developers/interacti
 4. Staff opens #farm-approvals and runs `/farm_requests server:local-dev`.
    It lists the first 15 pending requests, including requester, farm name, and
    starting field. Requests persist in MongoDB.
-5. Staff reviews the field choice and creates the named farm in game.
-6. With the save running, staff runs `/farm_roster server:local-dev`. It lists
-   actual farm IDs and stable game player IDs from the mod. Confirm which game
-   player corresponds to the Discord requester; a matching display name alone
-   is not proof. Coordinate directly with the player if necessary.
-7. Staff runs `/farm_approve server:local-dev`, then selects the requesting
-   requester from the pending-request picker, the named farm, and the observed
-   player from the command's pickers. The requester picker contains only
-   pending requests, so bot accounts cannot appear. Player choices display
-   `Nickname: <nickname> | FS25 player ID: <stable ID>`. Confirm
-   `identity_and_land_confirmed:true` only after verification. The selected
-   player must exist in the fresh roster, the farm must be named, and its name
-   must match the request.
-8. `/farm_status server:local-dev` shows the land-pending association. The mod
-   must acknowledge the exact land operation before authorization becomes active.
+5. Staff reviews the field choice and runs `/farm_approve server:local-dev`.
+   Select the requester from the pending picker. The backend queues a durable
+   `provision_farm` operation; staff does not create the farm or guess its ID.
+6. Keep the save and Agent running. NetworkLocal creates/adopts the exact
+   approved farm name, discovers the actual FS25 farm ID, checks the requested
+   field is still unowned, and returns a receipt. A field conflict becomes a
+   recoverable reconciliation state and never steals land.
+7. The central service then queues the separate manager permission operation.
+   Manager authority is not active until NetworkLocal confirms that operation.
+8. `/farm_status` takes no server argument and reports provisioning,
+   awaiting-manager, active, rejected, or reconciliation-required state.
 
 To decline a request, staff uses `/farm_reject server member reason`. The
 requester can read its state and rejection reason using /farm_status.
@@ -129,13 +152,14 @@ land/farm/owner/purchase metadata; it does not invoke discovered methods or
 change the save.
 
 After `/farm_approve`, the backend writes an idempotent
-`operation_type=assign_farmland` command into the existing permission mailbox.
-The trusted mod validates the live farm and farmland state, calls the verified
-`g_farmlandManager:setLandOwnership(farmlandId, farmId, false)` API only for
+`operation_type=provision_farm` command into the existing permission mailbox.
+The trusted mod validates or creates the exact named farm and farmland state, calls the verified
+`g_farmlandManager:setLandOwnership(farmlandId, farmId)` API only for
 unowned land, verifies the resulting owner, and writes a matching receipt.
 Already-owned target land is acknowledged idempotently; land owned by another
-farm is rejected and never transferred. Authorization remains pending until
-the authoritative receipt is processed.
+farm is rejected and never transferred. The older `assign_farmland` operation
+remains supported for compatible existing records. Authorization remains
+pending until the authoritative farm and manager receipts are processed.
 
 ## Records and transaction behavior
 

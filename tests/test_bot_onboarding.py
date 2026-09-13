@@ -37,7 +37,7 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         commands = [
             ("farm_requests", ("local-dev",)),
             ("farm_roster", ("local-dev",)),
-            ("farm_approve", ("local-dev", "request", 1, True)),
+            ("farm_approve", ("local-dev", "request")),
             ("farm_reject", ("local-dev", "request", "reason")),
             ("farm_assign", (MagicMock(), "local-dev", 1, app_commands.Choice(name="worker", value="worker"))),
         ]
@@ -47,6 +47,7 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_farm_approve_member_is_a_requester_picker(self):
         command = self.bot.tree.get_command("farm_approve")
+        self.assertEqual([option["name"] for option in command.to_dict(self.bot.tree)["options"]], ["server", "member"])
         option = next(item for item in command.to_dict(self.bot.tree)["options"] if item["name"] == "member")
         self.assertEqual(option["type"], 3)  # Discord string option with autocomplete, not guild-member picker.
         self.assertTrue(option["autocomplete"])

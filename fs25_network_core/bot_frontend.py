@@ -16,6 +16,7 @@ from .channel_policy import require_command_channel
 from .community import CommunityApplications
 from .server_registry import ServerRegistry
 from .activity import ActivityPublisher
+from .farm_lifecycle import FarmLifecycle, SYSTEM_FARM_NAME
 
 
 class DiscordSetupError(RuntimeError):
@@ -44,6 +45,7 @@ class NetworkBot(discord.Client):
         self.authorizations = authorizations or {}
         self.community = CommunityApplications(bank.database)
         self.server_registry = ServerRegistry(bank.database)
+        self.farm_lifecycle = FarmLifecycle(bank.database, self.authorization)
         self.activity_publisher = ActivityPublisher(self, bank.database)
         self.sin_member_role_id = int(sin_member_role_id) if sin_member_role_id else None
         role_override = os.environ.get("DISCORD_OPERATOR_ROLE_IDS")
@@ -213,9 +215,15 @@ class NetworkBot(discord.Client):
             if not server or server not in self.servers:
                 return []
             try:
-                records = await asyncio.to_thread(auth_for(server).requests, server, self.servers[server]["save_id"])
+                records = await asyncio.to_thread(self.farm_lifecycle.requests, server, self.servers[server]["save_id"])
             except ValueError:
                 return []
+            if not isinstance(records, list) or not records:
+                # Keep autocomplete compatible with legacy test/local records
+                # while new requests use the canonical server_key/save_key.
+                legacy_records = await asyncio.to_thread(auth_for(server).requests, server, self.servers[server]["save_id"])
+                if isinstance(legacy_records, list) and legacy_records:
+                    records = legacy_records
             choices = []
             for record in records:
                 display_name = record["discord_id"]
@@ -230,17 +238,31 @@ class NetworkBot(discord.Client):
                     choices.append(app_commands.Choice(name=label[:100], value=record["discord_id"]))
             return choices[:25]
 
+        async def server_choices(interaction: discord.Interaction, current: str):
+            if interaction.guild_id != self.guild.id:
+                return []
+            choices = []
+            for server_key, config in self.servers.items():
+                label = config.get("display_name") or server_key
+                if current.lower() in label.lower() or current.lower() in server_key.lower():
+                    choices.append(app_commands.Choice(name=label[:100], value=server_key))
+            return choices[:25]
+
         @self.tree.command(name="farm_request", description="Request a farm and starting field for staff review")
         @app_commands.check(channel_check)
         async def farm_request(interaction: discord.Interaction, server: str, starting_field: str):
             config = server_config(interaction, server)
             await interaction.response.defer(ephemeral=True)
-            record = await asyncio.to_thread(auth_for(server).request_farm, str(interaction.user.id), server,
+            record = await asyncio.to_thread(self.farm_lifecycle.request_farm, str(interaction.user.id), server,
                                             config["save_id"], starting_field)
             await interaction.followup.send(
                 f"Your request for **{record['farm_name']}** at **{record['starting_field']}** is pending staff review. "
                 "Staff will create the farm and confirm your in-game identity. Repeated submissions keep this request.",
                 ephemeral=True)
+
+        @farm_request.autocomplete("server")
+        async def farm_request_server_autocomplete(interaction: discord.Interaction, current: str):
+            return await server_choices(interaction, current)
 
         @self.tree.command(name="farm_requests", description="Staff: list pending farm requests")
         @app_commands.check(channel_check)
@@ -249,7 +271,7 @@ class NetworkBot(discord.Client):
             staff_check(interaction)
             config = server_config(interaction, server)
             await interaction.response.defer(ephemeral=True)
-            records = await asyncio.to_thread(auth_for(server).requests, server, config["save_id"])
+            records = await asyncio.to_thread(self.farm_lifecycle.requests, server, config["save_id"])
             rows = [f"<@{r['discord_id']}> requested **{r['farm_name']}**; starting field: **{r['starting_field']}**. "
                     "Use `/farm_approve` and select this member." for r in records]
             for row in rows or ["No pending requests."]:
@@ -260,7 +282,7 @@ class NetworkBot(discord.Client):
         @app_commands.default_permissions(administrator=True)
         async def farm_roster(interaction: discord.Interaction, server: str):
             staff_check(interaction)
-            server_config(interaction, server)
+            config = server_config(interaction, server)
             await interaction.response.defer(ephemeral=True)
             snapshot = await asyncio.to_thread(ServerScraper(self.servers).snapshot, server)
             await asyncio.to_thread(auth_for(server).observe_players, server, config["save_id"], snapshot)
@@ -269,46 +291,22 @@ class NetworkBot(discord.Client):
             for row in rows or ["No farms or players reported."]:
                 await interaction.followup.send(row[:1900], ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
-        @self.tree.command(name="farm_approve", description="Staff: associate a request with an observed player and created farm")
+        @self.tree.command(name="farm_approve", description="Staff: approve a request and queue automatic farm provisioning")
         @app_commands.check(channel_check)
         @app_commands.default_permissions(administrator=True)
-        async def farm_approve(interaction: discord.Interaction, server: str, member: str,
-                               farm_id: str, identity_and_land_confirmed: bool):
+        async def farm_approve(interaction: discord.Interaction, server: str, member: str):
             staff_check(interaction)
             config = server_config(interaction, server)
             await interaction.response.defer(ephemeral=True)
-            snapshot = await asyncio.to_thread(ServerScraper(self.servers).snapshot, server)
-            request = await asyncio.to_thread(auth_for(server).pending_request_for_user, member, server, config["save_id"])
-            try:
-                selected_farm_id = int(farm_id)
-            except ValueError:
-                raise ValueError("Choose a farm from the suggestions") from None
-            identity = await asyncio.to_thread(auth_for(server).db.game_identities.find_one,
-                {"server_id": server, "save_id": config["save_id"], "discord_id": str(member)})
-            if not identity:
-                raise ValueError(f"{member} has not linked an FS25 player identity yet; have them join and use /register.")
-            player_id = identity.get("fs25_unique_user_id") or identity.get("game_player_id")
-            if player_id not in snapshot.get("players", {}):
-                raise ValueError(f"{member}'s registered FS25 identity has not been observed on this server/save yet.")
-            operation = await asyncio.to_thread(auth_for(server).approve_request, request["_id"], server, config["save_id"],
-                selected_farm_id, player_id, snapshot, str(interaction.user.id), identity_and_land_confirmed)
-            nickname = approved_nickname(snapshot["players"][player_id], request["farm_name"])
-            nickname_note = ""
-            try:
-                requester = await interaction.guild.fetch_member(int(member))
-                if requester.bot:
-                    raise ValueError("Bot accounts cannot receive farm assignments")
-                await requester.edit(nick=nickname, reason="SiN JiN farm approval")
-            except discord.Forbidden:
-                nickname_note = " Discord nickname was not set; grant SiN JiN Manage Nicknames and place its role above players."
+            request = await asyncio.to_thread(self.farm_lifecycle.request_status, member)
+            if not request or request.get("server_key") != server or request.get("save_key") != config["save_id"]:
+                raise ValueError("That member has no pending farm request for this server")
+            operation = await asyncio.to_thread(self.farm_lifecycle.approve_request, request["_id"], server,
+                                                config["save_id"], str(interaction.user.id))
             await interaction.followup.send(
                 f"Approved requester `{member}` for **{request['farm_name']}**. "
-                f"Discord name set to **{nickname}**. Permission sync is pending (operation `{operation}`). The game has not applied permissions yet.{nickname_note}",
+                f"Farm provisioning is pending (operation `{operation}`). Manager authority is withheld until the game confirms the exact farm and field.",
                 ephemeral=True)
-
-        @farm_approve.autocomplete("farm_id")
-        async def farm_approve_farm_autocomplete(interaction: discord.Interaction, current: str):
-            return await observed_farms(interaction, current)
 
         @farm_approve.autocomplete("member")
         async def farm_approve_member_autocomplete(interaction: discord.Interaction, current: str):
@@ -321,8 +319,10 @@ class NetworkBot(discord.Client):
             staff_check(interaction)
             config = server_config(interaction, server)
             await interaction.response.defer(ephemeral=True)
-            request = await asyncio.to_thread(auth_for(server).pending_request_for_user, member, server, config["save_id"])
-            await asyncio.to_thread(auth_for(server).reject_request, request["_id"], server, config["save_id"], str(interaction.user.id), reason)
+            request = await asyncio.to_thread(self.farm_lifecycle.request_status, member)
+            if not request or request.get("server_key") != server or request.get("save_key") != config["save_id"]:
+                raise ValueError("That member has no pending farm request for this server")
+            await asyncio.to_thread(self.farm_lifecycle.reject_request, request["_id"], server, config["save_id"], str(interaction.user.id), reason)
             await interaction.followup.send(f"Farm request for requester `{member}` rejected.", ephemeral=True)
 
         @farm_reject.autocomplete("member")
@@ -331,23 +331,34 @@ class NetworkBot(discord.Client):
 
         @self.tree.command(name="farm_status", description="View your farm assignment and permission sync state")
         @app_commands.check(channel_check)
-        async def farm_status(interaction: discord.Interaction, server: str):
-            config = server_config(interaction, server)
+        async def farm_status(interaction: discord.Interaction):
+            if interaction.guild_id != self.guild.id:
+                raise ValueError("Use this command in the configured Discord server")
             await interaction.response.defer(ephemeral=True)
-            authorization = auth_for(server)
-            record = await asyncio.to_thread(authorization.status, str(interaction.user.id), server, config["save_id"])
-            message = "No farm assignment yet. Submit /farm_request for staff review."
-            if not record:
-                from .authorization import key
-                request = await asyncio.to_thread(authorization.db.farm_requests.find_one,
-                                                 {"_id": key(server, config["save_id"], str(interaction.user.id))})
-                if request:
-                    message = f"Farm request: {request['state']}."
-                    if request.get("reason"):
-                        message += f" Reason: {request['reason']}"
-            if record:
-                message = f"Farm ID: {record['farm_id']}; requested role: {record['desired_role']}; applied role: {record['applied_role'] or 'none'}; sync: {record['state']}."
+            request = await asyncio.to_thread(self.farm_lifecycle.request_status, str(interaction.user.id))
+            message = "You have not requested a farm. Use /farm_request."
+            if request:
+                server_name = self.servers.get(request.get("server_key"), {}).get("display_name", request.get("server_key"))
+                message = (f"Farm: {request.get('farm_name')}\nServer: {server_name}\n"
+                           f"Starting field: {request.get('starting_field')}\nStatus: {request.get('state')}")
+                if request.get("farm_id"):
+                    message += f"\nFS25 Farm ID: {request['farm_id']}"
             await interaction.followup.send(message, ephemeral=True)
+
+        @self.tree.command(name="server_reconcile", description="Staff: reconcile required SiN server resources")
+        @app_commands.check(channel_check)
+        @app_commands.default_permissions(administrator=True)
+        async def server_reconcile(interaction: discord.Interaction, server: str):
+            staff_check(interaction)
+            server_config(interaction, server)
+            await interaction.response.defer(ephemeral=True)
+            results = await asyncio.to_thread(self.farm_lifecycle.ensure_for_server, server)
+            status = "active" if results and all(item.get("status") == "active" for item in results) else "pending"
+            await interaction.followup.send(f"Server reconciliation {status}. Required system farm: **{SYSTEM_FARM_NAME}**.", ephemeral=True)
+
+        @server_reconcile.autocomplete("server")
+        async def server_reconcile_autocomplete(interaction: discord.Interaction, current: str):
+            return await server_choices(interaction, current)
 
         @self.tree.command(name="farm_assign", description="Staff: assign or revoke a verified player's farm role")
         @app_commands.check(channel_check)
@@ -458,6 +469,9 @@ def main():
     for server_key, config in servers.items():
         if config.get("fs25_save_id") is not None and config.get("save_id"):
             registry.configure_save(server_key, config["save_id"], config["fs25_save_id"])
+        record = registry.info(server_key)
+        if record and record.get("display_name"):
+            config.setdefault("display_name", record["display_name"])
     authorizations = {}
     for server_id, config in servers.items():
         if config.get("development"):

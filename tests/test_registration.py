@@ -22,8 +22,9 @@ class RegistrationTests(unittest.TestCase):
     def test_request_creates_and_reuses_active_human_code(self):
         expires = datetime.now(timezone.utc) + timedelta(minutes=10)
         first = self.auth.registration_request("server", "save", "stable-id", "Observed", "12")
+        issued_at = self.database.db.registration_codes.update_one.call_args.args[1]["$setOnInsert"]["issued_at"]
         self.database.db.registration_codes.find_one.return_value = {
-            "issued_at": int(datetime.now(timezone.utc).timestamp()), "expires_at": expires}
+            "issued_at": issued_at, "expires_at": expires}
         second = self.auth.registration_request("server", "save", "stable-id", "Observed", "12")
         self.assertEqual(first["status"], "registration_required")
         self.assertEqual(first["code"], second["code"])
@@ -209,6 +210,15 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("local pseudo = self:isDedicatedServerUser(user, userFarm)", snapshot)
         self.assertIn("if not pseudo then", snapshot)
         self.assertIn("currentPlayers[identityKey]", snapshot)
+
+    def test_networklocal_farm_operations_use_verified_authoritative_apis(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_NetworkLocal" / "NetworkLocal.lua").read_text(
+            encoding="utf-8")
+        self.assertIn("g_farmManager:createFarm(farmName, 0, \"\", nil)", source)
+        self.assertIn("g_farmManager:getFarmById(farmId)", source)
+        self.assertIn("g_farmlandManager:setLandOwnership(farmlandId, farmId)", source)
+        self.assertNotRegex(source, r"setLandOwnership\([^\n]*,[^\n]*,[^\n]*\)")
+        self.assertIn('operationType == "ensure_farm" or operationType == "provision_farm"', source)
 
     def test_networklocal_refreshes_required_registration_on_heartbeat_reconciliation(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_NetworkLocal" / "NetworkLocal.lua").read_text(

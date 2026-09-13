@@ -32,6 +32,13 @@ class Database:
         self.db.permission_jobs.create_index([("server_id", 1), ("save_id", 1), ("state", 1)])
         self.db.farm_requests.create_index([("server_id", 1), ("save_id", 1), ("state", 1), ("created_at", 1)])
         self.db.land_operations.create_index([("server_id", 1), ("save_id", 1), ("request_id", 1)], unique=True)
+        self.db.farm_operations.create_index([("server_key", 1), ("save_key", 1), ("state", 1), ("created_at", 1)])
+        self.db.sin_farms.create_index([("server_key", 1), ("save_key", 1), ("farm_type", 1), ("canonical_name", 1)])
+        self.db.sin_farms.create_index("source_request_id", unique=True,
+            partialFilterExpression={"source_request_id": {"$type": "string"}})
+        self.db.sin_farms.create_index([("server_key", 1), ("save_key", 1), ("owner_discord_id", 1)],
+            unique=True, partialFilterExpression={"owner_discord_id": {"$type": "string"}})
+        self.db.server_snapshots.create_index([("server_key", 1), ("save_key", 1)], unique=True)
         self.db.community_applications.create_index([("state", 1), ("submitted_at", 1)])
         self.db.sin_servers.create_index("server_key", unique=True)
         self.db.sin_saves.create_index([("server_key", 1), ("fs25_save_id", 1)], unique=True)

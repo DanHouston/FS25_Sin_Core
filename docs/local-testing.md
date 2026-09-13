@@ -309,3 +309,24 @@ midnight (for example 23:50/00:10), and confirm the target remains Eastern local
 time minus six hours. Minute-of-day alone cannot distinguish arbitrary
 displacements greater than twelve hours, so those cases use the documented
 shortest-drift rule and should be manually reconciled.
+## Remote farm lifecycle smoke test
+
+After pairing and configuring `sin-fs25-01` / `sin-fs25-main`, keep the central
+API, Agent, and dedicated server running. The first authenticated heartbeat
+queues the idempotent `SiN Harvest` system-farm ensure operation. Confirm the
+Agent creates a command under `permission-commands/`, NetworkLocal returns a
+receipt, and the central `sin_farms` mapping records the actual FS25 farm ID.
+Pairing remains valid if this operation is pending while FS25 is offline.
+
+An approved member then runs `/farm_request` with the friendly server and an
+available starting field. Staff reviews the request and runs `/farm_approve`.
+Confirm the Agent delivers `provision_farm`, NetworkLocal creates/adopts the
+named farm, refuses an already-owned field, and returns a receipt proving both
+farm and field ownership. The requester remains non-manager until the separate
+manager permission receipt is applied. `/farm_status` should progress from
+`provisioning` to `awaiting_manager` to `active`; registration, approval, farm
+creation, field ownership, and manager authority remain separate records.
+
+If any game mutation may have occurred without a trustworthy receipt, stop
+retries and inspect the central operation as `reconciliation_required`. Do not
+delete or recreate the farm manually just to clear that state.

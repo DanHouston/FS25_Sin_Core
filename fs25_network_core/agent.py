@@ -21,6 +21,10 @@ class PairingAgent:
         self.registration_responses = self.directory / "registration-responses"
         self.backend_root = backend_url.rstrip("/")
         self.backend_url = self.backend_root + "/api/server/pair"
+        self.operations_url = self.backend_root + "/api/server/operations"
+        self.receipts_url = self.backend_root + "/api/server/operation-receipts"
+        self.snapshot_url = self.backend_root + "/api/server/snapshot"
+        self.manager_authority_url = self.backend_root + "/api/server/manager-authority"
         self.opener = opener or urlopen
 
     @staticmethod
@@ -108,6 +112,158 @@ class PairingAgent:
             if response.status != 200:
                 raise RuntimeError("clock API rejected request")
             return json.loads(response.read().decode("utf-8"))
+
+    def _get_operations(self, server_key, credential, fs25_save_id):
+        url = self.operations_url + "?fs25_save_id=" + quote(str(fs25_save_id), safe="")
+        request = Request(url, headers={"X-SiN-Server-Key": server_key,
+                                        "Authorization": "Bearer " + credential}, method="GET")
+        with self.opener(request, timeout=10) as response:
+            if response.status != 200:
+                raise RuntimeError("operation API rejected request")
+            result = json.loads(response.read().decode("utf-8"))
+        if not isinstance(result, dict) or not isinstance(result.get("operations"), list):
+            raise ValueError("operation API returned an invalid response")
+        return result["operations"]
+
+    def _post_receipt(self, server_key, credential, fs25_save_id, receipt):
+        body = json.dumps({"fs25_save_id": str(fs25_save_id), "receipt": receipt}).encode("utf-8")
+        request = Request(self.receipts_url, data=body,
+                          headers={"Content-Type": "application/json", "X-SiN-Server-Key": server_key,
+                                   "Authorization": "Bearer " + credential}, method="POST")
+        with self.opener(request, timeout=10) as response:
+            if response.status != 200:
+                raise HTTPError(request.full_url, response.status, "receipt API rejected request", response.headers, None)
+            return json.loads(response.read().decode("utf-8"))
+
+    def _snapshot_payload(self):
+        root = ElementTree.parse(self.directory / "snapshot.xml").getroot()
+        if root.tag != "networkLocal" or root.get("source") != "game":
+            raise ValueError("invalid game snapshot")
+        farms = {}
+        for node in root.findall("./farms/farm"):
+            if node.get("farmId") is not None:
+                farms[node.get("farmId")] = node.get("name", "")
+        players = {}
+        for node in root.findall("./players/player"):
+            unique = node.get("uniqueId")
+            if unique:
+                players[unique] = {"name": node.get("name", ""), "user_id": node.get("userId"),
+                                   "farm_id": int(node.get("farmId", "0")), "connected": True}
+        farmlands = {}
+        for node in root.findall("./farmlands/farmland"):
+            if node.get("id") is not None:
+                farmlands[node.get("id")] = int(node.get("farmId", "0"))
+        return {"source": "game", "session": root.get("session", ""),
+                "sequence": int(root.get("sequence", "0")),
+                "savegame_index": int(root.get("savegameIndex", "0")),
+                "farms": farms, "players": players, "farmlands": farmlands}
+
+    def process_operations_once(self):
+        """Materialize central durable operations into the existing Lua mailbox."""
+        self.commands.mkdir(parents=True, exist_ok=True)
+        try:
+            server_key, credential = self._binding()
+            fs25_save_id = self._runtime_save_id()
+            operations = self._get_operations(server_key, credential, fs25_save_id)
+        except (ElementTree.ParseError, ValueError, OSError, HTTPError, URLError, TimeoutError, RuntimeError, json.JSONDecodeError):
+            return []
+        delivered = []
+        for operation in operations:
+            operation_id = str(operation.get("operation_id", ""))
+            payload = operation.get("payload") or {}
+            if not operation_id or not isinstance(payload, dict):
+                continue
+            destination = self.commands / (operation_id + ".xml")
+            if not destination.exists():
+                values = {"operation_id": operation_id, "operation_type": operation.get("operation_type", ""),
+                          "server_id": server_key, "save_id": operation.get("save_key", ""),
+                          **{str(key): value for key, value in payload.items()}}
+                root_name = "permissionCommand" if operation.get("operation_type") == "permission" else "networkLocalCommand"
+                root = ElementTree.Element(root_name, schemaVersion="1",
+                                           **{key: str(value) for key, value in values.items() if value is not None})
+                temporary = destination.with_suffix(".tmp")
+                ElementTree.ElementTree(root).write(temporary, encoding="utf-8", xml_declaration=True)
+                temporary.replace(destination)
+            delivered.append(operation_id)
+        manifest = ElementTree.Element("permissionCommands", schemaVersion="1")
+        for operation_id in delivered:
+            ElementTree.SubElement(manifest, "command", operationId=operation_id)
+        temporary = self.commands / "manifest.tmp"
+        ElementTree.ElementTree(manifest).write(temporary, encoding="utf-8", xml_declaration=True)
+        temporary.replace(self.commands / "manifest.xml")
+        return delivered
+
+    def process_receipts_once(self):
+        try:
+            server_key, credential = self._binding()
+            fs25_save_id = self._runtime_save_id()
+        except (ElementTree.ParseError, ValueError, OSError):
+            return []
+        receipts = []
+        receipt_directory = self.directory / "permission-receipts"
+        if not receipt_directory.exists():
+            return receipts
+        for path in sorted(receipt_directory.glob("*.xml")):
+            try:
+                root = ElementTree.parse(path).getroot()
+                if root.tag not in {"networkLocalReceipt", "permissionReceipt"} or not root.get("operation_id"):
+                    continue
+                receipt = dict(root.attrib)
+                receipt["result"] = {key: value for key, value in receipt.items()
+                                      if key not in {"operation_id", "operation_type", "server_id", "save_id", "status", "receipt"}}
+                self._post_receipt(server_key, credential, fs25_save_id, receipt)
+                path.unlink()
+                receipts.append(path.name)
+            except (ElementTree.ParseError, ValueError):
+                self._quarantine(path)
+            except (HTTPError, URLError, TimeoutError, RuntimeError, OSError, json.JSONDecodeError) as error:
+                if getattr(error, "code", None) in {400, 401, 403, 404, 422}:
+                    self._quarantine(path)
+        return receipts
+
+    def process_manager_authority_once(self):
+        try:
+            server_key, credential = self._binding()
+            fs25_save_id = self._runtime_save_id()
+            url = self.manager_authority_url + "?fs25_save_id=" + quote(str(fs25_save_id), safe="")
+            request = Request(url, headers={"X-SiN-Server-Key": server_key,
+                                            "Authorization": "Bearer " + credential}, method="GET")
+            with self.opener(request, timeout=10) as response:
+                if response.status != 200:
+                    raise RuntimeError("manager authority API rejected request")
+                payload = json.loads(response.read().decode("utf-8"))
+            managers = payload.get("managers") if isinstance(payload, dict) else None
+            if not isinstance(managers, list):
+                raise ValueError("manager authority API returned an invalid response")
+            root = ElementTree.Element("managerAuthority", schemaVersion="1")
+            for manager in managers:
+                if isinstance(manager, dict) and manager.get("game_player_id") is not None:
+                    ElementTree.SubElement(root, "manager", gamePlayerId=str(manager["game_player_id"]),
+                                            farmId=str(manager.get("farm_id", 0)))
+            destination = self.directory / "manager-authority.xml"
+            temporary = destination.with_suffix(".tmp")
+            ElementTree.ElementTree(root).write(temporary, encoding="utf-8", xml_declaration=True)
+            temporary.replace(destination)
+            return True
+        except (ElementTree.ParseError, ValueError, OSError, HTTPError, URLError, TimeoutError, RuntimeError, json.JSONDecodeError):
+            return False
+
+    def process_snapshot_once(self):
+        try:
+            server_key, credential = self._binding()
+            fs25_save_id = self._runtime_save_id()
+            snapshot = self._snapshot_payload()
+            body = json.dumps({"fs25_save_id": fs25_save_id, "snapshot": snapshot}).encode("utf-8")
+            request = Request(self.snapshot_url, data=body,
+                              headers={"Content-Type": "application/json", "X-SiN-Server-Key": server_key,
+                                       "Authorization": "Bearer " + credential}, method="POST")
+            with self.opener(request, timeout=10) as response:
+                if response.status != 200:
+                    raise RuntimeError("snapshot API rejected request")
+                response.read()
+            return True
+        except (ElementTree.ParseError, ValueError, OSError, HTTPError, URLError, TimeoutError, RuntimeError, json.JSONDecodeError):
+            return False
 
     def _write_clock_policy(self, policy):
         destination = self.directory / "clock-policy.xml"
@@ -244,10 +400,20 @@ class PairingAgent:
 
     def watch(self, interval=2.0, stop=None):
         next_clock_refresh = 0
+        next_snapshot = 0
+        next_authority = 0
         while not stop or not stop():
             self.process_once()
             self.process_events_once()
             self.process_registration_once()
+            self.process_operations_once()
+            self.process_receipts_once()
+            if time.monotonic() >= next_authority:
+                self.process_manager_authority_once()
+                next_authority = time.monotonic() + 20
+            if time.monotonic() >= next_snapshot:
+                self.process_snapshot_once()
+                next_snapshot = time.monotonic() + 20
             if time.monotonic() >= next_clock_refresh:
                 refresh_seconds = self.process_clock_once()
                 next_clock_refresh = time.monotonic() + max(5, refresh_seconds)

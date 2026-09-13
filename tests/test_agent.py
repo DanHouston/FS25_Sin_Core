@@ -147,3 +147,26 @@ class AgentTests(unittest.TestCase):
             text = (root / "clock-policy.xml").read_text(encoding="utf-8")
             self.assertIn('target_game_minutes="840"', text)
             self.assertNotIn("secret-value", text)
+
+    def test_agent_materializes_central_farm_operation_without_mongo(self):
+        class OperationResponse:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self):
+                return json.dumps({"operations": [{
+                    "operation_id": "op-1", "operation_type": "ensure_farm",
+                    "save_key": "main", "payload": {"farm_type": "system", "canonical_name": "SiN Harvest"}
+                }]}).encode()
+
+        opener = MagicMock(return_value=OperationResponse())
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "serverBinding.xml").write_text('<serverBinding serverKey="server" credential="secret"/>', encoding="utf-8")
+            (root / "snapshot.xml").write_text('<networkLocal source="game" savegameIndex="1"/>', encoding="utf-8")
+            agent = PairingAgent(root, "https://central", opener)
+            self.assertEqual(agent.process_operations_once(), ["op-1"])
+            command = root / "permission-commands/op-1.xml"
+            self.assertIn('operation_type="ensure_farm"', command.read_text(encoding="utf-8"))
+            self.assertIn('canonical_name="SiN Harvest"', command.read_text(encoding="utf-8"))
+            self.assertNotIn("pymongo", "".join(path.read_text(encoding="utf-8") for path in [Path(agent_module.__file__)]))

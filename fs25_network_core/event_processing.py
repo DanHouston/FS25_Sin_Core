@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from .activity import ActivityOutbox
 from .authorization import AuthorizationManager
 from .server_registry import ServerRegistry
+from .farm_lifecycle import FarmLifecycle
 from pymongo.errors import DuplicateKeyError
 
 LOG = logging.getLogger(__name__)
@@ -29,6 +30,7 @@ class CentralEventProcessor:
         self.db = database.db
         self.registry = ServerRegistry(database)
         self.authorization = AuthorizationManager(database)
+        self.farm_lifecycle = FarmLifecycle(database, self.authorization)
 
     def process(self, event):
         if not isinstance(event, dict):
@@ -53,6 +55,10 @@ class CentralEventProcessor:
 
         now = datetime.now(timezone.utc)
         if event_type == "heartbeat":
+            try:
+                self.farm_lifecycle.ensure_system_farm(record["server_key"], save_key)
+            except Exception:
+                LOG.exception("server resource bootstrap could not be queued")
             was_online = bool(record.get("online"))
             self.registry.heartbeat(record["server_key"], event["server_credential"])
             if not was_online:

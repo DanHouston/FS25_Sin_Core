@@ -94,3 +94,21 @@ class ServerApiTests(unittest.TestCase):
         self.assertEqual(body["save_key"], "main")
         self.server.RequestHandlerClass.event_processor.registry.authenticate.assert_called_with("sin-fs25-01", "secret")
         connection.close()
+    def test_authenticated_operations_endpoint_returns_transport_safe_fields(self):
+        handler = self.server.RequestHandlerClass
+        handler.farm_lifecycle = MagicMock()
+        handler.event_processor.registry.authenticate.return_value = {"server_key": "sin-fs25-01"}
+        handler.event_processor.registry.resolve_save.return_value = "main"
+        handler.farm_lifecycle.operations_for.return_value = [{
+            "_id": "op", "operation_id": "op", "operation_type": "ensure_farm",
+            "server_key": "sin-fs25-01", "save_key": "main", "payload": {"canonical_name": "SiN Harvest"},
+            "state": "pending", "created_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc)}]
+        connection = HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
+        connection.request("GET", "/api/server/operations?fs25_save_id=1", headers={
+            "X-SiN-Server-Key": "sin-fs25-01", "Authorization": "Bearer secret"})
+        response = connection.getresponse()
+        body = json.loads(response.read())
+        self.assertEqual(response.status, 200)
+        self.assertEqual(body["operations"][0]["operation_id"], "op")
+        self.assertNotIn("created_at", body["operations"][0])
+        connection.close()

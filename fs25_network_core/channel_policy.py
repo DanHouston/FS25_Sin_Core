@@ -18,6 +18,7 @@ COMMAND_CHANNELS = {
     "deposit": "bank",
     "withdraw": "bank",
     "farm_assign": "farm_approvals",
+    "server_reconcile": "farm_approvals",
 }
 
 # Member self-service commands still require the configured guild, but their

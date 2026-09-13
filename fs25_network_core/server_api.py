@@ -16,10 +16,14 @@ from .database import Database
 from .server_registry import ServerRegistry
 from .event_processing import CentralEventProcessor, EventAuthenticationError, EventScopeError, EventValidationError
 from .clock_policy import target_game_minutes
+from .farm_lifecycle import FarmLifecycle
 
 LOG = logging.getLogger(__name__)
 PAIR_PATH = "/api/server/pair"
 REGISTRATION_PATH = "/api/server/registration/request"
+OPERATIONS_PATH = "/api/server/operations"
+RECEIPTS_PATH = "/api/server/operation-receipts"
+SNAPSHOT_PATH = "/api/server/snapshot"
 
 
 def _json_response(handler, status, payload):
@@ -36,13 +40,15 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
 
     registry = None
     event_processor = None
+    farm_lifecycle = None
 
     def log_message(self, format, *args):
         # Do not put request bodies, pairing codes, or credentials in access logs.
         LOG.info("central API request path=%s status=%s", self.path, args[1] if len(args) > 1 else "unknown")
 
     def do_GET(self):  # noqa: N802 - required by BaseHTTPRequestHandler
-        if urlsplit(self.path).path != "/api/server/clock":
+        path = urlsplit(self.path).path
+        if path not in {"/api/server/clock", OPERATIONS_PATH, "/api/server/manager-authority"}:
             _json_response(self, 404, {"error": "not_found"})
             return
         query = parse_qs(urlsplit(self.path).query)
@@ -61,6 +67,28 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
             return
         try:
             save_key = self.event_processor.registry.resolve_save(record["server_key"], fs25_save_id)
+            if path == OPERATIONS_PATH:
+                operations = self.farm_lifecycle.operations_for(record["server_key"], save_key)
+                permission_jobs = list(self.event_processor.authorization.db.permission_jobs.find({
+                    "server_id": record["server_key"], "save_id": save_key,
+                    "state": "pending"}).sort("created_at", 1).limit(50))
+                for job in permission_jobs:
+                    operations.append({"operation_id": job["_id"], "operation_type": "permission",
+                        "server_key": record["server_key"], "save_key": save_key, "payload": {
+                            "game_player_id": job["game_player_id"], "farm_id": job["farm_id"],
+                            "role": job["role"], "revision": job["revision"]}, "state": "pending"})
+                safe = [{key: operation.get(key) for key in
+                         ("operation_id", "operation_type", "server_key", "save_key", "payload", "state")}
+                        for operation in operations]
+                _json_response(self, 200, {"operations": safe, "save_key": save_key})
+                return
+            if path == "/api/server/manager-authority":
+                managers = self.event_processor.authorization.db.memberships.find({
+                    "server_id": record["server_key"], "save_id": save_key,
+                    "state": "active", "desired_role": "farm_manager", "applied_role": "farm_manager"})
+                _json_response(self, 200, {"save_key": save_key, "managers": [
+                    {"game_player_id": row["game_player_id"], "farm_id": row["farm_id"]} for row in managers]})
+                return
             policy = self.event_processor.registry.clock_policy(record["server_key"], save_key)
             local = datetime.now(timezone.utc).astimezone(ZoneInfo(policy["timezone"]))
             target_local = local + timedelta(minutes=policy["offset_minutes"])
@@ -78,6 +106,12 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
             return
         if self.path == REGISTRATION_PATH:
             self.do_registration()
+            return
+        if self.path == SNAPSHOT_PATH:
+            self.do_snapshot()
+            return
+        if self.path == RECEIPTS_PATH:
+            self.do_receipt()
             return
         if self.path != PAIR_PATH:
             _json_response(self, 404, {"error": "not_found"})
@@ -107,7 +141,89 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
             _json_response(self, 500, {"error": "internal_error"})
             return
 
+        # Pairing establishes trust first.  Resource bootstrap is deliberately
+        # a durable follow-up and may remain pending while FS25 is offline.
+        try:
+            self.farm_lifecycle.ensure_for_server(server_key)
+        except Exception:
+            # Pairing is a trust/bootstrap boundary.  A resource-queue write
+            # failure must not invalidate the already-created credential.
+            LOG.exception("server resource bootstrap could not be queued")
+
         _json_response(self, 200, {"server_key": server_key, "credential": credential})
+
+    def _authenticated_scope(self, payload=None):
+        server_key = self.headers.get("X-SiN-Server-Key")
+        credential = self.headers.get("Authorization", "")
+        if credential.startswith("Bearer "):
+            credential = credential[7:]
+        if not server_key or not credential:
+            raise PermissionError("missing server authentication")
+        record = self.event_processor.registry.authenticate(server_key, credential)
+        fs25_save_id = (payload or {}).get("fs25_save_id") or parse_qs(urlsplit(self.path).query).get("fs25_save_id", [None])[0]
+        if fs25_save_id is None or str(fs25_save_id).strip() == "":
+            raise ValueError("FS25 save scope is required")
+        save_key = self.event_processor.registry.resolve_save(record["server_key"], fs25_save_id)
+        return record, save_key
+
+    def _read_json(self, maximum=1_000_000):
+        length = int(self.headers.get("Content-Length", "-1"))
+        if length < 0 or length > maximum:
+            raise ValueError("invalid request size")
+        payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("request must be an object")
+        return payload
+
+    def do_snapshot(self):
+        try:
+            payload = self._read_json()
+            record, save_key = self._authenticated_scope(payload)
+        except PermissionError:
+            _json_response(self, 401, {"error": "invalid_server_authentication"})
+            return
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+            _json_response(self, 400, {"error": "malformed_snapshot"})
+            return
+        try:
+            snapshot = payload.get("snapshot")
+            result = self.farm_lifecycle.record_snapshot(record["server_key"], save_key, snapshot)
+        except ValueError:
+            _json_response(self, 400, {"error": "invalid_snapshot"})
+            return
+        _json_response(self, 200, {"status": "accepted", "save_key": save_key,
+                                   "received_at": result["received_at"].isoformat()})
+
+    def do_receipt(self):
+        try:
+            payload = self._read_json(128_000)
+            record, save_key = self._authenticated_scope(payload)
+            receipt = payload.get("receipt")
+            if not isinstance(receipt, dict):
+                raise ValueError("operation receipt is required")
+            if receipt.get("operation_type") == "assign_farmland":
+                result = self.event_processor.authorization.acknowledge_land(
+                    receipt["operation_id"], record["server_key"], save_key,
+                    int(receipt["farmland_id"]), int(receipt["farm_id"]),
+                    int(receipt["owner_farm_id"]), receipt.get("status") == "applied",
+                    receipt.get("receipt"))
+                result = {"operation_id": receipt["operation_id"], "state": result}
+            elif receipt.get("revision") is not None and receipt.get("operation_type") not in {"ensure_farm", "provision_farm"}:
+                result = self.event_processor.authorization.acknowledge(
+                    receipt["operation_id"], record["server_key"], save_key,
+                    int(receipt["revision"]), receipt.get("receipt"))
+                result = {"operation_id": receipt["operation_id"], "state": result}
+            else:
+                result = self.farm_lifecycle.accept_receipt(record["server_key"], save_key, receipt)
+        except PermissionError:
+            _json_response(self, 401, {"error": "invalid_server_authentication"})
+            return
+        except (KeyError, TypeError, ValueError) as error:
+            status = 404 if "unknown" in str(error).lower() or "save" in str(error).lower() else 400
+            _json_response(self, status, {"error": "invalid_operation_receipt"})
+            return
+        _json_response(self, 200, {"status": "accepted", "operation_id": result["operation_id"],
+                                   "operation_state": result.get("state")})
 
     def do_registration(self):
         try:
@@ -191,6 +307,7 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
 def make_server(database, host="127.0.0.1", port=8787):
     PairingRequestHandler.registry = ServerRegistry(database)
     PairingRequestHandler.event_processor = CentralEventProcessor(database)
+    PairingRequestHandler.farm_lifecycle = FarmLifecycle(database, PairingRequestHandler.event_processor.authorization)
     return ThreadingHTTPServer((host, int(port)), PairingRequestHandler)
 
 

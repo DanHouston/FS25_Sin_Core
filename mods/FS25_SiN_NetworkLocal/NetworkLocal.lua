@@ -709,7 +709,9 @@ function FS25SiNNetworkLocal:processPermissionCommands()
         local command = XMLFile.load("networkLocalCommand", self.commandDirectory .. operationId .. ".xml")
         if command ~= nil and not fileExists(self.receiptDirectory .. operationId .. ".xml") then
             local operationType = command:getString("networkLocalCommand#operation_type")
-            if operationType == "assign_farmland" then
+            if operationType == "ensure_farm" or operationType == "provision_farm" then
+                self:processFarmProvisionCommand(command, operationId, operationType)
+            elseif operationType == "assign_farmland" then
                 self:processLandCommand(command, operationId)
             elseif operationType == "align_name" then
                 self:processNameAlignment(command, operationId)
@@ -742,6 +744,81 @@ function FS25SiNNetworkLocal:processPermissionCommands()
         index = index + 1
     end
     manifest:delete()
+end
+
+function FS25SiNNetworkLocal:findFarmByName(name)
+    local found = nil
+    if g_farmManager == nil then return nil, "farm manager unavailable" end
+    for farmId = 1, 254 do
+        local farm = g_farmManager:getFarmById(farmId)
+        if farm ~= nil and tostring(farm.name or "") == tostring(name or "") then
+            if found ~= nil then return nil, "duplicate farm name" end
+            found = farm
+        end
+    end
+    return found, nil
+end
+
+function FS25SiNNetworkLocal:processFarmProvisionCommand(command, operationId, operationType)
+    local prefix = "[SiN Farm Operation]"
+    local serverId = command:getString("networkLocalCommand#server_id")
+    local saveId = command:getString("networkLocalCommand#save_id")
+    local farmName = command:getString("networkLocalCommand#canonical_name")
+    local farmlandId = command:getInt("networkLocalCommand#farmland_id")
+    local status, reason, farmId, owner = "failed", "validation_failed", 0, 0
+    local ok, errorMessage = pcall(function()
+        if g_currentMission == nil or not g_currentMission:getIsServer() then error("not authoritative server") end
+        if g_farmManager == nil then error("farm manager unavailable") end
+        if farmName == nil or farmName == "" then error("farm name is required") end
+        local farm, lookupError = self:findFarmByName(farmName)
+        if lookupError ~= nil then error(lookupError) end
+        if farm == nil then
+            if g_farmManager.createFarm == nil then error("FS25 FarmManager:createFarm is unavailable") end
+            -- FS25 exposes createFarm(name, color, password, farmId).  Leave
+            -- the ID to the game and re-enumerate the manager after creation;
+            -- never predict a numeric farm ID in SiN.
+            local created = g_farmManager:createFarm(farmName, 0, "", nil)
+            if type(created) == "number" then farmId = created end
+            farm, lookupError = self:findFarmByName(farmName)
+            if lookupError ~= nil then error(lookupError) end
+            if farm == nil then error("farm creation did not produce a discoverable farm") end
+        end
+        farmId = farm.farmId
+        if operationType == "provision_farm" then
+            if g_farmlandManager == nil then error("farmland manager unavailable") end
+            if farmlandId == nil or not g_farmlandManager:getIsValidFarmlandId(farmlandId) then error("invalid farmland ID") end
+            owner = g_farmlandManager:getFarmlandOwner(farmlandId)
+            local noOwner = FarmlandManager.NO_OWNER_FARM_ID or 0
+            if owner ~= noOwner and owner ~= farmId then error("farmland is owned by another farm") end
+            if owner == farmId then
+                reason = "already_owned_by_target"
+            else
+                local changed = g_farmlandManager:setLandOwnership(farmlandId, farmId)
+                owner = g_farmlandManager:getFarmlandOwner(farmlandId)
+                if changed ~= true or owner ~= farmId then error("ownership change was not verified") end
+                reason = "assigned_and_verified"
+            end
+        else
+            reason = "farm_exists_or_created"
+        end
+        status = "applied"
+    end)
+    if not ok then reason = tostring(errorMessage) end
+    Logging.info("%s operation=%s server=%s save=%s farm=%s farmland=%s status=%s owner=%s reason=%s",
+        prefix, operationId, tostring(serverId), tostring(saveId), tostring(farmId), tostring(farmlandId), status, tostring(owner), reason)
+    local receipt = XMLFile.create("networkLocalFarmReceipt", self.receiptDirectory .. operationId .. ".xml", "networkLocalReceipt")
+    if receipt == nil then return end
+    receipt:setString("networkLocalReceipt#operation_id", operationId)
+    receipt:setString("networkLocalReceipt#operation_type", operationType)
+    receipt:setString("networkLocalReceipt#server_id", serverId)
+    receipt:setString("networkLocalReceipt#save_id", saveId)
+    receipt:setInt("networkLocalReceipt#farm_id", farmId)
+    receipt:setInt("networkLocalReceipt#farmland_id", farmlandId or 0)
+    receipt:setInt("networkLocalReceipt#owner_farm_id", owner or 0)
+    receipt:setString("networkLocalReceipt#status", status)
+    receipt:setString("networkLocalReceipt#receipt", reason)
+    receipt:save(); receipt:delete()
+    command:delete()
 end
 
 function FS25SiNNetworkLocal:processNameAlignment(command, operationId)
@@ -800,7 +877,7 @@ function FS25SiNNetworkLocal:processLandCommand(command, operationId)
             status = "applied"
             reason = "already_owned_by_target"
         else
-            local changed = g_farmlandManager:setLandOwnership(farmlandId, farmId, false)
+            local changed = g_farmlandManager:setLandOwnership(farmlandId, farmId)
             owner = g_farmlandManager:getFarmlandOwner(farmlandId)
             if changed ~= true or owner ~= farmId then error("ownership change was not verified") end
             status = "applied"
@@ -894,6 +971,15 @@ function FS25SiNNetworkLocal:exportSnapshot()
             xml:setInt(key .. "#farmId", farmId)
             xml:setString(key .. "#name", farm.name)
             index = index + 1
+        end
+    end
+    local farmlandIndex = 0
+    if g_farmlandManager ~= nil and g_farmlandManager.getFarmlands ~= nil then
+        for farmlandId, _ in pairs(g_farmlandManager:getFarmlands() or {}) do
+            local farmlandKey = string.format("networkLocal.farmlands.farmland(%d)", farmlandIndex)
+            xml:setInt(farmlandKey .. "#id", farmlandId)
+            xml:setInt(farmlandKey .. "#farmId", g_farmlandManager:getFarmlandOwner(farmlandId) or 0)
+            farmlandIndex = farmlandIndex + 1
         end
     end
     local playerIndex = 0
