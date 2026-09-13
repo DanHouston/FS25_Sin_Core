@@ -229,6 +229,16 @@ suffix. Inspect failed files in `registration-requests\*.failed` and the
 registration response directory without opening or copying credential-bearing
 files.
 
+Player activity and registration handling are event-driven on the server. The
+mod hooks `FSBaseMission.onClientConnected` for immediate joins and
+`FarmManager.playerQuitGame` for immediate leaves. The 20-second heartbeat
+performs a lightweight connected-user reconciliation as a fallback for missed
+lifecycle callbacks; it must not duplicate transitions already handled by the
+callbacks. Registration warnings use a targeted `Event` sent only to the
+player's connection and are rendered client-side with the same
+`showBlinkingWarning` primitive used by the SiN Stack Assist mod. The exact
+same generic NetworkLocal ZIP must be installed on server and clients.
+
 Live process commands:
 
 ```powershell

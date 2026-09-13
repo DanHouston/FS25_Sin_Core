@@ -7,6 +7,7 @@
     <iconFilename>icon_network.dds</iconFilename>
     <multiplayer supported="true"/>
     <extraSourceFiles>
+        <sourceFile filename="events/SiNRegistrationWarningEvent.lua"/>
         <sourceFile filename="NetworkLocal.lua"/>
     </extraSourceFiles>
 </modDesc>

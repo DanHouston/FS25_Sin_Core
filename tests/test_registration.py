@@ -79,3 +79,18 @@ class RegistrationTests(unittest.TestCase):
             source,
         )
         self.assertNotRegex(source, r"getFiles\([^,\r\n]+\)")
+
+    def test_networklocal_uses_targeted_warning_and_lifecycle_hooks(self):
+        root = Path(__file__).parents[1] / "mods" / "FS25_SiN_NetworkLocal"
+        source = (root / "NetworkLocal.lua").read_text(encoding="utf-8")
+        event = (root / "events" / "SiNRegistrationWarningEvent.lua").read_text(encoding="utf-8")
+        descriptor = (root / "modDesc.xml").read_text(encoding="utf-8")
+        self.assertIn("FSBaseMission.onClientConnected", source)
+        self.assertIn("FarmManager.playerQuitGame", source)
+        self.assertIn("connection.sendEvent", source)
+        self.assertIn("showBlinkingWarning", source)
+        self.assertNotIn("sendTextMessage", source)
+        self.assertIn("SiNRegistrationWarningEvent.lua", descriptor)
+        self.assertIn("InitEventClass(SiNRegistrationWarningEvent", event)
+        self.assertIn("streamWriteBool", event)
+        self.assertIn("streamWriteString", event)

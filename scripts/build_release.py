@@ -40,15 +40,22 @@ def build_mod(destination):
     descriptor = source / "modDesc.xml"
     icon_name = None
     import xml.etree.ElementTree as ET
-    icon_name = ET.parse(descriptor).findtext("iconFilename")
+    descriptor_xml = ET.parse(descriptor)
+    icon_name = descriptor_xml.findtext("iconFilename")
     if not icon_name or Path(icon_name).name != icon_name or not (source / icon_name).is_file():
         raise ValueError("NetworkLocal mod descriptor/icon is invalid")
-    files = [(name, source / name) for name in ("modDesc.xml", "NetworkLocal.lua", icon_name)]
+    source_names = [node.get("filename") for node in descriptor_xml.findall("./extraSourceFiles/sourceFile")]
+    if any(not name for name in source_names):
+        raise ValueError("NetworkLocal mod descriptor contains an invalid source file")
+    names_to_package = ["modDesc.xml"] + source_names + [icon_name]
+    files = [(name, source / name) for name in names_to_package]
     zip_files(destination, files)
     with ZipFile(destination) as archive:
         names = set(archive.namelist())
         if not {"modDesc.xml", "NetworkLocal.lua"}.issubset(names):
             raise ValueError("NetworkLocal ZIP is missing required root files")
+        if set(names_to_package) != names:
+            raise ValueError("NetworkLocal ZIP does not match mod descriptor sources")
 
 
 def build_agent(destination):

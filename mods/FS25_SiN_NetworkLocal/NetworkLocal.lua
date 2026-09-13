@@ -4,6 +4,7 @@ FS25SiNNetworkLocal = {}
 function FS25SiNNetworkLocal:loadMap()
     self.elapsed = 0
     self.sequence = 0
+    self.eventSequence = 0
     self.failed = false
     self.session = getDate("%Y%m%d%H%M%S")
     self.directory = getUserProfileAppPath() .. "modSettings/FS25SiNNetworkLocal/"
@@ -25,10 +26,13 @@ function FS25SiNNetworkLocal:loadMap()
     self.identitySeen = {}
     self.eventSeen = {}
     self.previousPlayers = {}
+    self.connectedPlayers = {}
     self.identityNames = {}
     self.registrationState = {}
     self.registrationPromptAt = {}
     self.registrationClock = 0
+    self.registrationWarning = nil
+    self.registrationWarningElapsed = 0
     self.heartbeatElapsed = 0
     self.clockElapsed = 0
     self.clockTargetAge = 0
@@ -36,12 +40,39 @@ function FS25SiNNetworkLocal:loadMap()
     self.clockMode = "synced"
     self.clockPolicyGeneratedAt = nil
     self.clockHardFallbackLogged = false
+    self:installLifecycleHooks()
     addConsoleCommand("sinPermissions", "List FS25 farm permission keys", "consoleCommandPermissions", self)
     addConsoleCommand("sinPair", "Pair this server with a SiN pairing code", "consoleCommandPair", self)
     if g_messageCenter ~= nil and MessageType ~= nil and MessageType.PLAYER_FARM_CHANGED ~= nil then
         g_messageCenter:subscribe(MessageType.PLAYER_FARM_CHANGED, self.onPlayerFarmChanged, self)
     end
     Logging.info("[SiN (SimNet) Network Local] Loaded; telemetry directory: %s", self.directory)
+end
+
+function FS25SiNNetworkLocal:installLifecycleHooks()
+    if self.lifecycleHooksInstalled then return end
+    self.lifecycleHooksInstalled = true
+    if FSBaseMission ~= nil and FSBaseMission.onClientConnected ~= nil and Utils ~= nil then
+        FSBaseMission.onClientConnected = Utils.appendedFunction(FSBaseMission.onClientConnected,
+            function(mission, connection, user, x, y, z, farmId)
+                if mission == g_currentMission and mission:getIsServer() then
+                    local resolvedUser = user
+                    if resolvedUser == nil and mission.userManager ~= nil and connection ~= nil
+                        and mission.userManager.getUserByConnection ~= nil then
+                        resolvedUser = mission.userManager:getUserByConnection(connection)
+                    end
+                    FS25SiNNetworkLocal:onPlayerConnected(resolvedUser, connection, farmId)
+                end
+            end)
+    end
+    if FarmManager ~= nil and FarmManager.playerQuitGame ~= nil and Utils ~= nil then
+        FarmManager.playerQuitGame = Utils.prependedFunction(FarmManager.playerQuitGame,
+            function(manager, userId)
+                if g_currentMission ~= nil and g_currentMission:getIsServer() then
+                    FS25SiNNetworkLocal:onPlayerDisconnected(userId)
+                end
+            end)
+    end
 end
 
 function FS25SiNNetworkLocal:loadServerBinding()
@@ -154,18 +185,99 @@ function FS25SiNNetworkLocal:queueRegistrationRequest(user, farm)
     self.registrationState[uniqueId] = {status="pending", requestId=requestId, requestedAt=self.registrationClock}
 end
 
-function FS25SiNNetworkLocal:sendRegistrationPrompt(user, code)
-    if user == nil or code == nil then return end
-    local uniqueId = tostring(user:getUniqueUserId())
-    local last = self.registrationPromptAt[uniqueId] or -60000
-    if self.registrationClock - last < 30000 then return end
-    self.registrationPromptAt[uniqueId] = self.registrationClock
-    local text = "SiN Registration Required\nRun /register code:" .. tostring(code) .. " in Discord"
-    if user.sendTextMessage ~= nil then
-        local ok = pcall(user.sendTextMessage, user, text)
-        if not ok then Logging.warning("[SiN Registration] targeted prompt could not be delivered") end
+function FS25SiNNetworkLocal:onPlayerConnected(user, connection, farmId)
+    if user == nil or g_currentMission == nil or not g_currentMission:getIsServer() then return end
+    local farm = g_farmManager ~= nil and g_farmManager:getFarmByUserId(user:getId()) or nil
+    if farm == nil and farmId ~= nil and g_farmManager ~= nil then
+        farm = g_farmManager:getFarmById(farmId)
+    end
+    if self:isDedicatedServerUser(user, farm) then return end
+    local uniqueId = tostring(user:getUniqueUserId() or "")
+    if uniqueId == "" then return end
+    local record = {name=user:getNickname() or "", user_id=user:getId(),
+        farm_id=farm ~= nil and farm.farmId or 0, connection=connection or user.connection, user=user}
+    local wasTracked = self.connectedPlayers[uniqueId] ~= nil
+    self.connectedPlayers[uniqueId] = record
+    self.previousPlayers[uniqueId] = {name=record.name, user_id=record.user_id, farm_id=record.farm_id}
+    if not wasTracked then
+        Logging.info("[SiN Player] connected uniqueUserId=%s userId=%s", uniqueId, tostring(record.user_id))
+        self:emitServerEvent("player_connected", {unique_user_id=uniqueId, user_id=record.user_id,
+            farm_id=record.farm_id, display_name=record.name})
+    end
+    self:queueRegistrationRequest(user, farm)
+    self:enforceRegistration(user, farm)
+    local state = self.registrationState[uniqueId]
+    if state ~= nil and state.status ~= "pending" then
+        self:sendRegistrationState(uniqueId, state.status, state.code)
+    end
+end
+
+function FS25SiNNetworkLocal:onPlayerDisconnected(userId)
+    local matchId = tostring(userId or "")
+    local uniqueId, record = nil, nil
+    for identity, candidate in pairs(self.connectedPlayers) do
+        if tostring(candidate.user_id) == matchId then
+            uniqueId, record = identity, candidate
+            break
+        end
+    end
+    if uniqueId == nil then
+        for identity, candidate in pairs(self.previousPlayers or {}) do
+            if tostring(candidate.user_id) == matchId then
+                uniqueId, record = identity, candidate
+                break
+            end
+        end
+    end
+    if uniqueId == nil or record == nil then return end
+    self.connectedPlayers[uniqueId] = nil
+    self.previousPlayers[uniqueId] = nil
+    self.registrationPromptAt[uniqueId] = nil
+    Logging.info("[SiN Player] disconnected uniqueUserId=%s userId=%s", uniqueId, matchId)
+    self:emitServerEvent("player_disconnected", {unique_user_id=uniqueId, user_id=record.user_id,
+        farm_id=record.farm_id, display_name=record.name})
+end
+
+function FS25SiNNetworkLocal:setClientRegistrationWarning(required, code)
+    if required == true and code ~= nil and tostring(code) ~= "" then
+        self.registrationWarning = tostring(code)
     else
-        Logging.warning("[SiN Registration] targeted chat API unavailable; registration remains quarantined")
+        self.registrationWarning = nil
+    end
+    self.registrationWarningElapsed = 0
+end
+
+function FS25SiNNetworkLocal:updateClientRegistrationWarning(dt)
+    if self.registrationWarning == nil or g_currentMission == nil
+        or g_currentMission.showBlinkingWarning == nil then return end
+    self.registrationWarningElapsed = self.registrationWarningElapsed + dt
+    if self.registrationWarningElapsed < 1500 then return end
+    self.registrationWarningElapsed = 0
+    local text = "SiN REGISTRATION REQUIRED\nDiscord:\n/register code:" .. self.registrationWarning
+    g_currentMission:showBlinkingWarning(text, 2000)
+end
+
+function FS25SiNNetworkLocal:sendRegistrationWarning(uniqueId, required, code)
+    local tracked = self.connectedPlayers[tostring(uniqueId)]
+    if tracked == nil or tracked.connection == nil or tracked.connection.sendEvent == nil
+        or SiNRegistrationWarningEvent == nil then return false end
+    local ok = pcall(tracked.connection.sendEvent, tracked.connection,
+        SiNRegistrationWarningEvent.new(required, code))
+    if not ok then
+        Logging.warning("[SiN Registration] targeted warning delivery failed")
+        return false
+    end
+    return true
+end
+
+function FS25SiNNetworkLocal:sendRegistrationState(uniqueId, status, code)
+    local required = status == "registration_required"
+    if self:sendRegistrationWarning(uniqueId, required, code) then
+        if required then
+            Logging.info("[SiN Registration] registration required; warning sent to player")
+        else
+            Logging.info("[SiN Registration] registration complete; warning cleared")
+        end
     end
 end
 
@@ -188,6 +300,7 @@ function FS25SiNNetworkLocal:processRegistrationResponses()
             if uniqueId ~= nil and (status == "registered" or status == "registration_required") then
                 self.registrationState[uniqueId] = {status=status, code=code,
                     requestedAt=(self.registrationState[uniqueId] or {}).requestedAt or self.registrationClock}
+                self:sendRegistrationState(uniqueId, status, code)
                 deleteFile(path)
             end
         end
@@ -206,7 +319,6 @@ function FS25SiNNetworkLocal:enforceRegistration(user, farm)
                 g_farmManager:removeUserFromFarm(user:getId())
             end
         end
-        if state ~= nil then self:sendRegistrationPrompt(user, state.code) end
     end
 end
 
@@ -219,6 +331,9 @@ function FS25SiNNetworkLocal:consoleCommandPermissions()
 end
 
 function FS25SiNNetworkLocal:update(dt)
+    if g_currentMission ~= nil and g_currentMission:getIsClient() then
+        self:updateClientRegistrationWarning(dt)
+    end
     if self.failed or g_currentMission == nil or not g_currentMission:getIsServer() then
         return
     end
@@ -243,6 +358,7 @@ function FS25SiNNetworkLocal:update(dt)
         if self.heartbeatElapsed >= 20000 then
             self.heartbeatElapsed = 0
             self:emitServerEvent("heartbeat", {})
+            self:reconcileConnectedPlayers()
         end
     end
     if self.elapsed < 5000 or g_farmManager == nil then
@@ -273,7 +389,8 @@ end
 
 function FS25SiNNetworkLocal:emitServerEvent(eventType, values)
     if self.serverKey == nil or self.serverCredential == nil or self.eventDirectory == nil then return end
-    local eventId = self.serverKey .. "-" .. tostring(self.session) .. "-" .. tostring(self.sequence) .. "-" .. eventType
+    self.eventSequence = self.eventSequence + 1
+    local eventId = self.serverKey .. "-" .. tostring(self.session) .. "-" .. tostring(self.eventSequence) .. "-" .. eventType
     if self.eventSeen[eventId] then return end
     local path = self.eventDirectory .. eventId .. ".xml"
     if fileExists(path) then self.eventSeen[eventId] = true; return end
@@ -292,27 +409,43 @@ end
 
 function FS25SiNNetworkLocal:processPlayerTransitions(currentPlayers)
     local previousPlayers = self.previousPlayers or {}
-    local previousCount, currentCount = 0, 0
-    for _ in pairs(previousPlayers) do previousCount = previousCount + 1 end
-    for _ in pairs(currentPlayers) do currentCount = currentCount + 1 end
-    Logging.info("[SiN Player State] compare previous=%d current=%d", previousCount, currentCount)
     for identity, player in pairs(currentPlayers) do
-        local pseudo = player.user_id == 1 and player.farm_id == 0 and tostring(player.name or ""):lower() == "server"
-        if not pseudo and previousPlayers[identity] == nil then
-            Logging.info("[SiN Player State] connect detected name=%s", tostring(player.name))
+        if previousPlayers[identity] == nil then
+            local user = g_currentMission.userManager:getUserByUserId(player.user_id)
+            if user ~= nil then
+                self:onPlayerConnected(user, nil, player.farm_id)
+            else
+                self.previousPlayers[identity] = player
                 self:emitServerEvent("player_connected", {unique_user_id=identity, user_id=player.user_id,
                     farm_id=player.farm_id, display_name=player.name})
+            end
         end
     end
     for identity, player in pairs(previousPlayers) do
-        local pseudo = player.user_id == 1 and player.farm_id == 0 and tostring(player.name or ""):lower() == "server"
-        if not pseudo and currentPlayers[identity] == nil then
-            Logging.info("[SiN Player State] disconnect detected name=%s", tostring(player.name))
-                self:emitServerEvent("player_disconnected", {unique_user_id=identity, user_id=player.user_id,
-                    farm_id=player.farm_id, display_name=player.name})
+        if currentPlayers[identity] == nil then
+            self:onPlayerDisconnected(player.user_id)
         end
     end
     self.previousPlayers = currentPlayers
+end
+
+function FS25SiNNetworkLocal:reconcileConnectedPlayers()
+    if g_currentMission == nil or g_currentMission.userManager == nil then return end
+    local currentPlayers = {}
+    for _, user in ipairs(g_currentMission.userManager:getUsers() or {}) do
+        local farm = g_farmManager ~= nil and g_farmManager:getFarmByUserId(user:getId()) or nil
+        if not self:isDedicatedServerUser(user, farm) then
+            local uniqueId = tostring(user:getUniqueUserId() or "")
+            if uniqueId ~= "" then
+                local record = {name=user:getNickname() or "", user_id=user:getId(),
+                    farm_id=farm ~= nil and farm.farmId or 0}
+                currentPlayers[uniqueId] = record
+                self:queueRegistrationRequest(user, farm)
+                self:enforceRegistration(user, farm)
+            end
+        end
+    end
+    self:processPlayerTransitions(currentPlayers)
 end
 
 function FS25SiNNetworkLocal:processPairingResponse()
@@ -673,7 +806,6 @@ function FS25SiNNetworkLocal:restoreApprovedManagers()
 end
 
 function FS25SiNNetworkLocal:exportSnapshot()
-    Logging.info("[SiN Player State] scan begin")
     self.sequence = self.sequence + 1
     local xml = XMLFile.create("networkLocal", self.directory .. "snapshot.xml", "networkLocal")
     if xml == nil then
@@ -715,9 +847,11 @@ function FS25SiNNetworkLocal:exportSnapshot()
                 local identityKey = tostring(uniqueId)
                 currentPlayers[identityKey] = {name=user:getNickname() or "", user_id=user:getId(),
                     farm_id=userFarm ~= nil and userFarm.farmId or 0}
-                self:queueRegistrationRequest(user, userFarm)
-                self:enforceRegistration(user, userFarm)
-                Logging.info("[SiN Player State] observed name=%s", tostring(user:getNickname() or ""))
+                local pseudo = self:isDedicatedServerUser(user, userFarm)
+                if pseudo then
+                    currentPlayers[identityKey] = nil
+                    xml:setBool(key .. "#connected", false)
+                end
                 self.identityNames[identityKey] = user:getNickname() or ""
                 local identityValue = tostring(user:getNickname() or "") .. ":" .. tostring(userFarm ~= nil and userFarm.farmId or 0)
                 if self.identitySeen[identityKey] ~= identityValue then
@@ -729,8 +863,6 @@ function FS25SiNNetworkLocal:exportSnapshot()
             end
         end
     end
-    self:processPlayerTransitions(currentPlayers)
-    Logging.info("[SiN Player State] scan valid=true current=%d", playerIndex)
     xml:save()
     xml:delete()
     if self.sequence == 1 then

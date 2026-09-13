@@ -77,12 +77,25 @@ def build_mod(destination=None):
     icon = descriptor.findtext("iconFilename")
     if not icon or Path(icon).name != icon or not (source / icon).is_file():
         raise ValueError("Mod descriptor must name an existing icon in the mod root")
+    source_files = [node.get("filename") for node in descriptor.findall("./extraSourceFiles/sourceFile")]
+    if any(not filename for filename in source_files):
+        raise ValueError("Mod descriptor contains an invalid source file")
+    filenames = ["modDesc.xml"] + source_files + [icon]
     with ZipFile(destination, "w", ZIP_DEFLATED) as archive:
-        for filename in ("modDesc.xml", "NetworkLocal.lua", icon):
+        for filename in filenames:
             info = ZipInfo(filename, date_time=(2020, 1, 1, 0, 0, 0))
             info.compress_type = ZIP_DEFLATED
             info.external_attr = 0o644 << 16
-            archive.writestr(info, (source / filename).read_bytes())
+            path = source / filename
+            if not path.is_file():
+                raise ValueError(f"Mod source file is missing: {filename}")
+            archive.writestr(info, path.read_bytes())
+    with ZipFile(destination) as archive:
+        names = set(archive.namelist())
+        if not {"modDesc.xml", "NetworkLocal.lua"}.issubset(names):
+            raise ValueError("NetworkLocal ZIP is missing required root files")
+        if set(filenames) != names:
+            raise ValueError("NetworkLocal ZIP does not match mod descriptor sources")
     return destination
 
 
