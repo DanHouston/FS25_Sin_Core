@@ -133,6 +133,18 @@ class RegistrationTests(unittest.TestCase):
         )
         self.assertNotRegex(source, r"getFiles\([^,\r\n]+\)")
 
+    def test_registration_response_callback_normalizes_full_paths_for_load_and_delete(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_NetworkLocal" / "NetworkLocal.lua").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("return directory .. value", source)
+        self.assertIn("local path = self:registrationResponsePath(filename)", source)
+        process = source[source.index("function FS25SiNNetworkLocal:processRegistrationResponses()"):]
+        process = process[:process.index("function FS25SiNNetworkLocal:enforceRegistration")]
+        self.assertIn('XMLFile.load("networkLocalRegistrationResponse", path)', process)
+        self.assertIn("deleteFile(path)", process)
+        self.assertNotIn('XMLFile.load("networkLocalRegistrationResponse", self.registrationResponseDirectory ..', process)
+
     def test_networklocal_uses_targeted_warning_and_lifecycle_hooks(self):
         root = Path(__file__).parents[1] / "mods" / "FS25_SiN_NetworkLocal"
         source = (root / "NetworkLocal.lua").read_text(encoding="utf-8")

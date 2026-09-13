@@ -281,7 +281,21 @@ function FS25SiNNetworkLocal:sendRegistrationState(uniqueId, status, code)
     end
 end
 
-function FS25SiNNetworkLocal:collectRegistrationResponseFile(path)
+function FS25SiNNetworkLocal:registrationResponsePath(filename)
+    if filename == nil then return nil end
+    local value = tostring(filename)
+    local directory = self.registrationResponseDirectory or ""
+    if string.sub(value, 1, string.len(directory)) == directory
+        or string.sub(value, 1, 1) == "/"
+        or string.match(value, "^%a:[/\\]")
+        or string.sub(value, 1, 2) == "\\\\" then
+        return value
+    end
+    return directory .. value
+end
+
+function FS25SiNNetworkLocal:collectRegistrationResponseFile(filename)
+    local path = self:registrationResponsePath(filename)
     if path == nil or string.sub(path, -4) ~= ".xml" then return end
     table.insert(self.registrationResponseFiles, path)
 end
