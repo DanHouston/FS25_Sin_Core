@@ -32,6 +32,8 @@ function FS25SiNNetworkLocal:loadMap()
     self.registrationQuarantined = {}
     self.registrationPromptAt = {}
     self.registrationClock = 0
+    self.registrationRequired = false
+    self.registrationCode = nil
     self.registrationWarning = nil
     self.registrationWarningElapsed = 0
     self.heartbeatElapsed = 0
@@ -263,21 +265,25 @@ function FS25SiNNetworkLocal:onPlayerDisconnected(userId)
 end
 
 function FS25SiNNetworkLocal:setClientRegistrationWarning(required, code)
-    if required == true and code ~= nil and tostring(code) ~= "" then
-        self.registrationWarning = tostring(code)
-    else
+    self.registrationRequired = required == true
+    self.registrationCode = self.registrationRequired and tostring(code or "") or nil
+    if not self.registrationRequired or self.registrationCode == "" then
+        self.registrationRequired = false
+        self.registrationCode = nil
         self.registrationWarning = nil
+    else
+        self.registrationWarning = self.registrationCode
     end
     self.registrationWarningElapsed = 0
 end
 
 function FS25SiNNetworkLocal:updateClientRegistrationWarning(dt)
-    if self.registrationWarning == nil or g_currentMission == nil
+    if not self.registrationRequired or self.registrationCode == nil or g_currentMission == nil
         or g_currentMission.showBlinkingWarning == nil then return end
     self.registrationWarningElapsed = self.registrationWarningElapsed + dt
     if self.registrationWarningElapsed < 1500 then return end
     self.registrationWarningElapsed = 0
-    local text = "SiN REGISTRATION REQUIRED\nDiscord:\n/register code:" .. self.registrationWarning
+    local text = "SiN REGISTRATION REQUIRED\nDiscord:\n/register code:" .. self.registrationCode
     g_currentMission:showBlinkingWarning(text, 2000)
 end
 

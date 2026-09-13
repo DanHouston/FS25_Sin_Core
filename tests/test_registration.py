@@ -170,6 +170,10 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("streamWriteBool", event)
         self.assertIn("streamWriteString", event)
         self.assertIn("self.registrationWarning = nil", source)
+        self.assertIn("self.registrationRequired = false", source)
+        self.assertIn("self.registrationCode = nil", source)
+        self.assertIn("if not self.registrationRequired or self.registrationCode == \"\"", source)
+        self.assertIn("self:sendRegistrationState(uniqueId, state.status, state.code)", source)
 
     def test_networklocal_refreshes_required_registration_on_heartbeat_reconciliation(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_NetworkLocal" / "NetworkLocal.lua").read_text(
