@@ -85,7 +85,6 @@ class Database:
             ("server_key", 1), ("save_key", 1), ("fs25_unique_user_id", 1), ("observed_at", 1)])
         self.db.player_activity_aggregates.create_index([
             ("server_key", 1), ("save_key", 1), ("fs25_unique_user_id", 1)], unique=True)
-        self.db.player_activity_sessions.create_index("_id", unique=True)
         self.db.player_activity_sessions.create_index([
             ("server_key", 1), ("save_key", 1), ("fs25_unique_user_id", 1), ("connected_at", -1)])
         self._replace_legacy_unique_index(
