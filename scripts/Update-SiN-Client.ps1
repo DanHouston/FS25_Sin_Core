@@ -55,32 +55,33 @@ try {
     New-Item -ItemType Directory -Force -Path $temporary | Out-Null
     $release = Get-Release $Version
     $resolvedVersion = [string]$release.tag_name
-    $zipPath = Join-Path $temporary "FS25_SiN_NetworkLocal.zip"
+    $zipPath = Join-Path $temporary "FS25_SiN_Server.zip"
     $sumsPath = Join-Path $temporary "SHA256SUMS.txt"
-    Download-Asset $release "FS25_SiN_NetworkLocal.zip" $zipPath
+    Download-Asset $release "FS25_SiN_Server.zip" $zipPath
     Download-Asset $release "SHA256SUMS.txt" $sumsPath
 
-    $expected = Get-ExpectedHash $sumsPath "FS25_SiN_NetworkLocal.zip"
+    $expected = Get-ExpectedHash $sumsPath "FS25_SiN_Server.zip"
     $actual = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($expected -ne $actual) { throw "NetworkLocal checksum mismatch" }
+    if ($expected -ne $actual) { throw "FS25_SiN_Server checksum mismatch" }
 
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archive = [IO.Compression.ZipFile]::OpenRead($zipPath)
     try {
         $names = @($archive.Entries | ForEach-Object { $_.FullName })
         if ($names -notcontains "modDesc.xml" -or $names -notcontains "NetworkLocal.lua") {
-            throw "NetworkLocal ZIP is missing required root files"
+            throw "FS25_SiN_Server ZIP is missing required root files"
         }
     } finally { $archive.Dispose() }
 
     New-Item -ItemType Directory -Force -Path $ModsPath | Out-Null
-    $destination = Join-Path $ModsPath "FS25_SiN_NetworkLocal.zip"
-    $staged = Join-Path $ModsPath "FS25_SiN_NetworkLocal.zip.new"
-    $previous = Join-Path $ModsPath "FS25_SiN_NetworkLocal.zip.previous"
+    $destination = Join-Path $ModsPath "FS25_SiN_Server.zip"
+    $staged = Join-Path $ModsPath "FS25_SiN_Server.zip.new"
+    $previous = Join-Path $ModsPath "FS25_SiN_Server.zip.previous"
+    $legacy = Join-Path $ModsPath "FS25_SiN_NetworkLocal.zip"
     Copy-Item -LiteralPath $zipPath -Destination $staged -Force
     if ((Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash.ToLowerInvariant() -ne $actual) {
         Remove-Item -LiteralPath $staged -Force
-        throw "Staged NetworkLocal checksum mismatch"
+        throw "Staged FS25_SiN_Server checksum mismatch"
     }
     if (Test-Path -LiteralPath $previous) { Remove-Item -LiteralPath $previous -Force }
     if (Test-Path -LiteralPath $destination) { Move-Item -LiteralPath $destination -Destination $previous }
@@ -92,7 +93,8 @@ try {
     }
     Write-Host "SiN Client Mod"
     Write-Host "Release            $resolvedVersion"
-    Write-Host "NetworkLocal       UPDATED"
+    if (Test-Path -LiteralPath $legacy) { Remove-Item -LiteralPath $legacy -Force }
+    Write-Host "FS25_SiN_Server     UPDATED"
     Write-Host "SHA256             $actual"
     Write-Host "FS25 reload        REQUIRED"
 } finally {

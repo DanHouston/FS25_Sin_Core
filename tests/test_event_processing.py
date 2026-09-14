@@ -52,3 +52,16 @@ class EventProcessingTests(unittest.TestCase):
         self.database.db.processed_server_events.insert_one.side_effect = DuplicateKeyError("duplicate key")
         result = self.processor.process(self.event("heartbeat"))
         self.assertEqual(result["status"], "accepted")
+
+    def test_activity_minute_is_persisted_without_authorization_processing(self):
+        self.processor.telemetry = MagicMock()
+        self.processor.telemetry.process.return_value = {
+            "status": "accepted", "duplicate": False, "save_key": "main-save"}
+        event = self.event("player_activity_minute")
+        event["payload"] = {"unique_user_id": "u1", "session_id": "session-1",
+                             "minute_sequence": 1, "activity_bucket": "active", "inactive_minutes": 0}
+        result = self.processor.process(event)
+        self.assertEqual(result["status"], "accepted")
+        self.processor.telemetry.process.assert_called_once_with(
+            "sin-fs25-01", "main-save", "event-1", event["payload"])
+        self.processor.authorization.activity_message.assert_not_called()

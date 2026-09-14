@@ -70,9 +70,12 @@ def simulate(path):
 
 
 def build_mod(destination=None):
-    source = ROOT / "mods" / "FS25_SiN_NetworkLocal"
-    destination = Path(destination) if destination else ROOT / "dist" / "FS25_SiN_NetworkLocal.zip"
+    source = ROOT / "mods" / "FS25_SiN_Server"
+    destination = Path(destination) if destination else ROOT / "dist" / "FS25_SiN_Server.zip"
     destination.parent.mkdir(exist_ok=True)
+    legacy = destination.parent / "FS25_SiN_NetworkLocal.zip"
+    if legacy.exists():
+        legacy.unlink()
     descriptor = ET.parse(source / "modDesc.xml")
     icon = descriptor.findtext("iconFilename")
     if not icon or Path(icon).name != icon or not (source / icon).is_file():
@@ -93,9 +96,9 @@ def build_mod(destination=None):
     with ZipFile(destination) as archive:
         names = set(archive.namelist())
         if not {"modDesc.xml", "NetworkLocal.lua"}.issubset(names):
-            raise ValueError("NetworkLocal ZIP is missing required root files")
+            raise ValueError("FS25_SiN_Server ZIP is missing required root files")
         if set(filenames) != names:
-            raise ValueError("NetworkLocal ZIP does not match mod descriptor sources")
+            raise ValueError("FS25_SiN_Server ZIP does not match mod descriptor sources")
     return destination
 
 

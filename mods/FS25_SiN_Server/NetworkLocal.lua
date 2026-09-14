@@ -1,19 +1,19 @@
 -- SiN server-side mailbox transport and authority integration. No direct HTTP.
-FS25SiNNetworkLocal = {}
-local NETWORKLOCAL_MAILBOX_NAME = "FS25_SiN_NetworkLocal"
+FS25SiNServer = {}
+local SERVER_MAILBOX_NAME = "FS25_SiN_Server"
 
-function FS25SiNNetworkLocal:shortIdentity(value)
+function FS25SiNServer:shortIdentity(value)
     local text = tostring(value or "")
     return string.len(text) > 8 and string.sub(text, 1, 8) .. "..." or text
 end
 
-function FS25SiNNetworkLocal:loadMap()
+function FS25SiNServer:loadMap()
     self.elapsed = 0
     self.sequence = 0
     self.eventSequence = 0
     self.failed = false
     self.session = getDate("%Y%m%d%H%M%S")
-    self.directory = getUserProfileAppPath() .. "modSettings/" .. NETWORKLOCAL_MAILBOX_NAME .. "/"
+    self.directory = getUserProfileAppPath() .. "modSettings/" .. SERVER_MAILBOX_NAME .. "/"
     createFolder(getUserProfileAppPath() .. "modSettings/")
     createFolder(self.directory)
     self.commandDirectory = self.directory .. "permission-commands/"
@@ -28,7 +28,7 @@ function FS25SiNNetworkLocal:loadMap()
     createFolder(self.registrationResponseDirectory)
     self.bindingPath = self.directory .. "serverBinding.xml"
     self:loadServerBinding()
-    self.systemFarmDiagnosticLogged = false
+    self.systemFarmName = nil
     self.identitySeen = {}
     self.eventSeen = {}
     self.previousPlayers = {}
@@ -43,6 +43,10 @@ function FS25SiNNetworkLocal:loadMap()
     self.registrationWarning = nil
     self.registrationWarningElapsed = 0
     self.heartbeatElapsed = 0
+    self.activitySampleElapsed = 0
+    self.activityStates = {}
+    self.activitySessionSequence = 0
+    self.activityMovementTolerance = 0.5
     self.clockElapsed = 0
     self.clockTargetAge = 0
     self.clockPolicy = nil
@@ -56,10 +60,10 @@ function FS25SiNNetworkLocal:loadMap()
     if g_messageCenter ~= nil and MessageType ~= nil and MessageType.PLAYER_FARM_CHANGED ~= nil then
         g_messageCenter:subscribe(MessageType.PLAYER_FARM_CHANGED, self.onPlayerFarmChanged, self)
     end
-    Logging.info("[SiN (SimNet) Network Local] Loaded; telemetry directory: %s", self.directory)
+    Logging.info("[SiN (SimNet) Server] Loaded; telemetry directory: %s", self.directory)
 end
 
-function FS25SiNNetworkLocal:installLifecycleHooks()
+function FS25SiNServer:installLifecycleHooks()
     if self.lifecycleHooksInstalled then return end
     self.lifecycleHooksInstalled = true
     if FSBaseMission ~= nil and FSBaseMission.onClientConnected ~= nil and Utils ~= nil then
@@ -71,7 +75,7 @@ function FS25SiNNetworkLocal:installLifecycleHooks()
                         and mission.userManager.getUserByConnection ~= nil then
                         resolvedUser = mission.userManager:getUserByConnection(connection)
                     end
-                    FS25SiNNetworkLocal:onPlayerConnected(resolvedUser, connection, farmId)
+                    FS25SiNServer:onPlayerConnected(resolvedUser, connection, farmId)
                 end
             end)
     end
@@ -79,13 +83,13 @@ function FS25SiNNetworkLocal:installLifecycleHooks()
         FarmManager.playerQuitGame = Utils.prependedFunction(FarmManager.playerQuitGame,
             function(manager, userId)
                 if g_currentMission ~= nil and g_currentMission:getIsServer() then
-                    FS25SiNNetworkLocal:onPlayerDisconnected(userId)
+                    FS25SiNServer:onPlayerDisconnected(userId)
                 end
             end)
     end
 end
 
-function FS25SiNNetworkLocal:loadServerBinding()
+function FS25SiNServer:loadServerBinding()
     if not fileExists(self.bindingPath) then
         self.serverBindingState = "unbound"
         Logging.info("[SiN Server Binding] no server binding found; server is unbound")
@@ -105,7 +109,7 @@ function FS25SiNNetworkLocal:loadServerBinding()
     Logging.info("[SiN Server Binding] loaded binding serverKey=%s", key)
 end
 
-function FS25SiNNetworkLocal:consoleCommandPair(code)
+function FS25SiNServer:consoleCommandPair(code)
     if code == nil or code == "" then return "A pairing code is required" end
     local path = self.commandDirectory .. "pairing-request-" .. tostring(self.sequence) .. ".xml"
     local xml = XMLFile.create("networkLocalPairingRequest", path, "serverPairingRequest")
@@ -114,65 +118,221 @@ function FS25SiNNetworkLocal:consoleCommandPair(code)
     return "Pairing request queued; run the SiN local bridge and retry after it responds"
 end
 
-function FS25SiNNetworkLocal:onPlayerFarmChanged(player)
+function FS25SiNServer:onPlayerFarmChanged(player)
     local ok, errorMessage = pcall(self.enforceFarmChange, self, player)
     if not ok then
         Logging.error("[SiN Authorization] farm change enforcement failed: %s", tostring(errorMessage))
     end
 end
 
-function FS25SiNNetworkLocal:enforceFarmChange(player)
+function FS25SiNServer:enforceFarmChange(player)
     if player == nil or g_currentMission == nil or not g_currentMission:getIsServer()
         or g_farmManager == nil or g_currentMission.userManager == nil then return end
     local user = g_currentMission.userManager:getUserByUserId(player.userId)
     if user == nil then return end
     local farm = g_farmManager:getFarmByUserId(user:getId())
     if farm == nil then return end
-    local authorizedFarmId = nil
-    local path = self.directory .. "manager-authority.xml"
-    if fileExists(path) then
-        local authority = XMLFile.load("networkLocalAuthorityImmediate", path)
-        if authority ~= nil then
-            local index = 0
-            while true do
-                local key = string.format("managerAuthority.manager(%d)", index)
-                local identity = authority:getString(key .. "#gamePlayerId")
-                if identity == nil then break end
-                if tostring(identity) == tostring(user:getUniqueUserId()) then
-                    authorizedFarmId = authority:getInt(key .. "#farmId")
-                    break
-                end
-                index = index + 1
-            end
-            authority:delete()
-        end
-    end
-    local authorized = authorizedFarmId == farm.farmId
-    local manager = farm:isUserFarmManager(user:getId())
-    if not authorized and manager then
-        farm:demoteUser(user:getId())
-        manager = false
-    elseif authorized and not manager then
-        farm:promoteUser(user:getId())
-        manager = true
-    end
-    Logging.info("[SiN Authorization] farm change uniqueUserId=%s farmId=%s authorizedManager=%s resultingManager=%s",
-        self:shortIdentity(user:getUniqueUserId()), tostring(farm.farmId), tostring(authorized), tostring(manager))
+    local authorityFarmId = self:loadManagerAuthority()[tostring(user:getUniqueUserId())]
+    local authorized = authorityFarmId ~= nil and tonumber(authorityFarmId) == tonumber(farm.farmId)
+    self:enforceAuthorizedManagerState(user, farm, authorized)
 end
 
-function FS25SiNNetworkLocal:isDedicatedServerUser(user, farm)
+function FS25SiNServer:isDedicatedServerUser(user, farm)
     return user ~= nil and user:getId() == 1 and (farm == nil or farm.farmId == 0)
         and tostring(user:getNickname() or ""):lower() == "server"
 end
 
-function FS25SiNNetworkLocal:registrationRequestOutstanding(state)
+function FS25SiNServer:loadManagerAuthority()
+    local path = self.directory .. "manager-authority.xml"
+    local authority = fileExists(path) and XMLFile.load("networkLocalAuthority", path) or nil
+    local authorized = {}
+    if authority == nil then return authorized end
+    local index = 0
+    while true do
+        local key = string.format("managerAuthority.manager(%d)", index)
+        local playerId = authority:getString(key .. "#gamePlayerId")
+        if playerId == nil then break end
+        authorized[tostring(playerId)] = authority:getInt(key .. "#farmId")
+        index = index + 1
+    end
+    authority:delete()
+    return authorized
+end
+
+function FS25SiNServer:readFarmManagerState(farm, userId)
+    local manager = false
+    local permissions = {}
+    if farm == nil then return manager, permissions end
+    if farm.isUserFarmManager ~= nil then
+        local managerOk, managerValue = pcall(farm.isUserFarmManager, farm, userId)
+        if managerOk then manager = managerValue == true end
+    end
+    if farm.getUserPermissions ~= nil then
+        local permissionsOk, permissionsValue = pcall(farm.getUserPermissions, farm, userId)
+        if permissionsOk and type(permissionsValue) == "table" then permissions = permissionsValue end
+    end
+    return manager, permissions
+end
+
+function FS25SiNServer:getFarmPermissionKeys(farm, permissions)
+    local keys = {}
+    for permission, value in pairs(permissions or {}) do
+        if type(permission) == "string" then keys[permission] = true end
+        if type(value) == "string" then keys[value] = true end
+    end
+    if next(keys) == nil and Farm ~= nil and type(Farm.PERMISSION) == "table" then
+        for _, permission in pairs(Farm.PERMISSION) do
+            if type(permission) == "string" then keys[permission] = true end
+        end
+    end
+    return keys
+end
+
+function FS25SiNServer:countFarmPermissions(permissions)
+    local count, granted = 0, 0
+    for _, hasPermission in pairs(permissions or {}) do
+        count = count + 1
+        if hasPermission == true then granted = granted + 1 end
+    end
+    return count, granted
+end
+
+function FS25SiNServer:replicateFarmPermissions(userId, permissions, manager)
+    if PlayerPermissionsEvent == nil or PlayerPermissionsEvent.sendEvent == nil then return end
+    local ok, errorMessage = pcall(PlayerPermissionsEvent.sendEvent, userId, permissions or {}, manager == true, false)
+    if not ok then
+        Logging.warning("[SiN Authorization] farm permission replication failed userId=%s error=%s",
+            tostring(userId), tostring(errorMessage))
+    end
+end
+
+function FS25SiNServer:enforceAuthorizedManagerState(user, farm, authorized)
+    if user == nil or farm == nil or farm.farmId == nil or farm.farmId <= 0 then return false end
+    local userId = user:getId()
+    local beforeManager, beforePermissions = self:readFarmManagerState(farm, userId)
+    local afterManager, afterPermissions = beforeManager, beforePermissions
+    if authorized then
+        if not beforeManager then
+            if farm.promoteUser == nil then error("FS25 promoteUser is unavailable") end
+            farm:promoteUser(userId)
+        end
+        afterManager, afterPermissions = self:readFarmManagerState(farm, userId)
+        local permissionKeys = self:getFarmPermissionKeys(farm, afterPermissions)
+        if next(permissionKeys) == nil then error("FS25 manager permission set is unavailable") end
+        for permission, _ in pairs(permissionKeys) do
+            if afterPermissions[permission] ~= true then
+                if farm.setUserPermission == nil then error("FS25 setUserPermission is unavailable") end
+                farm:setUserPermission(userId, permission, true)
+            end
+        end
+        afterManager, afterPermissions = self:readFarmManagerState(farm, userId)
+        self:replicateFarmPermissions(userId, afterPermissions, afterManager)
+    else
+        if beforeManager then
+            if farm.demoteUser == nil then error("FS25 demoteUser is unavailable") end
+            farm:demoteUser(userId)
+        end
+        afterManager, afterPermissions = self:readFarmManagerState(farm, userId)
+        -- Native demotion owns the manager-only transition. If FS25 exposes the
+        -- farm's default permission table, restore exactly those defaults while
+        -- preserving ordinary shared-farm permissions; never blanket-clear all
+        -- permissions for a non-manager.
+        if type(farm.defaultPermissions) == "table" and farm.setUserPermission ~= nil then
+            for permission, hasPermission in pairs(afterPermissions) do
+                local defaultPermission = farm.defaultPermissions[permission] == true
+                if hasPermission ~= defaultPermission then
+                    farm:setUserPermission(userId, permission, defaultPermission)
+                end
+            end
+            afterManager, afterPermissions = self:readFarmManagerState(farm, userId)
+        end
+        self:replicateFarmPermissions(userId, afterPermissions, false)
+    end
+    local permissionCount, grantedCount = self:countFarmPermissions(afterPermissions)
+    Logging.info("[SiN Authorization] farm state uniqueUserId=%s farmId=%s authorizedManager=%s beforeManager=%s afterManager=%s permissionCount=%s grantedPermissions=%s",
+        self:shortIdentity(user:getUniqueUserId()), tostring(farm.farmId), tostring(authorized == true),
+        tostring(beforeManager), tostring(afterManager), tostring(permissionCount), tostring(grantedCount))
+    return afterManager == (authorized == true)
+end
+
+function FS25SiNServer:findPlayerObject(userId)
+    if g_currentMission == nil or g_currentMission.players == nil then return nil end
+    for _, player in ipairs(g_currentMission.players) do
+        if player ~= nil and tostring(player.userId) == tostring(userId) then return player end
+    end
+    return nil
+end
+
+function FS25SiNServer:samplePlayerPosition(userId)
+    local player = self:findPlayerObject(userId)
+    if player == nil or player.rootNode == nil or player.rootNode == 0 or getWorldTranslation == nil then return nil end
+    local ok, x, _, z = pcall(getWorldTranslation, player.rootNode)
+    if not ok or x == nil or z == nil then return nil end
+    return {x=x, z=z}
+end
+
+function FS25SiNServer:startActivityTracking(uniqueId, record)
+    self.activitySessionSequence = self.activitySessionSequence + 1
+    local sessionId = tostring(self.session) .. "-" .. tostring(self.activitySessionSequence)
+    self.activityStates[uniqueId] = {
+        sessionId=sessionId, userId=record.user_id, intervalElapsed=0, minuteSequence=0,
+        inactivityMinutes=0, lastPosition=self:samplePlayerPosition(record.user_id)}
+end
+
+function FS25SiNServer:processActivitySamples(dt)
+    for uniqueId, state in pairs(self.activityStates or {}) do
+        local record = self.connectedPlayers[uniqueId]
+        if record == nil then
+            self.activityStates[uniqueId] = nil
+        else
+            state.userId = record.user_id
+            state.intervalElapsed = state.intervalElapsed + dt
+            if state.intervalElapsed >= 60000 then
+                local position = self:samplePlayerPosition(record.user_id)
+                -- A missing position is an unobserved interval, not an idle
+                -- minute. Restart the baseline when the player is observable.
+                if position == nil then
+                    state.lastPosition = nil
+                    state.intervalElapsed = 0
+                elseif state.lastPosition == nil then
+                    state.lastPosition = position
+                    state.intervalElapsed = 0
+                else
+                    local dx = position.x - state.lastPosition.x
+                    local dz = position.z - state.lastPosition.z
+                    local moved = (dx * dx + dz * dz) > (self.activityMovementTolerance * self.activityMovementTolerance)
+                    state.lastPosition = position
+                    state.intervalElapsed = 0
+                    local bucket
+                    if moved then
+                        state.inactivityMinutes = 0
+                        bucket = "active"
+                    else
+                        state.inactivityMinutes = state.inactivityMinutes + 1
+                        bucket = state.inactivityMinutes <= 10 and "idle" or "afk"
+                    end
+                    state.minuteSequence = state.minuteSequence + 1
+                    local eventId = string.gsub(self.serverKey .. "-activity-" .. state.sessionId .. "-" ..
+                        uniqueId .. "-" .. tostring(state.minuteSequence), "[^%w_-]", "_")
+                    self:emitServerEvent("player_activity_minute", {
+                        unique_user_id=uniqueId, user_id=record.user_id, farm_id=record.farm_id,
+                        display_name=record.name, session_id=state.sessionId,
+                        minute_sequence=state.minuteSequence, activity_bucket=bucket,
+                        inactive_minutes=state.inactivityMinutes, duration_seconds=60}, eventId)
+                end
+            end
+        end
+    end
+end
+
+function FS25SiNServer:registrationRequestOutstanding(state)
     if state == nil or state.requestId == nil then return false end
     local requestId = tostring(state.requestId)
     return fileExists(self.registrationRequestDirectory .. requestId .. ".xml")
         or fileExists(self.registrationResponseDirectory .. requestId .. ".xml")
 end
 
-function FS25SiNNetworkLocal:queueRegistrationRequest(user, farm, refreshRequired)
+function FS25SiNServer:queueRegistrationRequest(user, farm, refreshRequired)
     if user == nil or self.serverKey == nil or self.registrationRequestDirectory == nil
         or self:isDedicatedServerUser(user, farm) then return end
     local uniqueId = tostring(user:getUniqueUserId() or "")
@@ -210,7 +370,7 @@ function FS25SiNNetworkLocal:queueRegistrationRequest(user, farm, refreshRequire
     self.registrationState[uniqueId] = {status="pending", requestId=requestId, requestedAt=self.registrationClock}
 end
 
-function FS25SiNNetworkLocal:findConnectedUser(uniqueId)
+function FS25SiNServer:findConnectedUser(uniqueId)
     if g_currentMission == nil or g_currentMission.userManager == nil then return nil end
     for _, user in ipairs(g_currentMission.userManager:getUsers() or {}) do
         if tostring(user:getUniqueUserId() or "") == tostring(uniqueId) then return user end
@@ -218,7 +378,7 @@ function FS25SiNNetworkLocal:findConnectedUser(uniqueId)
     return nil
 end
 
-function FS25SiNNetworkLocal:onPlayerConnected(user, connection, farmId)
+function FS25SiNServer:onPlayerConnected(user, connection, farmId)
     if user == nil or g_currentMission == nil or not g_currentMission:getIsServer() then return end
     local farm = g_farmManager ~= nil and g_farmManager:getFarmByUserId(user:getId()) or nil
     if farm == nil and farmId ~= nil and g_farmManager ~= nil then
@@ -233,6 +393,7 @@ function FS25SiNNetworkLocal:onPlayerConnected(user, connection, farmId)
     self.connectedPlayers[uniqueId] = record
     self.previousPlayers[uniqueId] = {name=record.name, user_id=record.user_id, farm_id=record.farm_id}
     if not wasTracked then
+        self:startActivityTracking(uniqueId, record)
         Logging.info("[SiN Player] connected uniqueUserId=%s userId=%s", self:shortIdentity(uniqueId), tostring(record.user_id))
         self:emitServerEvent("player_connected", {unique_user_id=uniqueId, user_id=record.user_id,
             farm_id=record.farm_id, display_name=record.name})
@@ -245,7 +406,7 @@ function FS25SiNNetworkLocal:onPlayerConnected(user, connection, farmId)
     end
 end
 
-function FS25SiNNetworkLocal:onPlayerDisconnected(userId)
+function FS25SiNServer:onPlayerDisconnected(userId)
     local matchId = tostring(userId or "")
     local uniqueId, record = nil, nil
     for identity, candidate in pairs(self.connectedPlayers) do
@@ -265,13 +426,14 @@ function FS25SiNNetworkLocal:onPlayerDisconnected(userId)
     if uniqueId == nil or record == nil then return end
     self.connectedPlayers[uniqueId] = nil
     self.previousPlayers[uniqueId] = nil
+    self.activityStates[uniqueId] = nil
     self.registrationPromptAt[uniqueId] = nil
     Logging.info("[SiN Player] disconnected uniqueUserId=%s userId=%s", self:shortIdentity(uniqueId), matchId)
     self:emitServerEvent("player_disconnected", {unique_user_id=uniqueId, user_id=record.user_id,
         farm_id=record.farm_id, display_name=record.name})
 end
 
-function FS25SiNNetworkLocal:setClientRegistrationWarning(required, code)
+function FS25SiNServer:setClientRegistrationWarning(required, code)
     self.registrationRequired = required == true
     self.registrationCode = self.registrationRequired and tostring(code or "") or nil
     if not self.registrationRequired or self.registrationCode == "" then
@@ -284,7 +446,7 @@ function FS25SiNNetworkLocal:setClientRegistrationWarning(required, code)
     self.registrationWarningElapsed = 0
 end
 
-function FS25SiNNetworkLocal:updateClientRegistrationWarning(dt)
+function FS25SiNServer:updateClientRegistrationWarning(dt)
     if not self.registrationRequired or self.registrationCode == nil or g_currentMission == nil
         or g_currentMission.showBlinkingWarning == nil then return end
     self.registrationWarningElapsed = self.registrationWarningElapsed + dt
@@ -294,7 +456,7 @@ function FS25SiNNetworkLocal:updateClientRegistrationWarning(dt)
     g_currentMission:showBlinkingWarning(text, 2000)
 end
 
-function FS25SiNNetworkLocal:sendRegistrationWarning(uniqueId, required, code)
+function FS25SiNServer:sendRegistrationWarning(uniqueId, required, code)
     local tracked = self.connectedPlayers[tostring(uniqueId)]
     if tracked == nil or tracked.connection == nil or tracked.connection.sendEvent == nil
         or SiNRegistrationWarningEvent == nil then return false end
@@ -307,7 +469,7 @@ function FS25SiNNetworkLocal:sendRegistrationWarning(uniqueId, required, code)
     return true
 end
 
-function FS25SiNNetworkLocal:sendRegistrationState(uniqueId, status, code)
+function FS25SiNServer:sendRegistrationState(uniqueId, status, code)
     local required = status == "registration_required"
     if self:sendRegistrationWarning(uniqueId, required, code) then
         if required then
@@ -318,7 +480,7 @@ function FS25SiNNetworkLocal:sendRegistrationState(uniqueId, status, code)
     end
 end
 
-function FS25SiNNetworkLocal:registrationResponsePath(filename)
+function FS25SiNServer:registrationResponsePath(filename)
     if filename == nil then return nil end
     local value = tostring(filename)
     local directory = self.registrationResponseDirectory or ""
@@ -331,13 +493,13 @@ function FS25SiNNetworkLocal:registrationResponsePath(filename)
     return directory .. value
 end
 
-function FS25SiNNetworkLocal:collectRegistrationResponseFile(filename)
+function FS25SiNServer:collectRegistrationResponseFile(filename)
     local path = self:registrationResponsePath(filename)
     if path == nil or string.sub(path, -4) ~= ".xml" then return end
     table.insert(self.registrationResponseFiles, path)
 end
 
-function FS25SiNNetworkLocal:processRegistrationResponses()
+function FS25SiNServer:processRegistrationResponses()
     self.registrationResponseFiles = {}
     getFiles(self.registrationResponseDirectory, "collectRegistrationResponseFile", self)
     table.sort(self.registrationResponseFiles)
@@ -367,7 +529,7 @@ function FS25SiNNetworkLocal:processRegistrationResponses()
     self.registrationResponseFiles = nil
 end
 
-function FS25SiNNetworkLocal:enforceRegistration(user, farm)
+function FS25SiNServer:enforceRegistration(user, farm)
     if user == nil or self:isDedicatedServerUser(user, farm) then return end
     local uniqueId = tostring(user:getUniqueUserId() or "")
     local state = self.registrationState[uniqueId]
@@ -385,7 +547,7 @@ function FS25SiNNetworkLocal:enforceRegistration(user, farm)
     end
 end
 
-function FS25SiNNetworkLocal:consoleCommandPermissions()
+function FS25SiNServer:consoleCommandPermissions()
     if Farm == nil or Farm.PERMISSION == nil then return "Farm permissions are unavailable" end
     local keys = {}
     for permission, _ in pairs(Farm.PERMISSION) do table.insert(keys, tostring(permission)) end
@@ -393,7 +555,7 @@ function FS25SiNNetworkLocal:consoleCommandPermissions()
     return "FS25 permission keys: " .. table.concat(keys, ", ")
 end
 
-function FS25SiNNetworkLocal:update(dt)
+function FS25SiNServer:update(dt)
     if g_currentMission ~= nil and g_currentMission:getIsClient() then
         self:updateClientRegistrationWarning(dt)
     end
@@ -418,6 +580,12 @@ function FS25SiNNetworkLocal:update(dt)
         self:processClockPolicy()
     end
     if self.serverBindingState == "bound_pending_auth" or self.serverBindingState == "bound" then
+        self.activitySampleElapsed = self.activitySampleElapsed + dt
+        if self.activitySampleElapsed >= 1000 then
+            local sampleDt = self.activitySampleElapsed
+            self.activitySampleElapsed = 0
+            self:processActivitySamples(sampleDt)
+        end
         if self.heartbeatElapsed >= 20000 then
             self.heartbeatElapsed = 0
             self:emitServerEvent("heartbeat", {})
@@ -430,31 +598,29 @@ function FS25SiNNetworkLocal:update(dt)
     self.elapsed = 0
     self:validateLoadedFarmVisualStates()
     self:processRegistrationResponses()
-    if not self.systemFarmDiagnosticLogged and g_farmManager ~= nil then
-        local systemFarm = g_farmManager:getFarmById(2)
-        Logging.info("[SiN (SimNet) Network Local] System farm diagnostic farm=2 exists=%s hasDemoteUser=%s hasSetUserPermission=%s", tostring(systemFarm ~= nil), tostring(systemFarm ~= nil and systemFarm.demoteUser ~= nil), tostring(systemFarm ~= nil and systemFarm.setUserPermission ~= nil))
-        self.systemFarmDiagnosticLogged = true
-    end
     local ok, errorMessage = pcall(self.exportSnapshot, self)
     if not ok then
         Logging.error("[SiN Player State] scan valid=false current=unknown")
-        Logging.error("[SiN (SimNet) Network Local] Snapshot skipped: %s", tostring(errorMessage))
+        Logging.error("[SiN (SimNet) Server] Snapshot skipped: %s", tostring(errorMessage))
     end
     local receiptOk, receiptError = pcall(self.processPermissionCommands, self)
     if not receiptOk then
-        Logging.error("[SiN (SimNet) Network Local] Permission mailbox error: %s", tostring(receiptError))
+        Logging.error("[SiN (SimNet) Server] Permission mailbox error: %s", tostring(receiptError))
     end
     self:processPairingResponse()
     local restoreOk, restoreError = pcall(self.restoreApprovedManagers, self)
     if not restoreOk then
-        Logging.error("[SiN (SimNet) Network Local] Manager restore error: %s", tostring(restoreError))
+        Logging.error("[SiN (SimNet) Server] Manager restore error: %s", tostring(restoreError))
     end
 end
 
-function FS25SiNNetworkLocal:emitServerEvent(eventType, values)
+function FS25SiNServer:emitServerEvent(eventType, values, requestedEventId)
     if self.serverKey == nil or self.serverCredential == nil or self.eventDirectory == nil then return end
-    self.eventSequence = self.eventSequence + 1
-    local eventId = self.serverKey .. "-" .. tostring(self.session) .. "-" .. tostring(self.eventSequence) .. "-" .. eventType
+    local eventId = requestedEventId
+    if eventId == nil then
+        self.eventSequence = self.eventSequence + 1
+        eventId = self.serverKey .. "-" .. tostring(self.session) .. "-" .. tostring(self.eventSequence) .. "-" .. eventType
+    end
     if self.eventSeen[eventId] then return end
     local path = self.eventDirectory .. eventId .. ".xml"
     if fileExists(path) then self.eventSeen[eventId] = true; return end
@@ -468,12 +634,19 @@ function FS25SiNNetworkLocal:emitServerEvent(eventType, values)
     for key, value in pairs(values or {}) do xml:setString("serverEvent#" .. tostring(key), tostring(value)) end
     xml:save(); xml:delete()
     self.eventSeen[eventId] = true
-    Logging.info("[SiN Events] queued type=%s eventId=%s", tostring(eventType), tostring(eventId))
+    if eventType ~= "player_activity_minute" then
+        Logging.info("[SiN Events] queued type=%s eventId=%s", tostring(eventType), tostring(eventId))
+    end
 end
 
-function FS25SiNNetworkLocal:processPlayerTransitions(currentPlayers)
+function FS25SiNServer:processPlayerTransitions(currentPlayers)
     local previousPlayers = self.previousPlayers or {}
     for identity, player in pairs(currentPlayers) do
+        if self.connectedPlayers[identity] ~= nil then
+            self.connectedPlayers[identity].name = player.name
+            self.connectedPlayers[identity].user_id = player.user_id
+            self.connectedPlayers[identity].farm_id = player.farm_id
+        end
         if previousPlayers[identity] == nil then
             local user = g_currentMission.userManager:getUserByUserId(player.user_id)
             if user ~= nil then
@@ -493,7 +666,7 @@ function FS25SiNNetworkLocal:processPlayerTransitions(currentPlayers)
     self.previousPlayers = currentPlayers
 end
 
-function FS25SiNNetworkLocal:reconcileConnectedPlayers()
+function FS25SiNServer:reconcileConnectedPlayers()
     if g_currentMission == nil or g_currentMission.userManager == nil then return end
     local currentPlayers = {}
     for _, user in ipairs(g_currentMission.userManager:getUsers() or {}) do
@@ -518,7 +691,7 @@ function FS25SiNNetworkLocal:reconcileConnectedPlayers()
     self:processPlayerTransitions(currentPlayers)
 end
 
-function FS25SiNNetworkLocal:processPairingResponse()
+function FS25SiNServer:processPairingResponse()
     local path = self.commandDirectory .. "server-pairing-response.xml"
     if not fileExists(path) then return end
     local xml = XMLFile.load("networkLocalPairingResponse", path)
@@ -546,7 +719,7 @@ function FS25SiNNetworkLocal:processPairingResponse()
     Logging.info("[SiN Server Binding] pairing completed serverKey=%s", key)
 end
 
-function FS25SiNNetworkLocal:retirePairingResponse(path, key)
+function FS25SiNServer:retirePairingResponse(path, key)
     local retired = XMLFile.create("networkLocalPairingResponse", path, "serverPairingResponse")
     if retired == nil then return end
     retired:setString("serverPairingResponse#serverKey", key or "")
@@ -554,7 +727,7 @@ function FS25SiNNetworkLocal:retirePairingResponse(path, key)
     retired:save(); retired:delete()
 end
 
-function FS25SiNNetworkLocal:processClockPolicy()
+function FS25SiNServer:processClockPolicy()
     if g_currentMission == nil or not g_currentMission:getIsServer() then return end
     local path = self.directory .. "clock-policy.xml"
     if not fileExists(path) then return end
@@ -645,7 +818,7 @@ function FS25SiNNetworkLocal:processClockPolicy()
 end
 
 -- Read-only runtime probe retained in source history only; no longer executed.
-function FS25SiNNetworkLocal:reportFarmlandDiagnostic()
+function FS25SiNServer:reportFarmlandDiagnostic()
     local prefix = "[SiN Farmland Diagnostic]"
     local function describe(label, object)
         if object == nil then
@@ -696,7 +869,7 @@ function FS25SiNNetworkLocal:reportFarmlandDiagnostic()
     Logging.info("%s complete; no methods were invoked", prefix)
 end
 
-function FS25SiNNetworkLocal:processPermissionCommands()
+function FS25SiNServer:processPermissionCommands()
     -- Receipt-only probe. Permission mutation remains disabled until its FS25
     -- role API mapping is verified in the running game.
     local manifestPath = self.commandDirectory .. "manifest.xml"
@@ -731,8 +904,7 @@ function FS25SiNNetworkLocal:processPermissionCommands()
             local manager = farm ~= nil and userId ~= nil and farm:isUserFarmManager(userId)
             local requestedRole = command:getString("permissionCommand#role")
             local applied = requestedRole == "farm_manager" and currentFarm ~= nil and currentFarm.farmId == farmId and manager
-            local systemFarm = g_farmManager:getFarmById(2)
-            Logging.info("[SiN (SimNet) Network Local] Permission diagnostic operation=%s player=%s userId=%s farm=%s currentFarm=%s manager=%s hasSetUserPermission=%s systemDemote=%s", operationId, tostring(playerId), tostring(userId), tostring(farmId), tostring(currentFarm and currentFarm.farmId), tostring(manager), tostring(farm ~= nil and farm.setUserPermission ~= nil), tostring(systemFarm ~= nil and systemFarm.demoteUser ~= nil))
+            Logging.info("[SiN (SimNet) Server] Permission diagnostic operation=%s player=%s userId=%s farm=%s currentFarm=%s manager=%s hasSetUserPermission=%s", operationId, tostring(playerId), tostring(userId), tostring(farmId), tostring(currentFarm and currentFarm.farmId), tostring(manager), tostring(farm ~= nil and farm.setUserPermission ~= nil))
             local receipt = XMLFile.create("networkLocalReceipt", self.receiptDirectory .. operationId .. ".xml", "permissionReceipt")
             receipt:setString("permissionReceipt#operation_id", operationId)
             receipt:setString("permissionReceipt#server_id", command:getString("permissionCommand#server_id"))
@@ -748,7 +920,7 @@ function FS25SiNNetworkLocal:processPermissionCommands()
     manifest:delete()
 end
 
-function FS25SiNNetworkLocal:findFarmByName(name)
+function FS25SiNServer:findFarmByName(name)
     local found = nil
     if g_farmManager == nil then return nil, "farm manager unavailable" end
     for farmId = 1, 254 do
@@ -761,12 +933,19 @@ function FS25SiNNetworkLocal:findFarmByName(name)
     return found, nil
 end
 
+function FS25SiNServer:resolveConfiguredSystemFarm()
+    if self.systemFarmName == nil or self.systemFarmName == "" then
+        return nil, "system farm name is not configured in the current mailbox operation"
+    end
+    return self:findFarmByName(self.systemFarmName)
+end
+
 -- FarmManager:createFarm() persists a numeric color index.  The FS25 map
 -- hotspot code later resolves the farm color/icon from that index, so do not
 -- allow a malformed farm to proceed into a SiN operation.  There is no
 -- documented Farm color setter in the FS25 API; this is deliberately a
 -- validation guard, not an in-place save repair.
-function FS25SiNNetworkLocal:isFarmVisualStateValid(farm)
+function FS25SiNServer:isFarmVisualStateValid(farm)
     if farm == nil then return false, "farm is missing" end
     local farmId = tonumber(farm.farmId)
     if farmId == nil or farmId <= 0 or farmId >= 255 then
@@ -795,7 +974,7 @@ function FS25SiNNetworkLocal:isFarmVisualStateValid(farm)
     return true, nil
 end
 
-function FS25SiNNetworkLocal:validateLoadedFarmVisualStates()
+function FS25SiNServer:validateLoadedFarmVisualStates()
     if g_farmManager == nil then return end
     for farmId = 1, 254 do
         local farm = g_farmManager:getFarmById(farmId)
@@ -815,7 +994,7 @@ end
 -- range.  Existing colors are never changed.  The next free farm ID is used
 -- only as a preference for the color index; the game still assigns the farm ID
 -- because the createFarm fourth argument remains nil.
-function FS25SiNNetworkLocal:selectFarmColor(preferredFarmId)
+function FS25SiNServer:selectFarmColor(preferredFarmId)
     if Farm == nil or type(Farm.COLORS) ~= "table" then
         return nil, "FS25 Farm.COLORS is unavailable"
     end
@@ -845,7 +1024,7 @@ function FS25SiNNetworkLocal:selectFarmColor(preferredFarmId)
     return nil, "no unused FS25 farm color is available"
 end
 
-function FS25SiNNetworkLocal:nextAvailableFarmId()
+function FS25SiNServer:nextAvailableFarmId()
     if g_farmManager == nil then return nil end
     for farmId = 1, 254 do
         if g_farmManager:getFarmById(farmId) == nil then return farmId end
@@ -858,7 +1037,7 @@ end
 -- connected clients update their own farmland mapping.  Broadcast the same
 -- supported event after the server-side mutation; otherwise snapshots can
 -- report the new owner while a client Field Info view still shows the old one.
-function FS25SiNNetworkLocal:setAndReplicateLandOwnership(farmlandId, farmId)
+function FS25SiNServer:setAndReplicateLandOwnership(farmlandId, farmId)
     if g_farmlandManager == nil or g_farmlandManager.setLandOwnership == nil then
         error("FS25 farmland ownership API is unavailable")
     end
@@ -878,17 +1057,19 @@ function FS25SiNNetworkLocal:setAndReplicateLandOwnership(farmlandId, farmId)
     return owner
 end
 
-function FS25SiNNetworkLocal:processFarmProvisionCommand(command, operationId, operationType)
+function FS25SiNServer:processFarmProvisionCommand(command, operationId, operationType)
     local prefix = "[SiN Farm Operation]"
     local serverId = command:getString("networkLocalCommand#server_id")
     local saveId = command:getString("networkLocalCommand#save_id")
     local farmName = command:getString("networkLocalCommand#canonical_name")
+    local farmType = command:getString("networkLocalCommand#farm_type")
     local farmlandId = command:getInt("networkLocalCommand#farmland_id")
     local status, reason, farmId, owner = "failed", "validation_failed", 0, 0
     local ok, errorMessage = pcall(function()
         if g_currentMission == nil or not g_currentMission:getIsServer() then error("not authoritative server") end
         if g_farmManager == nil then error("farm manager unavailable") end
         if farmName == nil or farmName == "" then error("farm name is required") end
+        if operationType == "ensure_farm" or farmType == "system" then self.systemFarmName = farmName end
         local farm, lookupError = self:findFarmByName(farmName)
         if lookupError ~= nil then error(lookupError) end
         if farm == nil then
@@ -905,6 +1086,12 @@ function FS25SiNNetworkLocal:processFarmProvisionCommand(command, operationId, o
             farm, lookupError = self:findFarmByName(farmName)
             if lookupError ~= nil then error(lookupError) end
             if farm == nil then error("farm creation did not produce a discoverable farm") end
+        end
+        if operationType == "ensure_farm" then
+            local configuredFarm, configuredError = self:resolveConfiguredSystemFarm()
+            if configuredError ~= nil or configuredFarm ~= farm then
+                error(configuredError or "configured system farm could not be resolved")
+            end
         end
         farmId = farm.farmId
         local visualStateValid, visualStateError = self:isFarmVisualStateValid(farm)
@@ -943,7 +1130,7 @@ function FS25SiNNetworkLocal:processFarmProvisionCommand(command, operationId, o
     command:delete()
 end
 
-function FS25SiNNetworkLocal:processNameAlignment(command, operationId)
+function FS25SiNServer:processNameAlignment(command, operationId)
     local uniqueId = command:getString("networkLocalCommand#unique_user_id")
     local canonical = command:getString("networkLocalCommand#canonical_name")
     local matched = nil
@@ -976,7 +1163,7 @@ function FS25SiNNetworkLocal:processNameAlignment(command, operationId)
     command:delete()
 end
 
-function FS25SiNNetworkLocal:processLandCommand(command, operationId)
+function FS25SiNServer:processLandCommand(command, operationId)
     local prefix = "[SiN Land Operation]"
     local serverId = command:getString("networkLocalCommand#server_id")
     local saveId = command:getString("networkLocalCommand#save_id")
@@ -1017,56 +1204,22 @@ function FS25SiNNetworkLocal:processLandCommand(command, operationId)
     command:delete()
 end
 
-function FS25SiNNetworkLocal:restoreApprovedManagers()
-    -- FS25 may assign manager status as part of joining a farm. Clear it for
-    -- every connected user first; only the persisted SiN authority below may
-    -- promote the user again. This is the earliest hook available to this mod.
-    local path = self.directory .. "manager-authority.xml"
-    local authority = fileExists(path) and XMLFile.load("networkLocalAuthority", path) or nil
-    local authorized = {}
-    if authority ~= nil then
-        local authorityIndex = 0
-        while true do
-            local authorityKey = string.format("managerAuthority.manager(%d)", authorityIndex)
-            local authorityPlayer = authority:getString(authorityKey .. "#gamePlayerId")
-            if authorityPlayer == nil then break end
-            authorized[tostring(authorityPlayer)] = authority:getInt(authorityKey .. "#farmId")
-            authorityIndex = authorityIndex + 1
-        end
-    end
+function FS25SiNServer:restoreApprovedManagers()
+    -- Immediate farm-change handling and this periodic fallback use the same
+    -- verified state transition. The XML remains the sole SiN authority source.
+    local authorized = self:loadManagerAuthority()
     for _, user in ipairs(g_currentMission.userManager:getUsers()) do
         local userId = user:getId()
         local farm = g_farmManager:getFarmByUserId(userId)
-        if farm ~= nil and farm:isUserFarmManager(userId) and authorized[tostring(user:getUniqueUserId())] ~= farm.farmId then
-            farm:demoteUser(userId)
-            Logging.info("[SiN Authorization] farm switch uniqueUserId=%s farmId=%s authorizedManager=false resultingManager=false",
-                self:shortIdentity(user:getUniqueUserId()), tostring(farm.farmId))
+        if farm ~= nil and not self:isDedicatedServerUser(user, farm) and farm.farmId > 0 then
+            local authorityFarmId = authorized[tostring(user:getUniqueUserId())]
+            local isAuthorized = authorityFarmId ~= nil and tonumber(authorityFarmId) == tonumber(farm.farmId)
+            self:enforceAuthorizedManagerState(user, farm, isAuthorized)
         end
     end
-    if authority == nil then return end
-    local index = 0
-    while true do
-        local key = string.format("managerAuthority.manager(%d)", index)
-        local playerId = authority:getString(key .. "#gamePlayerId")
-        if playerId == nil then break end
-        local farmId = authority:getInt(key .. "#farmId")
-        local userId = nil
-        for _, user in ipairs(g_currentMission.userManager:getUsers()) do
-            if user:getUniqueUserId() == playerId then userId = user:getId(); break end
-        end
-        local farm = g_farmManager:getFarmById(farmId)
-        local currentFarm = userId ~= nil and g_farmManager:getFarmByUserId(userId) or nil
-        if farm ~= nil and currentFarm == farm and not farm:isUserFarmManager(userId) then
-            farm:promoteUser(userId)
-            Logging.info("[SiN Authorization] farm switch uniqueUserId=%s farmId=%s authorizedManager=true resultingManager=true",
-                self:shortIdentity(playerId), tostring(farmId))
-        end
-        index = index + 1
-    end
-    authority:delete()
 end
 
-function FS25SiNNetworkLocal:exportSnapshot()
+function FS25SiNServer:exportSnapshot()
     self.sequence = self.sequence + 1
     local xml = XMLFile.create("networkLocal", self.directory .. "snapshot.xml", "networkLocal")
     if xml == nil then
@@ -1134,11 +1287,11 @@ function FS25SiNNetworkLocal:exportSnapshot()
     xml:save()
     xml:delete()
     if self.sequence == 1 then
-        Logging.info("[SiN (SimNet) Network Local] First snapshot exported (%d farms)", index)
+        Logging.info("[SiN (SimNet) Server] First snapshot exported (%d farms)", index)
     end
 end
 
-function FS25SiNNetworkLocal:deleteMap()
+function FS25SiNServer:deleteMap()
     self.failed = true
     removeConsoleCommand("sinPermissions")
     if g_messageCenter ~= nil and MessageType ~= nil and MessageType.PLAYER_FARM_CHANGED ~= nil then
@@ -1146,4 +1299,4 @@ function FS25SiNNetworkLocal:deleteMap()
     end
 end
 
-addModEventListener(FS25SiNNetworkLocal)
+addModEventListener(FS25SiNServer)

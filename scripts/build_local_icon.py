@@ -19,7 +19,7 @@ def build_icon():
             r, g, b = (232, 245, 226) if node else (76, 176, 108) if line else (20, 42, 34)
             color = (r >> 3) << 11 | (g >> 2) << 5 | b >> 3
             data.extend(struct.pack("<HHI", color, 0, 0))
-    path = Path(__file__).resolve().parent.parent / "mods/FS25_SiN_NetworkLocal/icon_network.dds"
+    path = Path(__file__).resolve().parent.parent / "mods/FS25_SiN_Server/icon_network.dds"
     path.write_bytes(data)
     return path
 

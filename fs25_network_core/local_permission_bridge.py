@@ -211,7 +211,7 @@ class LocalPermissionBridge:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("directory", type=Path, help="FS25 modSettings/FS25_SiN_NetworkLocal directory")
+    parser.add_argument("directory", type=Path, help="FS25 modSettings/FS25_SiN_Server directory")
     parser.add_argument("--server", default="local-dev")
     parser.add_argument("--save", default="local-dev-save-001")
     parser.add_argument("--watch", action="store_true")

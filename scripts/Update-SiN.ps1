@@ -6,18 +6,19 @@ param(
     [string]$DeployRoot = "C:\SiN\Deploy",
     [string]$BackupRoot = "C:\SiN\Backups",
     [string]$DownloadRoot = "C:\SiN\Downloads",
-    [string]$MailboxDir = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\modSettings\FS25_SiN_NetworkLocal",
+    [string]$MailboxDir = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\modSettings\FS25_SiN_Server",
     [string]$ApiUrl = "http://192.168.1.185:8080",
     [double]$PollInterval = 2,
     [string]$ModsPath = $env:SIN_FS25_MODS_DIR,
     [int]$KeepBackups = 5,
     [switch]$Rollback,
-    [switch]$MigrateLegacyMailbox
+    [switch]$MigrateLegacyMailbox,
+    [switch]$MigrationOnly
 )
 
 $ErrorActionPreference = "Stop"
-$assets = @("sin-agent.zip", "FS25_SiN_NetworkLocal.zip", "build-manifest.json", "SHA256SUMS.txt", "Update-SiN.ps1")
-$checksumAssets = @("sin-agent.zip", "FS25_SiN_NetworkLocal.zip", "Update-SiN.ps1")
+$assets = @("sin-agent.zip", "FS25_SiN_Server.zip", "build-manifest.json", "SHA256SUMS.txt", "Update-SiN.ps1")
+$checksumAssets = @("sin-agent.zip", "FS25_SiN_Server.zip", "Update-SiN.ps1")
 $logRoot = "C:\SiN\Logs"
 
 function Get-AgentProcess {
@@ -27,8 +28,8 @@ function Get-AgentProcess {
 
 function Assert-CanonicalMailbox {
     $leaf = Split-Path -Leaf ($MailboxDir.TrimEnd([char]92, [char]47))
-    if ($leaf -eq "FS25SiNNetworkLocal") {
-        throw "The legacy mailbox root is not supported. Use modSettings\\FS25_SiN_NetworkLocal."
+    if ($leaf -ne "FS25_SiN_Server") {
+        throw "MailboxDir must be the canonical FS25_SiN_Server mailbox root."
     }
 }
 
@@ -37,39 +38,35 @@ function Invoke-LegacyMailboxMigration {
 
     $destination = [IO.Path]::GetFullPath($Destination)
     $parent = Split-Path -Parent $destination
-    $legacy = Join-Path $parent "FS25SiNNetworkLocal"
-    if (-not (Test-Path -LiteralPath $legacy -PathType Container)) {
-        Write-Host "Legacy mailbox not found; migration not needed."
+    $legacyCandidates = @(
+        (Join-Path $parent "FS25_SiN_NetworkLocal"),
+        (Join-Path $parent "FS25SiNNetworkLocal")
+    )
+    $legacyPaths = @($legacyCandidates | Where-Object {
+        -not [StringComparer]::OrdinalIgnoreCase.Equals($_, $destination) -and
+        (Test-Path -LiteralPath $_ -PathType Container)
+    })
+    if ($legacyPaths.Count -eq 0) {
+        New-Item -ItemType Directory -Force -Path $destination | Out-Null
+        Write-Host "Legacy mailbox not found; canonical mailbox is ready."
         return
     }
-    if ([StringComparer]::OrdinalIgnoreCase.Equals($legacy, $destination)) {
-        throw "Legacy and canonical mailbox paths must be different."
+    if ($legacyPaths.Count -gt 1) {
+        throw "Multiple legacy mailbox directories exist; refusing to choose between durable states."
     }
-
-    # Copy only durable root state. Existing canonical files are authoritative
-    # and are never overwritten, which keeps this safe to repeat and protects
-    # a newer serverBinding.xml without reading or printing its contents.
-    # Transient request/response/event folders remain in the retained legacy
-    # directory and are deliberately not replayed into the active mailbox.
-    New-Item -ItemType Directory -Force -Path $destination | Out-Null
-    $durableFiles = @(
-        "serverBinding.xml",
-        "snapshot.xml",
-        "clock-policy.xml",
-        "manager-authority.xml",
-        "serverBindingDiagnostic.xml"
-    )
-    foreach ($name in $durableFiles) {
-        $item = Join-Path $legacy $name
-        if (-not (Test-Path -LiteralPath $item -PathType Leaf)) { continue }
-        $target = Join-Path $destination $name
-        if (Test-Path -LiteralPath $target) {
-            Write-Host "Preserved existing canonical mailbox file: $name"
-            continue
+    $legacy = $legacyPaths[0]
+    if (Test-Path -LiteralPath $destination -PathType Container) {
+        $canonicalItems = @(Get-ChildItem -LiteralPath $destination -Force)
+        if ($canonicalItems.Count -ne 0) {
+            throw "Both legacy and canonical mailbox directories contain state; refusing to merge or overwrite. Review '$legacy' and '$destination'."
         }
-        Copy-Item -LiteralPath $item -Destination $target
+        Remove-Item -LiteralPath $destination -Force
     }
-    Write-Host "Durable mailbox state migrated to $destination. Transient legacy mailbox folders were retained for manual review."
+    # Move the complete mailbox directory while FS25 is stopped. This preserves
+    # serverBinding.xml and every pending mailbox item without replaying or
+    # selectively copying only the files known to this updater.
+    Move-Item -LiteralPath $legacy -Destination $destination
+    Write-Host "Migrated complete legacy mailbox to $destination."
 }
 
 function Stop-Agent {
@@ -177,7 +174,10 @@ function Resolve-ModsPath {
     $metadata = "C:\SiN\deployment.json"
     if (Test-Path $metadata) {
         $old = Get-Content $metadata -Raw | ConvertFrom-Json
-        if ($old.networklocal_path) { $script:ModsPath = Split-Path -Parent $old.networklocal_path }
+        if ($old.server_path) { $script:ModsPath = Split-Path -Parent $old.server_path }
+        # Read the old deployment metadata key only to locate a pre-rename
+        # installation; new records use server_path above.
+        elseif ($old.networklocal_path) { $script:ModsPath = Split-Path -Parent $old.networklocal_path }
     }
     if (-not $ModsPath) { throw "FS25 mods path is required. Pass -ModsPath or set SIN_FS25_MODS_DIR; it is not guessed." }
 }
@@ -188,8 +188,8 @@ function Write-Deployment($release, $manifest, $agentHash, $modHash, $modChanged
         deployed_at_utc = (Get-Date).ToUniversalTime().ToString("o")
         git_commit = [string]$manifest.git_commit
         agent_sha256 = $agentHash
-        networklocal_sha256 = $modHash
-        networklocal_path = (Join-Path $ModsPath "FS25_SiN_NetworkLocal.zip")
+        server_sha256 = $modHash
+        server_path = (Join-Path $ModsPath "FS25_SiN_Server.zip")
         fs25_restart_required = [bool]$modChanged
         backup_path = $backupPath
     }
@@ -201,7 +201,8 @@ function Invoke-Rollback {
     $backup = Get-ChildItem -LiteralPath $BackupRoot -Directory | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if (-not $backup) { throw "No rollback backup exists" }
     $savedCore = Join-Path $backup.FullName "fs25_network_core"
-    $savedMod = Join-Path $backup.FullName "FS25_SiN_NetworkLocal.zip"
+    $savedMod = Join-Path $backup.FullName "FS25_SiN_Server.zip"
+    if (-not (Test-Path $savedMod)) { $savedMod = Join-Path $backup.FullName "FS25_SiN_NetworkLocal.zip" }
     if (-not (Test-Path $savedCore) -or -not (Test-Path $savedMod)) { throw "Latest backup is incomplete" }
     Stop-Agent
     $liveCore = Join-Path $AgentRoot "fs25_network_core"
@@ -209,7 +210,9 @@ function Invoke-Rollback {
     New-Item -ItemType Directory -Force -Path $AgentRoot | Out-Null
     Copy-Item -LiteralPath $savedCore -Destination $liveCore -Recurse
     New-Item -ItemType Directory -Force -Path $ModsPath | Out-Null
-    $targetMod = Join-Path $ModsPath "FS25_SiN_NetworkLocal.zip"
+    $targetMod = Join-Path $ModsPath "FS25_SiN_Server.zip"
+    $legacyMod = Join-Path $ModsPath "FS25_SiN_NetworkLocal.zip"
+    if (Test-Path -LiteralPath $legacyMod) { Remove-Item -LiteralPath $legacyMod -Force }
     $changed = -not (Test-Path $targetMod) -or ((Get-FileHash $targetMod).Hash -ne (Get-FileHash $savedMod).Hash)
     Copy-Item -LiteralPath $savedMod -Destination $targetMod -Force
     Start-Agent
@@ -219,6 +222,10 @@ function Invoke-Rollback {
 
 try {
     Assert-CanonicalMailbox
+    if ($MigrationOnly) {
+        Invoke-LegacyMailboxMigration -Destination $MailboxDir
+        exit 0
+    }
     Resolve-ModsPath
     if ($Rollback) { Invoke-Rollback; exit 0 }
     $release = Get-Release $Version
@@ -231,7 +238,7 @@ try {
     $manifest = Get-Content -LiteralPath (Join-Path $downloadDirectory "build-manifest.json") -Raw | ConvertFrom-Json
     if ([int]$manifest.release_format_version -ne 1) { throw "Unsupported release format" }
     if ($manifest.agent_sha256.ToLowerInvariant() -ne (Get-FileHash (Join-Path $downloadDirectory "sin-agent.zip")).Hash.ToLowerInvariant()) { throw "Agent manifest hash mismatch" }
-    if ($manifest.networklocal_sha256.ToLowerInvariant() -ne (Get-FileHash (Join-Path $downloadDirectory "FS25_SiN_NetworkLocal.zip")).Hash.ToLowerInvariant()) { throw "NetworkLocal manifest hash mismatch" }
+    if ($manifest.server_sha256.ToLowerInvariant() -ne (Get-FileHash (Join-Path $downloadDirectory "FS25_SiN_Server.zip")).Hash.ToLowerInvariant()) { throw "FS25_SiN_Server manifest hash mismatch" }
     if ($manifest.updater_sha256.ToLowerInvariant() -ne (Get-FileHash (Join-Path $downloadDirectory "Update-SiN.ps1")).Hash.ToLowerInvariant()) { throw "Updater manifest hash mismatch" }
     Test-AgentPackage $downloadDirectory
     New-Item -ItemType Directory -Force -Path $DeployRoot | Out-Null
@@ -242,19 +249,25 @@ try {
     New-Item -ItemType Directory -Force -Path $backup | Out-Null
     $liveCore = Join-Path $AgentRoot "fs25_network_core"
     if (Test-Path $liveCore) { Copy-Item -LiteralPath $liveCore -Destination (Join-Path $backup "fs25_network_core") -Recurse }
-    $targetMod = Join-Path $ModsPath "FS25_SiN_NetworkLocal.zip"
-    if (Test-Path $targetMod) { Copy-Item -LiteralPath $targetMod -Destination (Join-Path $backup "FS25_SiN_NetworkLocal.zip") }
+    $targetMod = Join-Path $ModsPath "FS25_SiN_Server.zip"
+    $legacyMod = Join-Path $ModsPath "FS25_SiN_NetworkLocal.zip"
+    if (Test-Path $targetMod) { Copy-Item -LiteralPath $targetMod -Destination (Join-Path $backup "FS25_SiN_Server.zip") }
+    if (Test-Path $legacyMod) { Copy-Item -LiteralPath $legacyMod -Destination (Join-Path $backup "FS25_SiN_NetworkLocal.zip") }
     if (Test-Path "C:\SiN\deployment.json") { Copy-Item "C:\SiN\deployment.json" (Join-Path $backup "previous-deployment.json") }
 
     Stop-Agent
-    if ($MigrateLegacyMailbox) { Invoke-LegacyMailboxMigration -Destination $MailboxDir }
+    # Migration is automatic so the Agent cannot start against an empty new
+    # mailbox while durable work remains under the old root. The legacy switch
+    # remains accepted for command-line compatibility.
+    Invoke-LegacyMailboxMigration -Destination $MailboxDir
     if (Test-Path $liveCore) { Remove-Item -LiteralPath $liveCore -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $AgentRoot | Out-Null
     $agentExtract = Join-Path $downloadDirectory "agent-validate\fs25_network_core"
     Copy-Item -LiteralPath $agentExtract -Destination $liveCore -Recurse
     New-Item -ItemType Directory -Force -Path $ModsPath | Out-Null
     $oldModHash = if (Test-Path $targetMod) { (Get-FileHash $targetMod).Hash } else { "" }
-    Copy-Item -LiteralPath (Join-Path $downloadDirectory "FS25_SiN_NetworkLocal.zip") -Destination $targetMod -Force
+    if (Test-Path $legacyMod) { Remove-Item -LiteralPath $legacyMod -Force }
+    Copy-Item -LiteralPath (Join-Path $downloadDirectory "FS25_SiN_Server.zip") -Destination $targetMod -Force
     $newModHash = (Get-FileHash $targetMod).Hash
     $modChanged = $oldModHash.ToLowerInvariant() -ne $newModHash.ToLowerInvariant()
     Write-Deployment $release $manifest $manifest.agent_sha256 $newModHash $modChanged $backup
@@ -267,7 +280,7 @@ try {
     Write-Host "Commit             $($manifest.git_commit)"
     Write-Host "Agent              UPDATED"
     Write-Host "Agent running      YES"
-    Write-Host "NetworkLocal       UPDATED"
+    Write-Host "FS25_SiN_Server     UPDATED"
     if ($modChanged) { Write-Host "FS25 restart       REQUIRED" } else { Write-Host "FS25 restart       NOT REQUIRED" }
     Write-Host "API reachable      $(if ($apiReachable) { 'YES' } else { 'NO' })"
     Write-Host "Rollback backup    $backup"

@@ -16,9 +16,9 @@ compatible local testing; that exception does not affect central services.
 
 ## Server binding persistence proof
 
-NetworkLocal uses the FS25 profile-level writable path returned by
+FS25_SiN_Server uses the FS25 profile-level writable path returned by
 `getUserProfileAppPath()`, specifically
-`modSettings/FS25_SiN_NetworkLocal/serverBindingDiagnostic.xml`. On startup it
+`modSettings/FS25_SiN_Server/serverBindingDiagnostic.xml`. On startup it
 creates a diagnostic ID if absent and logs `[SiN Server Binding] persistence
 diagnostic created`; later startups load and log the same ID. This is only a
 storage proof, not server pairing or credential storage. Test it by stopping
@@ -33,9 +33,9 @@ python -m fs25_network_core.local_test build-mod
 
 The simulator creates `local-test/simulated-snapshot.xml` exclusively; for another
 run use `--output local-test/another-snapshot.xml`. It never overwrites a snapshot.
-The build creates `dist/FS25_SiN_NetworkLocal.zip` with modDesc.xml at the ZIP root.
+The build creates `dist/FS25_SiN_Server.zip` with modDesc.xml at the ZIP root.
 No credentials, Python dependencies, or private configuration enter the ZIP.
-Whenever `mods/FS25_SiN_NetworkLocal/` changes, rebuild this ZIP before deployment
+Whenever `mods/FS25_SiN_Server/` changes, rebuild this ZIP before deployment
 with `python -m fs25_network_core.local_test build-mod`; FS25 should receive the
 ZIP from `dist`, not the source directory.
 
@@ -45,18 +45,18 @@ The mod has been renamed to follow the `FS25_SiN_<Purpose>` convention. When
 upgrading from the original package, remove the old `FS25_NetworkLocal.zip` from
 your game mods folder while FS25 is closed, then install the renamed package.
 Enable the new mod entry in your disposable save; FS25 treats it as a different
-mod. Its telemetry now lives under `modSettings/FS25_SiN_NetworkLocal/`.
+mod. Its telemetry now lives under `modSettings/FS25_SiN_Server/`.
 
-1. Copy `dist/FS25_SiN_NetworkLocal.zip` into your actual FS25 mods directory, normally
+1. Copy `dist/FS25_SiN_Server.zip` into your actual FS25 mods directory, normally
    `Documents/My Games/FarmingSimulator2025/mods`. OneDrive or a custom mods
    directory can change this location. Only install the ZIP, not a duplicate folder.
-2. Launch FS25 and create a **new disposable save**. Select **SiN (SimNet) Network Local
-   Test** in the mod selection list. Singleplayer is sufficient for this probe.
+2. Launch FS25 and create a **new disposable save**. Select **SiN (SimNet) Server**
+   in the mod selection list. Singleplayer is sufficient for this probe.
 3. Enter the save and let the simulation run for at least ten seconds, outside
    pause menus. Open another PowerShell window and run:
 
 ```powershell
-python -m fs25_network_core.local_test inspect "$([Environment]::GetFolderPath('MyDocuments'))/My Games/FarmingSimulator2025/modSettings/FS25_SiN_NetworkLocal/snapshot.xml"
+python -m fs25_network_core.local_test inspect "$([Environment]::GetFolderPath('MyDocuments'))/My Games/FarmingSimulator2025/modSettings/FS25_SiN_Server/snapshot.xml"
 ```
 
 Adjust that path if your game profile is elsewhere. Expected output includes
@@ -70,8 +70,8 @@ does not establish whether a farm is a player or system farm. Duplicate IDs and
 missing name attributes are still rejected. This telemetry does not authorize
 farm assignments or banking.
 
-If no file appears, look in the game profile's `log.txt` for `[SiN (SimNet) Network Local]`
-or an error mentioning `FS25_SiN_NetworkLocal`. The Lua code and descriptor must still
+If no file appears, look in the game profile's `log.txt` for `[SiN (SimNet) Server]`
+or an error mentioning `FS25_SiN_Server`. The Lua code and descriptor must still
 be validated in your installed game. No game engine was available during build.
 The descriptor uses the FS25 baseline version 92; report any loading/schema error.
 
@@ -105,7 +105,7 @@ API reference used for XML create/set/save lifecycle:
 
 ### Continuous local bridge
 
-Run python -m fs25_network_core.local_permission_bridge <modSettings-path> --server local-dev --save local-dev-save-001 --watch to continuously poll the existing mailbox. Authenticated server events are consumed from the mod events directory and processed once; malformed events are quarantined as .failed. Build dist/FS25_SiN_NetworkLocal.zip after any source change under mods/FS25_SiN_NetworkLocal.
+Run python -m fs25_network_core.local_permission_bridge <modSettings-path> --server local-dev --save local-dev-save-001 --watch to continuously poll the existing mailbox. Authenticated server events are consumed from the mod events directory and processed once; malformed events are quarantined as .failed. Build dist/FS25_SiN_Server.zip after any source change under mods/FS25_SiN_Server.
 
 The bridge writes authenticated, normalized activity records to Mongo `activity_outbox`. JiN starts one background publisher on Discord readiness and routes records through `sin_servers.discord_activity_channel_id`. Server Offline announcements remain deferred.
 
@@ -129,7 +129,7 @@ point it at the FS25 profile mailbox. The Agent requires no `MONGODB_URI` or
 
 ```powershell
 $env:SIN_BACKEND_URL = "https://central.example"
-$env:SIN_MAILBOX_DIR = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\modSettings\FS25_SiN_NetworkLocal"
+$env:SIN_MAILBOX_DIR = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\modSettings\FS25_SiN_Server"
 $env:SIN_POLL_INTERVAL = "2"
 
 # Preferred headless-server bootstrap; no GIANTS interactive console is needed.
@@ -175,7 +175,7 @@ On the persistent `SiN-FS25-01` VM:
 
 ```powershell
 $env:SIN_BACKEND_URL = "http://192.168.1.185:8080"
-$env:SIN_MAILBOX_DIR = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\modSettings\FS25_SiN_NetworkLocal"
+$env:SIN_MAILBOX_DIR = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\modSettings\FS25_SiN_Server"
 $env:SIN_POLL_INTERVAL = "2"
 python -m fs25_network_core.agent --watch
 ```
@@ -195,6 +195,33 @@ To inspect failures, list `events\*.failed` under the mailbox and inspect only
    event type/ID metadata; do not copy or print the XML credential attribute.
 Transient API failures leave the original `events\*.xml` file in place for retry.
 
+### Minute player activity telemetry
+
+Player activity telemetry is independent from registration, farm membership, and
+manager authority. FS25_SiN_Server samples each connected real player's horizontal
+position at one-minute boundaries. A movement distance greater than **0.5 m**
+since the previous successful sample is qualifying activity and records one
+`active` minute. Smaller movement is treated as no activity: inactive minutes
+1-10 are `idle`, and minute 11 onward is `afk`. The first position sample only
+establishes a baseline; it does not manufacture a completed minute. If a
+position cannot be observed, that interval is unobserved rather than counted.
+
+Each completed interval is emitted as a `player_activity_minute` event under the
+existing `events\` mailbox. The Agent forwards it through the authenticated
+`POST /api/server/events` path. Central stores one interval record and updates
+the cumulative `player_activity_aggregates` document idempotently. Retries use
+the deterministic `(server, save, uniqueUserId, session, minute_sequence)` key;
+no coordinates are stored centrally. A disconnect ends the session and discards
+any partial interval. Reconnect starts a new inactivity streak, even if the
+stable `uniqueUserId` is unchanged.
+
+To test manually, leave a registered or unregistered real player stationary for
+10 completed samples, verify idle totals, then observe the 11th sample become
+AFK. Move the player beyond the tolerance and verify the next completed sample
+is active and the inactivity streak resets. Repeat with the Agent temporarily
+stopped; event XML should remain in `events\` and be delivered once after the
+Agent/API returns. The dedicated-server pseudo-user is excluded.
+
 ### Remote player registration
 
 Player identity registration is a separate durable link from Discord user ID to
@@ -202,12 +229,12 @@ the stable FS25 `uniqueUserId`. It does not approve an application, create a
 farm, assign land, or grant manager authority. The authoritative flow is:
 
 ```text
-NetworkLocal registration-request XML
+FS25_SiN_Server registration-request XML
   -> Mongo-free Agent
   -> authenticated POST /api/server/registration/request
   -> registration_codes/game_identities in fs25_network
   -> registration-response XML
-  -> NetworkLocal prompt and quarantine state
+  -> FS25_SiN_Server prompt and quarantine state
 ```
 
 An unregistered player receives a code targeted to that player and remains out
@@ -241,7 +268,7 @@ lifecycle callbacks; it must not duplicate transitions already handled by the
 callbacks. Registration warnings use a targeted `Event` sent only to the
 player's connection and are rendered client-side with the same
 `showBlinkingWarning` primitive used by the SiN Stack Assist mod. The exact
-same generic NetworkLocal ZIP must be installed on server and clients.
+same generic FS25_SiN_Server ZIP must be installed on server and clients.
 
 Live process commands:
 
@@ -254,7 +281,7 @@ python -m fs25_network_core.server_api
 
 # dedicated-server VM
 $env:SIN_BACKEND_URL = "http://192.168.1.185:8080"
-$env:SIN_MAILBOX_DIR = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\modSettings\FS25_SiN_NetworkLocal"
+$env:SIN_MAILBOX_DIR = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\modSettings\FS25_SiN_Server"
 python -m fs25_network_core.agent --watch
 ```
 
@@ -289,7 +316,7 @@ with the credential in `serverBinding.xml` and requires the runtime
 `fs25_save_id` from `snapshot.xml`.
 
 The Agent refreshes the policy during its existing watch process and writes an
-atomic `clock-policy.xml` in the mailbox. NetworkLocal reads the concrete
+atomic `clock-policy.xml` in the mailbox. FS25_SiN_Server reads the concrete
 target minute calculated centrally with the configured IANA timezone and offset.
 Between refreshes it advances that target by elapsed real time; Lua does not
 perform timezone or DST calculations. It uses
@@ -318,13 +345,13 @@ shortest-drift rule and should be manually reconciled.
 After pairing and configuring `sin-fs25-01` / `sin-fs25-main`, keep the central
 API, Agent, and dedicated server running. The first authenticated heartbeat
 queues the idempotent `SiN Harvest` system-farm ensure operation. Confirm the
-Agent creates a command under `permission-commands/`, NetworkLocal returns a
+Agent creates a command under `permission-commands/`, FS25_SiN_Server returns a
 receipt, and the central `sin_farms` mapping records the actual FS25 farm ID.
 Pairing remains valid if this operation is pending while FS25 is offline.
 
 An approved member then runs `/farm_request` with the friendly server and an
 available starting field. Staff reviews the request and runs `/farm_approve`.
-Confirm the Agent delivers `provision_farm`, NetworkLocal creates/adopts the
+Confirm the Agent delivers `provision_farm`, FS25_SiN_Server creates/adopts the
 named farm, refuses an already-owned field, and returns a receipt proving both
 farm and field ownership. The requester remains non-manager until the separate
 manager permission receipt is applied. `/farm_status` should progress from

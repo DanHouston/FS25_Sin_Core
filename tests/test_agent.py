@@ -106,6 +106,38 @@ class AgentTests(unittest.TestCase):
             self.assertNotIn("secret-value", request.data.decode("utf-8"))
             self.assertEqual(request.headers["Authorization"], "Bearer secret-value")
 
+    def test_activity_minute_event_uses_existing_event_transport_and_is_removed(self):
+        opener = MagicMock(return_value=Response())
+        with tempfile.TemporaryDirectory() as folder:
+            events = Path(folder) / "events"
+            events.mkdir()
+            event = events / "activity-1.xml"
+            event.write_text(
+                '<serverEvent event_id="activity-1" event_type="player_activity_minute" '
+                'server_key="sin-fs25-01" server_credential="secret-value" save_id="1" '
+                'unique_user_id="stable" user_id="2" farm_id="1" display_name="Player" '
+                'session_id="session-1" minute_sequence="1" activity_bucket="active" '
+                'inactive_minutes="0" duration_seconds="60"/>', encoding="utf-8")
+            self.assertEqual(PairingAgent(folder, "http://central", opener).process_events_once(), [event.name])
+            self.assertFalse(event.exists())
+            sent = json.loads(opener.call_args.args[0].data)
+            self.assertEqual(sent["event_type"], "player_activity_minute")
+            self.assertEqual(sent["payload"]["activity_bucket"], "active")
+
+    def test_activity_minute_transport_failure_leaves_event_for_retry(self):
+        opener = MagicMock(side_effect=TimeoutError())
+        with tempfile.TemporaryDirectory() as folder:
+            events = Path(folder) / "events"
+            events.mkdir()
+            event = events / "activity-retry.xml"
+            event.write_text(
+                '<serverEvent event_id="activity-retry" event_type="player_activity_minute" '
+                'server_key="server" server_credential="secret" save_id="1" unique_user_id="stable" '
+                'session_id="session" minute_sequence="1" activity_bucket="idle" inactive_minutes="1"/>',
+                encoding="utf-8")
+            PairingAgent(folder, "http://central", opener).process_events_once()
+            self.assertTrue(event.exists())
+
     def test_malformed_event_is_quarantined(self):
         with tempfile.TemporaryDirectory() as folder:
             events = Path(folder) / "events"

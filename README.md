@@ -2,7 +2,7 @@
 
 All project mods use `FS25_SiN_<Purpose>` for their folder and ZIP names:
 `FS25` identifies the game, `SiN` identifies SimNet, and the suffix identifies
-the mod's purpose. The local test mod is `FS25_SiN_NetworkLocal`.
+the mod's purpose. The server runtime mod is `FS25_SiN_Server`.
 
 Start local game integration with the [local testing guide](docs/local-testing.md).
 The first custom mod exports telemetry from a disposable save; its offline harness

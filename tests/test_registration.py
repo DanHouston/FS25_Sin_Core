@@ -140,8 +140,8 @@ class RegistrationTests(unittest.TestCase):
             self.assertEqual(response.get("status"), "registration_required")
             self.assertFalse((request_dir / "request-1.xml").exists())
 
-    def test_networklocal_uses_callback_based_get_files_for_registration_responses(self):
-        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_NetworkLocal" / "NetworkLocal.lua").read_text(
+    def test_server_runtime_uses_callback_based_get_files_for_registration_responses(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
             encoding="utf-8"
         )
         self.assertIn(
@@ -150,43 +150,42 @@ class RegistrationTests(unittest.TestCase):
         )
         self.assertNotRegex(source, r"getFiles\([^,\r\n]+\)")
 
-    def test_networklocal_uses_giants_authorized_canonical_mailbox_root(self):
-        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_NetworkLocal" / "NetworkLocal.lua").read_text(
+    def test_server_runtime_uses_giants_authorized_canonical_mailbox_root(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
             encoding="utf-8"
         )
-        self.assertIn('local NETWORKLOCAL_MAILBOX_NAME = "FS25_SiN_NetworkLocal"', source)
-        self.assertIn('"modSettings/" .. NETWORKLOCAL_MAILBOX_NAME .. "/"', source)
-        self.assertNotIn('"modSettings/FS25SiNNetworkLocal/"', source)
+        self.assertIn('local SERVER_MAILBOX_NAME = "FS25_SiN_Server"', source)
+        self.assertIn('"modSettings/" .. SERVER_MAILBOX_NAME .. "/"', source)
+        self.assertNotIn('"modSettings/FS25SiNServer/"', source)
 
-    def test_updater_migration_is_opt_in_and_does_not_read_binding_contents(self):
+    def test_updater_migration_is_complete_and_conflict_safe(self):
         source = (Path(__file__).parents[1] / "scripts" / "Update-SiN.ps1").read_text(encoding="utf-8")
         self.assertIn('[switch]$MigrateLegacyMailbox', source)
-        self.assertIn('"FS25SiNNetworkLocal"', source)
-        self.assertIn('"serverBinding.xml"', source)
-        self.assertIn('Copy-Item -LiteralPath $item -Destination $target', source)
-        self.assertIn('Test-Path -LiteralPath $target', source)
-        self.assertNotIn('Get-ChildItem -LiteralPath $legacy -Force -Recurse', source)
-        self.assertNotIn('Get-Content -LiteralPath $item.FullName', source)
-        self.assertNotIn('Get-Content $item.FullName', source)
+        self.assertIn('"FS25_SiN_NetworkLocal"', source)
+        self.assertIn('serverBinding.xml', source)
+        self.assertIn('Move-Item -LiteralPath $legacy -Destination $destination', source)
         self.assertIn('FS25_SiN_NetworkLocal', source)
+        self.assertIn('Both legacy and canonical mailbox directories contain state', source)
+        self.assertIn('Invoke-LegacyMailboxMigration -Destination $MailboxDir', source)
 
     def test_registration_response_callback_normalizes_full_paths_for_load_and_delete(self):
-        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_NetworkLocal" / "NetworkLocal.lua").read_text(
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
             encoding="utf-8"
         )
         self.assertIn("return directory .. value", source)
         self.assertIn("local path = self:registrationResponsePath(filename)", source)
-        process = source[source.index("function FS25SiNNetworkLocal:processRegistrationResponses()"):]
-        process = process[:process.index("function FS25SiNNetworkLocal:enforceRegistration")]
+        process = source[source.index("function FS25SiNServer:processRegistrationResponses()"):]
+        process = process[:process.index("function FS25SiNServer:enforceRegistration")]
         self.assertIn('XMLFile.load("networkLocalRegistrationResponse", path)', process)
         self.assertIn("deleteFile(path)", process)
         self.assertNotIn('XMLFile.load("networkLocalRegistrationResponse", self.registrationResponseDirectory ..', process)
 
-    def test_networklocal_uses_targeted_warning_and_lifecycle_hooks(self):
-        root = Path(__file__).parents[1] / "mods" / "FS25_SiN_NetworkLocal"
+    def test_server_runtime_uses_targeted_warning_and_lifecycle_hooks(self):
+        root = Path(__file__).parents[1] / "mods" / "FS25_SiN_Server"
         source = (root / "NetworkLocal.lua").read_text(encoding="utf-8")
         event = (root / "events" / "SiNRegistrationWarningEvent.lua").read_text(encoding="utf-8")
         descriptor = (root / "modDesc.xml").read_text(encoding="utf-8")
+        self.assertIn("<title><en>SiN (SimNet) Server</en></title>", descriptor)
         self.assertIn("FSBaseMission.onClientConnected", source)
         self.assertIn("FarmManager.playerQuitGame", source)
         self.assertIn("connection.sendEvent", source)
@@ -202,17 +201,17 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("if not self.registrationRequired or self.registrationCode == \"\"", source)
         self.assertIn("self:sendRegistrationState(uniqueId, state.status, state.code)", source)
 
-    def test_networklocal_snapshot_does_not_export_dedicated_server_pseudo_user(self):
-        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_NetworkLocal" / "NetworkLocal.lua").read_text(
+    def test_server_runtime_snapshot_does_not_export_dedicated_server_pseudo_user(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
             encoding="utf-8"
         )
-        snapshot = source[source.index("function FS25SiNNetworkLocal:exportSnapshot()"):]
+        snapshot = source[source.index("function FS25SiNServer:exportSnapshot()"):]
         self.assertIn("local pseudo = self:isDedicatedServerUser(user, userFarm)", snapshot)
         self.assertIn("if not pseudo then", snapshot)
         self.assertIn("currentPlayers[identityKey]", snapshot)
 
-    def test_networklocal_farm_operations_use_verified_authoritative_apis(self):
-        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_NetworkLocal" / "NetworkLocal.lua").read_text(
+    def test_server_runtime_farm_operations_use_verified_authoritative_apis(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
             encoding="utf-8")
         self.assertIn("g_farmManager:createFarm(farmName, colorIndex, \"\", nil)", source)
         self.assertNotIn("g_farmManager:createFarm(farmName, 1, \"\", nil)", source)
@@ -228,29 +227,29 @@ class RegistrationTests(unittest.TestCase):
         self.assertNotRegex(source, r"setLandOwnership\([^\n]*,[^\n]*,[^\n]*\)")
         self.assertIn('operationType == "ensure_farm" or operationType == "provision_farm"', source)
 
-    def test_networklocal_color_policy_never_mutates_existing_farm_colors(self):
-        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_NetworkLocal" / "NetworkLocal.lua").read_text(
+    def test_server_runtime_color_policy_never_mutates_existing_farm_colors(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
             encoding="utf-8")
-        selector = source[source.index("function FS25SiNNetworkLocal:selectFarmColor") :]
-        selector = selector[:selector.index("function FS25SiNNetworkLocal:nextAvailableFarmId")]
+        selector = source[source.index("function FS25SiNServer:selectFarmColor") :]
+        selector = selector[:selector.index("function FS25SiNServer:nextAvailableFarmId")]
         self.assertIn("used[farm.color] = true", selector)
         self.assertIn("return preferredFarmId, nil", selector)
         self.assertIn("return nil, \"no unused FS25 farm color is available\"", selector)
         self.assertNotIn("setColor", selector)
 
-    def test_networklocal_land_receipt_requires_client_replication_event(self):
-        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_NetworkLocal" / "NetworkLocal.lua").read_text(
+    def test_server_runtime_land_receipt_requires_client_replication_event(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
             encoding="utf-8")
-        helper = source[source.index("function FS25SiNNetworkLocal:setAndReplicateLandOwnership") :]
-        helper = helper[:helper.index("function FS25SiNNetworkLocal:processFarmProvisionCommand")]
+        helper = source[source.index("function FS25SiNServer:setAndReplicateLandOwnership") :]
+        helper = helper[:helper.index("function FS25SiNServer:processFarmProvisionCommand")]
         self.assertIn("getFarmlandOwner(farmlandId)", helper)
         self.assertIn("FarmlandStateEvent.new(farmlandId, farmId, 0)", helper)
         self.assertIn("farmland replication event is unavailable", helper)
 
-    def test_networklocal_rejects_malformed_farm_visual_state_before_operations(self):
-        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_NetworkLocal" / "NetworkLocal.lua").read_text(
+    def test_server_runtime_rejects_malformed_farm_visual_state_before_operations(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
             encoding="utf-8")
-        self.assertIn("function FS25SiNNetworkLocal:isFarmVisualStateValid(farm)", source)
+        self.assertIn("function FS25SiNServer:isFarmVisualStateValid(farm)", source)
         self.assertIn("farm.color < 1", source)
         self.assertIn("Farm.COLORS[farm.color]", source)
         self.assertIn("farm.getIconSliceId", source)
@@ -259,8 +258,8 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn('error("farm visual state invalid: " .. tostring(visualStateError))', source)
         self.assertIn("invalid visual state farmId=", source)
 
-    def test_networklocal_refreshes_required_registration_on_heartbeat_reconciliation(self):
-        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_NetworkLocal" / "NetworkLocal.lua").read_text(
+    def test_server_runtime_refreshes_required_registration_on_heartbeat_reconciliation(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
             encoding="utf-8"
         )
         self.assertIn('elseif existing.status == "registration_required" and refreshRequired ~= true then', source)
@@ -268,3 +267,41 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn('self:queueRegistrationRequest(user, farm, true)', source)
         self.assertIn('or fileExists(self.registrationResponseDirectory .. requestId .. ".xml")', source)
         self.assertIn('self:enforceRegistration(user, farm)', source)
+
+    def test_server_runtime_restores_runtime_manager_permissions_and_uses_native_replication(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8")
+        self.assertIn("function FS25SiNServer:enforceAuthorizedManagerState(user, farm, authorized)", source)
+        self.assertIn("farm.getUserPermissions", source)
+        self.assertIn("farm:setUserPermission(userId, permission, true)", source)
+        self.assertIn("PlayerPermissionsEvent.sendEvent", source)
+        self.assertIn("self:enforceAuthorizedManagerState(user, farm, authorized)", source)
+        self.assertIn("self:enforceAuthorizedManagerState(user, farm, isAuthorized)", source)
+        self.assertIn("beforeManager", source)
+        self.assertIn("afterManager", source)
+
+    def test_server_runtime_has_no_fixed_system_farm_id_assumption(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8")
+        self.assertNotIn("getFarmById(2)", source)
+        self.assertIn("function FS25SiNServer:resolveConfiguredSystemFarm()", source)
+        self.assertIn("self.systemFarmName = farmName", source)
+        self.assertNotIn("System farm diagnostic farm=2", source)
+
+    def test_server_runtime_activity_sampling_is_local_and_excludes_pseudo_user(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8")
+        self.assertIn("self.activityMovementTolerance = 0.5", source)
+        self.assertIn("function FS25SiNServer:processActivitySamples(dt)", source)
+        self.assertIn('self:emitServerEvent("player_activity_minute"', source)
+        self.assertIn("getWorldTranslation, player.rootNode", source)
+        self.assertIn("state.inactivityMinutes <= 10", source)
+        self.assertIn("self.activityStates[uniqueId] = nil", source)
+        self.assertIn("self:isDedicatedServerUser(user, farm)", source)
+
+    def test_activity_event_uses_existing_mailbox_descriptor(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8")
+        self.assertIn('self:emitServerEvent("player_activity_minute"', source)
+        self.assertIn('eventType ~= "player_activity_minute"', source)
+        self.assertIn('self.eventDirectory .. eventId .. ".xml"', source)

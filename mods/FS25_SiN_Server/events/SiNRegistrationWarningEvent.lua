@@ -27,7 +27,7 @@ end
 function SiNRegistrationWarningEvent:run(connection)
     if g_currentMission == nil or not g_currentMission:getIsClient() then return end
     if connection ~= nil and not connection:getIsServer() then return end
-    if FS25SiNNetworkLocal ~= nil and FS25SiNNetworkLocal.setClientRegistrationWarning ~= nil then
-        FS25SiNNetworkLocal:setClientRegistrationWarning(self.required, self.code)
+    if FS25SiNServer ~= nil and FS25SiNServer.setClientRegistrationWarning ~= nil then
+        FS25SiNServer:setClientRegistrationWarning(self.required, self.code)
     end
 end

@@ -11,7 +11,7 @@ from zipfile import ZipFile, ZIP_DEFLATED, ZipInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 AGENT_FILES = ("fs25_network_core/__init__.py", "fs25_network_core/agent.py")
-MOD_ASSET = "FS25_SiN_NetworkLocal.zip"
+MOD_ASSET = "FS25_SiN_Server.zip"
 CLIENT_UPDATER_ASSET = "Update-SiN-Client.ps1"
 
 
@@ -37,26 +37,26 @@ def zip_files(destination, files):
 
 
 def build_mod(destination):
-    source = ROOT / "mods" / "FS25_SiN_NetworkLocal"
+    source = ROOT / "mods" / "FS25_SiN_Server"
     descriptor = source / "modDesc.xml"
     icon_name = None
     import xml.etree.ElementTree as ET
     descriptor_xml = ET.parse(descriptor)
     icon_name = descriptor_xml.findtext("iconFilename")
     if not icon_name or Path(icon_name).name != icon_name or not (source / icon_name).is_file():
-        raise ValueError("NetworkLocal mod descriptor/icon is invalid")
+        raise ValueError("FS25_SiN_Server mod descriptor/icon is invalid")
     source_names = [node.get("filename") for node in descriptor_xml.findall("./extraSourceFiles/sourceFile")]
     if any(not name for name in source_names):
-        raise ValueError("NetworkLocal mod descriptor contains an invalid source file")
+        raise ValueError("FS25_SiN_Server mod descriptor contains an invalid source file")
     names_to_package = ["modDesc.xml"] + source_names + [icon_name]
     files = [(name, source / name) for name in names_to_package]
     zip_files(destination, files)
     with ZipFile(destination) as archive:
         names = set(archive.namelist())
         if not {"modDesc.xml", "NetworkLocal.lua"}.issubset(names):
-            raise ValueError("NetworkLocal ZIP is missing required root files")
+            raise ValueError("FS25_SiN_Server ZIP is missing required root files")
         if set(names_to_package) != names:
-            raise ValueError("NetworkLocal ZIP does not match mod descriptor sources")
+            raise ValueError("FS25_SiN_Server ZIP does not match mod descriptor sources")
 
 
 def build_agent(destination):
@@ -80,6 +80,9 @@ def build(version, output):
     except subprocess.CalledProcessError:
         dirty = False
     output.mkdir(parents=True, exist_ok=True)
+    legacy_mod = output / "FS25_SiN_NetworkLocal.zip"
+    if legacy_mod.exists():
+        legacy_mod.unlink()
     agent = output / "sin-agent.zip"
     mod = output / MOD_ASSET
     build_agent(agent)
@@ -94,7 +97,7 @@ def build(version, output):
         "git_branch": branch,
         "build_time_utc": datetime.now(timezone.utc).isoformat(),
         "agent_sha256": sha256(agent),
-        "networklocal_sha256": sha256(mod),
+        "server_sha256": sha256(mod),
         "updater_sha256": sha256(updater),
         "client_updater_sha256": sha256(client_updater),
         "agent_entrypoint": "python -m fs25_network_core.agent --watch",

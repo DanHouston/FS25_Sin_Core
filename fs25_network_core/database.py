@@ -46,6 +46,11 @@ class Database:
         self.db.processed_server_events.create_index("processed_at", expireAfterSeconds=604800)
         self.db.activity_outbox.create_index([("status", 1), ("created_at", 1)])
         self.db.activity_outbox.create_index("source_event_id", unique=True)
+        self.db.player_activity_minutes.create_index("interval_key", unique=True)
+        self.db.player_activity_minutes.create_index([
+            ("server_key", 1), ("save_key", 1), ("fs25_unique_user_id", 1), ("observed_at", 1)])
+        self.db.player_activity_aggregates.create_index([
+            ("server_key", 1), ("save_key", 1), ("fs25_unique_user_id", 1)], unique=True)
 
     def atomic(self, callback):
         with self.client.start_session() as session:

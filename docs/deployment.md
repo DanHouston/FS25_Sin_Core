@@ -5,7 +5,7 @@ modifies the FS25 VM. A `vMAJOR.MINOR.PATCH` tag creates a release containing:
 
 ```text
 sin-agent.zip
-FS25_SiN_NetworkLocal.zip
+FS25_SiN_Server.zip
 build-manifest.json
 SHA256SUMS.txt
 Update-SiN.ps1
@@ -14,7 +14,7 @@ Update-SiN-Client.ps1
 
 The Agent archive contains only `fs25_network_core/__init__.py` and
 `fs25_network_core/agent.py`; it has no Mongo dependency or credentials. The
-NetworkLocal archive is rebuilt from `mods/FS25_SiN_NetworkLocal` and verified
+FS25_SiN_Server archive is rebuilt from `mods/FS25_SiN_Server` and verified
 to contain `modDesc.xml` and `NetworkLocal.lua` at its archive root.
 
 ## Creating a release
@@ -49,7 +49,10 @@ not guess an installation path.
 
 ## Normal VM deployment
 
-On `SiN-FS25-01`, with the required FS25 mods directory configured:
+Stop the FS25 dedicated server first. The updater stops only the SiN Agent;
+it never stops or restarts FS25, so mailbox migration and ZIP replacement must
+not run while the mod is writing state. On `SiN-FS25-01`, with the required
+FS25 mods directory configured:
 
 ```powershell
 $env:SIN_FS25_MODS_DIR = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\mods"
@@ -73,33 +76,31 @@ configured `SIN_BACKEND_URL`, `SIN_MAILBOX_DIR`, and `SIN_POLL_INTERVAL`, and
 writes `C:\SiN\deployment.json`.
 
 Agent updates take effect after the updater restarts the Agent. A changed
-NetworkLocal ZIP prints `FS25 RESTART REQUIRED`; the updater never restarts the
+FS25_SiN_Server ZIP prints `FS25 RESTART REQUIRED`; the updater never restarts the
 FS25 dedicated server. Identical mod hashes do not require a restart.
 
 The newest updater is downloaded as `C:\SiN\Deploy\Update-SiN.next.ps1` so the
 currently running script is not replaced mid-execution.
 
-### Canonical NetworkLocal mailbox migration
+### Canonical FS25_SiN_Server mailbox migration
 
-NetworkLocal's GIANTS-authorized mailbox root is:
+The FS25_SiN_Server GIANTS-authorized mailbox root is:
 
 ```text
-C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\modSettings\FS25_SiN_NetworkLocal
+C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\modSettings\FS25_SiN_Server
 ```
 
-The previous `FS25SiNNetworkLocal` directory is not a valid active runtime
-root on the dedicated server. Release Candidate A's updater accepts the
-opt-in `-MigrateLegacyMailbox` switch. It copies only files that are absent
-from the canonical directory, never reads or prints `serverBinding.xml`, and
-retains the old directory as a recovery backup. Existing canonical files are
-never overwritten, so a conflict must be reviewed manually. Requests and
-responses, events, receipts, and permission commands are not copied into the
-active directory; they remain in the retained legacy backup for manual review
-so stale work cannot be replayed automatically. Review or remove those files
-only after the Agent is stopped and their status is understood.
+The legacy `FS25_SiN_NetworkLocal` directory is migrated as a complete
+directory while FS25 is stopped. This preserves `serverBinding.xml`, snapshots,
+clock and manager state, telemetry, events, requests, responses, commands, and
+receipts without selectively dropping durable work. Migration is automatic and
+idempotent; the old directory is moved rather than copied, so only the new root
+is active. If both old and new roots contain state, the updater fails closed
+instead of merging or overwriting either binding. The historical
+`FS25SiNNetworkLocal` spelling is also recognized for compatibility.
 
-If the VM still has an older updater whose default points at the legacy root,
-bootstrap the next updater over HTTPS, then run it with migration enabled:
+If the VM still has an older updater, bootstrap the next updater over HTTPS
+before running the normal deployment:
 
 ```powershell
 New-Item -ItemType Directory -Force C:\SiN\Deploy | Out-Null
@@ -110,8 +111,7 @@ Invoke-WebRequest `
 $env:SIN_FS25_MODS_DIR = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\mods"
 powershell.exe -ExecutionPolicy Bypass `
   -File "C:\SiN\Deploy\Update-SiN.next.ps1" `
-  -Version <next-version> `
-  -MigrateLegacyMailbox
+  -Version <next-version>
 ```
 
 The running Agent is stopped before migration and restarted with the
@@ -132,8 +132,10 @@ used only in the HTTPS request and never printed or packaged.
 
 ### Client mod update
 
-The same generic NetworkLocal ZIP must be installed on the dedicated server
-and connecting clients. The release also includes a client-only updater; it
+The same generic FS25_SiN_Server ZIP must be installed on the dedicated server
+and connecting clients. Remove the old `FS25_SiN_NetworkLocal.zip` from the
+client mod folder before loading the new ZIP; both must not be active. The
+release also includes a client-only updater; it
 does not read credentials or restart FS25:
 
 ```powershell
@@ -145,4 +147,5 @@ powershell.exe -ExecutionPolicy Bypass `
 Pass `-ModsPath` instead of setting the environment variable when the client
 uses another mod directory. The updater downloads the public release over
 HTTPS, validates the ZIP against `SHA256SUMS.txt`, checks root contents, and
-replaces only the NetworkLocal ZIP. FS25 must be reloaded afterward.
+replaces only the FS25_SiN_Server ZIP and removes the legacy ZIP so both cannot
+load. FS25 must be reloaded afterward.

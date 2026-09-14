@@ -1,4 +1,4 @@
-"""Central processing for authenticated NetworkLocal server events."""
+"""Central processing for authenticated FS25_SiN_Server events."""
 import logging
 from datetime import datetime, timezone
 
@@ -6,10 +6,11 @@ from .activity import ActivityOutbox
 from .authorization import AuthorizationManager
 from .server_registry import ServerRegistry
 from .farm_lifecycle import FarmLifecycle
+from .activity_telemetry import ACTIVITY_EVENT_TYPE, ActivityTelemetryError, ActivityTelemetryProcessor
 from pymongo.errors import DuplicateKeyError
 
 LOG = logging.getLogger(__name__)
-SUPPORTED_EVENTS = {"heartbeat", "player_connected", "player_disconnected"}
+SUPPORTED_EVENTS = {"heartbeat", "player_connected", "player_disconnected", ACTIVITY_EVENT_TYPE}
 
 
 class EventValidationError(ValueError):
@@ -31,6 +32,7 @@ class CentralEventProcessor:
         self.registry = ServerRegistry(database)
         self.authorization = AuthorizationManager(database)
         self.farm_lifecycle = FarmLifecycle(database, self.authorization)
+        self.telemetry = ActivityTelemetryProcessor(database)
 
     def process(self, event):
         if not isinstance(event, dict):
@@ -54,7 +56,16 @@ class CentralEventProcessor:
             return {"status": "accepted", "duplicate": True, "save_key": save_key}
 
         now = datetime.now(timezone.utc)
-        if event_type == "heartbeat":
+        result = {"status": "accepted", "duplicate": False, "save_key": save_key}
+        if event_type == ACTIVITY_EVENT_TYPE:
+            raw_payload = event.get("payload") or {}
+            if not isinstance(raw_payload, dict):
+                raise EventValidationError("event payload must be an object")
+            try:
+                result = self.telemetry.process(record["server_key"], save_key, event_id, raw_payload)
+            except ActivityTelemetryError as error:
+                raise EventValidationError(str(error)) from None
+        elif event_type == "heartbeat":
             try:
                 self.farm_lifecycle.ensure_system_farm(record["server_key"], save_key)
             except Exception:
@@ -82,7 +93,9 @@ class CentralEventProcessor:
         except DuplicateKeyError:
             pass
         LOG.info("[SiN Events] processed type=%s serverKey=%s", event_type, record["server_key"])
-        return {"status": "accepted", "duplicate": False, "save_key": save_key}
+        result.setdefault("status", "accepted")
+        result.setdefault("save_key", save_key)
+        return result
 
     def activity_message(self, server, save_key, payload):
         if str(payload.get("user_id", "")) == "1" and str(payload.get("farm_id", "")) == "0" \

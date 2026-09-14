@@ -384,7 +384,8 @@ class PairingAgent:
                     raise ValueError("invalid event XML")
                 event = dict(root.attrib)
                 event["payload"] = {key: value for key, value in event.items() if key not in required}
-                if event["event_type"] not in {"heartbeat", "player_connected", "player_disconnected"}:
+                if event["event_type"] not in {"heartbeat", "player_connected", "player_disconnected",
+                                                "player_activity_minute"}:
                     raise ValueError("unsupported event type")
                 self._post_event(event)
                 path.unlink()
@@ -479,7 +480,7 @@ def main():
     try:
         if args.pair is not None:
             server_key = agent.pair_once(args.pair)
-            print(f"Pairing succeeded for server_key={server_key}; response queued for NetworkLocal")
+            print(f"Pairing succeeded for server_key={server_key}; response queued for FS25_SiN_Server")
             return 0
         if args.watch:
             agent.watch(args.interval)

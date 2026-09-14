@@ -2,8 +2,8 @@
 <modDesc descVersion="92">
     <author>SiN (SimNet)</author>
     <version>0.2.0.0</version>
-    <title><en>SiN (SimNet) Network Local Test</en></title>
-    <description><en>Development telemetry exporter for a disposable local test save.</en></description>
+    <title><en>SiN (SimNet) Server</en></title>
+    <description><en>SiN server-side runtime for authenticated mailbox transport, identity, activity, and farm integration.</en></description>
     <iconFilename>icon_network.dds</iconFilename>
     <multiplayer supported="true"/>
     <extraSourceFiles>

@@ -5,7 +5,7 @@
 Pairing establishes server trust; it does not create a farm. Once an authenticated
 server heartbeat reaches the central API, SiN queues an idempotent bootstrap
 operation for the shared system farm **SiN Harvest**. The Agent delivers that
-operation through `permission-commands/`; the authoritative NetworkLocal server
+operation through `permission-commands/`; the authoritative FS25_SiN_Server runtime
 calls the verified `FarmManager:createFarm(name, colorIndex, password, farmId)`
 API using a valid built-in color index and an empty password, re-enumerates farms
 to learn the actual ID, and returns a durable receipt. A temporary FS25 outage
@@ -16,14 +16,14 @@ creating another farm; duplicates fail closed as `reconciliation_required`.
 Member farm requests use the approved application's farm name and a numeric
 starting farmland ID. `/farm_request` stores the friendly server selection and
 field choice; it never creates a farm or grants authority. Staff uses
-`/farm_approve` to queue a `provision_farm` operation. NetworkLocal creates or
+`/farm_approve` to queue a `provision_farm` operation. FS25_SiN_Server creates or
 adopts the exact named farm, verifies that the requested field is unowned, and
 calls `g_farmlandManager:setLandOwnership(farmlandId, farmId)` only when safe.
 It then broadcasts the supported `FarmlandStateEvent` so connected clients
 receive the same ownership state used by the authoritative server snapshot.
 The receipt must prove the actual farm and field owner before SiN queues the
 requester's manager permission. The persisted pending manager authorization is
-delivered to NetworkLocal before its permission receipt is acknowledged; until
+delivered to FS25_SiN_Server before its permission receipt is acknowledged; until
 that receipt is applied, the request remains `awaiting_manager`, and only then
 does it become `active`.
 
@@ -38,7 +38,7 @@ Farm membership and manager authority are separate. FS25's normal farm-selection
 flow removes the player from the old farm, sets the player's `farmId`, and adds
 the user to the selected farm with default permissions. SiN does not force an
 approved member into SiN Harvest and does not prevent a registered member from
-switching farms. The NetworkLocal authority loop only demotes a manager when no
+switching farms. The FS25_SiN_Server authority loop only demotes a manager when no
 matching persisted SiN manager authorization exists; joining a farm never grants
 manager status. There is no SiN-specific contractor role in this path.
 
@@ -102,7 +102,7 @@ See [Discord application commands](https://docs.discord.com/developers/interacti
 
 ## Local test procedure
 
-1. Close FS25 and install `dist/FS25_SiN_NetworkLocal.zip` version **0.2.0.0**.
+1. Close FS25 and install `dist/FS25_SiN_Server.zip` version **0.2.0.0**.
    Remove the old `FS25_NetworkLocal.zip` and enable the renamed mod in the test
    save. This update adds player observations; previous exports have no roster.
 2. For this legacy local adapter, set `FS25_SERVERS_FILE=servers.json` before
@@ -126,12 +126,12 @@ See [Discord application commands](https://docs.discord.com/developers/interacti
 5. Staff reviews the field choice and runs `/farm_approve server:local-dev`.
    Select the requester from the pending picker. The backend queues a durable
    `provision_farm` operation; staff does not create the farm or guess its ID.
-6. Keep the save and Agent running. NetworkLocal creates/adopts the exact
+6. Keep the save and Agent running. FS25_SiN_Server creates/adopts the exact
    approved farm name, discovers the actual FS25 farm ID, checks the requested
    field is still unowned, and returns a receipt. A field conflict becomes a
    recoverable reconciliation state and never steals land.
 7. The central service then queues the separate manager permission operation.
-   Manager authority is not active until NetworkLocal confirms that operation.
+   Manager authority is not active until FS25_SiN_Server confirms that operation.
 8. `/farm_status` takes no server argument and reports provisioning,
    awaiting-manager, active, rejected, or reconciliation-required state.
 
@@ -144,7 +144,7 @@ use `/farm_assign`; it cannot create identities or bypass onboarding.
 ## Snapshot configuration and trust
 
 The local adapter reads the game's redirected Documents directory at
-`My Games/FarmingSimulator2025/modSettings/FS25_SiN_NetworkLocal/snapshot.xml`.
+`My Games/FarmingSimulator2025/modSettings/FS25_SiN_Server/snapshot.xml`.
 Set `FS25_LOCAL_SNAPSHOT` in `.env` to the exact path if using a custom profile.
 Snapshots must be from the game, be less than thirty seconds old, and match the
 configured save slot. Keep the game simulation running during approval.
