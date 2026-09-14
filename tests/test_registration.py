@@ -163,9 +163,11 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn('[switch]$MigrateLegacyMailbox', source)
         self.assertIn('"FS25_SiN_NetworkLocal"', source)
         self.assertIn('serverBinding.xml', source)
-        self.assertIn('Move-Item -LiteralPath $legacy -Destination $destination', source)
+        self.assertIn('Resolve-MailboxUnion', source)
+        self.assertIn('Write-MailboxStage', source)
+        self.assertIn('FS25_SiN_Server.migration-archive', source)
         self.assertIn('FS25_SiN_NetworkLocal', source)
-        self.assertIn('Both legacy and canonical mailbox directories contain state', source)
+        self.assertIn('different server bindings', source)
         self.assertIn('Invoke-LegacyMailboxMigration -Destination $MailboxDir', source)
 
     def test_registration_response_callback_normalizes_full_paths_for_load_and_delete(self):

@@ -33,40 +33,306 @@ function Assert-CanonicalMailbox {
     }
 }
 
+function Get-MailboxFiles {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    if (-not (Test-Path -LiteralPath $Root -PathType Container)) { return @() }
+    $rootFull = [IO.Path]::GetFullPath($Root).TrimEnd([char]92, [char]47)
+    return @(Get-ChildItem -LiteralPath $rootFull -Force -Recurse -File | ForEach-Object {
+        $relative = $_.FullName.Substring($rootFull.Length).TrimStart([char]92, [char]47)
+        [pscustomobject]@{
+            RelativePath = $relative
+            FullName = $_.FullName
+            Length = [int64]$_.Length
+            LastWriteTimeUtc = $_.LastWriteTimeUtc
+            Hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    })
+}
+
+function Get-MailboxBindingHash {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Files,
+        [Parameter(Mandatory = $true)][string]$Root
+    )
+
+    $bindings = @($Files | Where-Object { $_.RelativePath.ToLowerInvariant() -eq "serverbinding.xml" })
+    if ($bindings.Count -ne 1 -or $bindings[0].Length -le 0) {
+        throw "Legacy mailbox '$Root' is non-empty but does not contain exactly one non-empty serverBinding.xml."
+    }
+    return $bindings[0].Hash
+}
+
+function Test-ValidMailboxXml {
+    param([Parameter(Mandatory = $true)][object]$File)
+
+    if ($File.Length -le 0) { return $false }
+    try {
+        [xml](Get-Content -LiteralPath $File.FullName -Raw) | Out-Null
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Select-RuntimeMailboxFile {
+    param(
+        [Parameter(Mandatory = $true)][object]$Current,
+        [Parameter(Mandatory = $true)][object]$Candidate,
+        [Parameter(Mandatory = $true)][string]$RelativePath
+    )
+
+    $currentValid = Test-ValidMailboxXml -File $Current
+    $candidateValid = Test-ValidMailboxXml -File $Candidate
+    if (-not $currentValid -and -not $candidateValid) {
+        throw "Runtime mailbox file '$RelativePath' is not valid XML in either legacy directory."
+    }
+    if ($candidateValid -and -not $currentValid) { return $Candidate }
+    if ($currentValid -and -not $candidateValid) { return $Current }
+    if ($Candidate.LastWriteTimeUtc -gt $Current.LastWriteTimeUtc) { return $Candidate }
+    if ($Current.LastWriteTimeUtc -gt $Candidate.LastWriteTimeUtc) { return $Current }
+    if ([StringComparer]::OrdinalIgnoreCase.Compare($Candidate.FullName, $Current.FullName) -lt 0) {
+        return $Candidate
+    }
+    return $Current
+}
+
+function Resolve-MailboxUnion {
+    param([Parameter(Mandatory = $true)][object[]]$Roots)
+
+    $selected = @{}
+    foreach ($root in ($Roots | Sort-Object Path)) {
+        foreach ($file in ($root.Files | Sort-Object RelativePath)) {
+            $key = $file.RelativePath.ToLowerInvariant()
+            if (-not $selected.ContainsKey($key)) {
+                $selected[$key] = $file
+                continue
+            }
+            $current = $selected[$key]
+            if ($current.Hash -eq $file.Hash) { continue }
+            if ($key -eq "snapshot.xml" -or $key -eq "clock-policy.xml") {
+                $selected[$key] = Select-RuntimeMailboxFile -Current $current -Candidate $file -RelativePath $file.RelativePath
+                continue
+            }
+            if ($key -eq "manager-authority.xml") {
+                throw "Conflicting manager-authority.xml state was found; refusing to select by timestamp."
+            }
+            if ($key -eq "serverbinding.xml") {
+                throw "Conflicting serverBinding.xml state was found; refusing to select a credential."
+            }
+            throw "Conflicting durable mailbox file '$($file.RelativePath)' was found; refusing to choose a copy."
+        }
+    }
+    return @($selected.Values | Sort-Object RelativePath)
+}
+
+function Write-MailboxStage {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Files,
+        [Parameter(Mandatory = $true)][string]$Stage
+    )
+
+    if (Test-Path -LiteralPath $Stage) {
+        $existing = @(Get-MailboxFiles -Root $Stage)
+        if ($existing.Count -ne 0) {
+            throw "Mailbox staging directory is non-empty and cannot be replaced safely: $Stage"
+        }
+        Remove-Item -LiteralPath $Stage -Force
+    }
+    New-Item -ItemType Directory -Force -Path $Stage | Out-Null
+    foreach ($file in $Files) {
+        $target = Join-Path $Stage $file.RelativePath
+        $targetParent = Split-Path -Parent $target
+        New-Item -ItemType Directory -Force -Path $targetParent | Out-Null
+        Copy-Item -LiteralPath $file.FullName -Destination $target
+    }
+    $stagedFiles = @(Get-MailboxFiles -Root $Stage)
+    if ($stagedFiles.Count -ne $Files.Count) {
+        throw "Mailbox staging validation failed because files were not fully materialized."
+    }
+    return $stagedFiles
+}
+
+function Assert-StageCoversRoots {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Roots,
+        [Parameter(Mandatory = $true)][object[]]$StageFiles
+    )
+
+    $stageByPath = @{}
+    foreach ($file in $StageFiles) { $stageByPath[$file.RelativePath.ToLowerInvariant()] = $file }
+    foreach ($root in $Roots) {
+        foreach ($file in $root.Files) {
+            $key = $file.RelativePath.ToLowerInvariant()
+            if (-not $stageByPath.ContainsKey($key)) {
+                throw "Interrupted mailbox staging is missing durable file '$($file.RelativePath)'."
+            }
+            $staged = $stageByPath[$key]
+            if ($staged.Hash -eq $file.Hash) { continue }
+            if ($key -eq "snapshot.xml" -or $key -eq "clock-policy.xml") { continue }
+            throw "Interrupted mailbox staging conflicts with durable file '$($file.RelativePath)'."
+        }
+    }
+}
+
+function New-MailboxArchiveBatch {
+    param([Parameter(Mandatory = $true)][string]$Parent)
+
+    $archiveRoot = Join-Path $Parent "FS25_SiN_Server.migration-archive"
+    New-Item -ItemType Directory -Force -Path $archiveRoot | Out-Null
+    $stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMdd-HHmmssfff")
+    $batch = Join-Path $archiveRoot ("migration-" + $stamp)
+    $suffix = 1
+    while (Test-Path -LiteralPath $batch) {
+        $batch = Join-Path $archiveRoot ("migration-" + $stamp + "-" + $suffix)
+        $suffix++
+    }
+    New-Item -ItemType Directory -Force -Path $batch | Out-Null
+    return $batch
+}
+
+function Archive-MailboxRoots {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Roots,
+        [Parameter(Mandatory = $true)][string]$Batch
+    )
+
+    foreach ($root in ($Roots | Sort-Object)) {
+        $target = Join-Path $Batch (Split-Path -Leaf $root)
+        Move-MailboxDirectory -Source $root -Destination $target
+    }
+}
+
+function Move-MailboxDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+
+    $attempts = 5
+    for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+        try {
+            Move-Item -LiteralPath $Source -Destination $Destination
+            return
+        } catch {
+            $isTransientFileLock = $_.Exception -is [UnauthorizedAccessException] -or
+                $_.Exception -is [IO.IOException]
+            if (-not $isTransientFileLock -or $attempt -eq $attempts) { throw }
+            Start-Sleep -Milliseconds (200 * $attempt)
+        }
+    }
+}
+
 function Invoke-LegacyMailboxMigration {
     param([Parameter(Mandatory = $true)][string]$Destination)
 
-    $destination = [IO.Path]::GetFullPath($Destination)
+    $destination = [IO.Path]::GetFullPath($Destination).TrimEnd([char]92, [char]47)
     $parent = Split-Path -Parent $destination
+    $stage = $destination + ".migrating"
     $legacyCandidates = @(
         (Join-Path $parent "FS25_SiN_NetworkLocal"),
         (Join-Path $parent "FS25SiNNetworkLocal")
     )
     $legacyPaths = @($legacyCandidates | Where-Object {
         -not [StringComparer]::OrdinalIgnoreCase.Equals($_, $destination) -and
+        -not [StringComparer]::OrdinalIgnoreCase.Equals($_, $stage) -and
         (Test-Path -LiteralPath $_ -PathType Container)
     })
-    if ($legacyPaths.Count -eq 0) {
-        New-Item -ItemType Directory -Force -Path $destination | Out-Null
-        Write-Host "Legacy mailbox not found; canonical mailbox is ready."
+
+    $destinationExists = Test-Path -LiteralPath $destination -PathType Container
+    $destinationFiles = if ($destinationExists) { @(Get-MailboxFiles -Root $destination) } else { @() }
+    if ($destinationFiles.Count -ne 0) {
+        if ($legacyPaths.Count -ne 0) {
+            throw "Canonical mailbox is already populated while legacy mailbox directories remain; refusing to merge or overwrite."
+        }
+        if (Test-Path -LiteralPath $stage -PathType Container) {
+            $staleStage = @(Get-MailboxFiles -Root $stage)
+            $batch = New-MailboxArchiveBatch -Parent $parent
+            Move-MailboxDirectory -Source $stage -Destination (Join-Path $batch (Split-Path -Leaf $stage))
+        }
+        Write-Host "Canonical mailbox already exists; migration is complete."
         return
     }
-    if ($legacyPaths.Count -gt 1) {
-        throw "Multiple legacy mailbox directories exist; refusing to choose between durable states."
-    }
-    $legacy = $legacyPaths[0]
-    if (Test-Path -LiteralPath $destination -PathType Container) {
-        $canonicalItems = @(Get-ChildItem -LiteralPath $destination -Force)
-        if ($canonicalItems.Count -ne 0) {
-            throw "Both legacy and canonical mailbox directories contain state; refusing to merge or overwrite. Review '$legacy' and '$destination'."
+    if ($destinationExists) { Remove-Item -LiteralPath $destination -Force }
+
+    $rootInfos = @()
+    $emptyRoots = @()
+    foreach ($path in $legacyPaths) {
+        $files = @(Get-MailboxFiles -Root $path)
+        if ($files.Count -eq 0) {
+            $emptyRoots += $path
+            continue
         }
-        Remove-Item -LiteralPath $destination -Force
+        $rootInfos += [pscustomobject]@{
+            Path = $path
+            Files = $files
+            BindingHash = Get-MailboxBindingHash -Files $files -Root $path
+        }
     }
-    # Move the complete mailbox directory while FS25 is stopped. This preserves
-    # serverBinding.xml and every pending mailbox item without replaying or
-    # selectively copying only the files known to this updater.
-    Move-Item -LiteralPath $legacy -Destination $destination
-    Write-Host "Migrated complete legacy mailbox to $destination."
+
+    $bindingHash = $null
+    foreach ($root in $rootInfos) {
+        if ($null -eq $bindingHash) { $bindingHash = $root.BindingHash; continue }
+        if ($bindingHash -ne $root.BindingHash) {
+            throw "Legacy mailbox directories contain different server bindings; refusing to consolidate them."
+        }
+    }
+
+    $stageExists = Test-Path -LiteralPath $stage -PathType Container
+    $stageFiles = if ($stageExists) { @(Get-MailboxFiles -Root $stage) } else { @() }
+    if ($stageFiles.Count -ne 0) {
+        $stageBinding = Get-MailboxBindingHash -Files $stageFiles -Root $stage
+        if ($null -ne $bindingHash -and $stageBinding -ne $bindingHash) {
+            throw "Mailbox staging contains a different server binding; refusing to resume it."
+        }
+        if ($null -eq $bindingHash) { $bindingHash = $stageBinding }
+        foreach ($runtimeFile in @($stageFiles | Where-Object {
+            $_.RelativePath.ToLowerInvariant() -eq "snapshot.xml" -or
+            $_.RelativePath.ToLowerInvariant() -eq "clock-policy.xml"
+        })) {
+            if (-not (Test-ValidMailboxXml -File $runtimeFile)) {
+                throw "Mailbox staging contains invalid runtime XML '$($runtimeFile.RelativePath)'."
+            }
+        }
+        if ($rootInfos.Count -ne 0) {
+            Assert-StageCoversRoots -Roots $rootInfos -StageFiles $stageFiles
+        }
+    } elseif ($stageExists) {
+        Remove-Item -LiteralPath $stage -Force
+    }
+
+    if ($stageFiles.Count -eq 0) {
+        if ($rootInfos.Count -eq 0) {
+            New-Item -ItemType Directory -Force -Path $destination | Out-Null
+            $archiveRoots = @($emptyRoots)
+        } else {
+            $union = Resolve-MailboxUnion -Roots $rootInfos
+            $stageFiles = Write-MailboxStage -Files $union -Stage $stage
+            $archiveRoots = @($rootInfos | ForEach-Object { $_.Path }) + $emptyRoots
+        }
+    } else {
+        $archiveRoots = @($rootInfos | ForEach-Object { $_.Path }) + $emptyRoots
+    }
+
+    if ($archiveRoots.Count -ne 0) {
+        $batch = New-MailboxArchiveBatch -Parent $parent
+        Archive-MailboxRoots -Roots $archiveRoots -Batch $batch
+    }
+    if (-not (Test-Path -LiteralPath $destination -PathType Container)) {
+        if (-not (Test-Path -LiteralPath $stage -PathType Container)) {
+            New-Item -ItemType Directory -Force -Path $destination | Out-Null
+        } else {
+            Move-MailboxDirectory -Source $stage -Destination $destination
+        }
+    }
+    $finalFiles = @(Get-MailboxFiles -Root $destination)
+    if ($bindingHash -ne $null) {
+        $finalBinding = Get-MailboxBindingHash -Files $finalFiles -Root $destination
+        if ($finalBinding -ne $bindingHash) {
+            throw "Canonical mailbox binding validation failed after migration."
+        }
+    }
+    Write-Host "Legacy mailbox state consolidated into the canonical mailbox."
 }
 
 function Stop-Agent {

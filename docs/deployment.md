@@ -90,14 +90,22 @@ The FS25_SiN_Server GIANTS-authorized mailbox root is:
 C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\modSettings\FS25_SiN_Server
 ```
 
-The legacy `FS25_SiN_NetworkLocal` directory is migrated as a complete
-directory while FS25 is stopped. This preserves `serverBinding.xml`, snapshots,
-clock and manager state, telemetry, events, requests, responses, commands, and
-receipts without selectively dropping durable work. Migration is automatic and
-idempotent; the old directory is moved rather than copied, so only the new root
-is active. If both old and new roots contain state, the updater fails closed
-instead of merging or overwriting either binding. The historical
-`FS25SiNNetworkLocal` spelling is also recognized for compatibility.
+Historical installations may contain both `FS25SiNNetworkLocal` and
+`FS25_SiN_NetworkLocal`. The updater examines both roots while FS25 is stopped.
+It only consolidates them after verifying that every non-empty legacy root has
+the same `serverBinding.xml` hash. Different or missing bindings fail closed;
+binding contents are never logged or manually merged.
+
+The consolidation builds a staged union under
+`FS25_SiN_Server.migrating`. Identical files are deduplicated, files present in
+only one root are retained, and conflicting durable commands, events,
+receipts, registration files, manager authority, or unknown files fail safely.
+For the explicitly regenerable `snapshot.xml` and `clock-policy.xml`, the
+newest valid XML copy wins. After validation, the stage is moved into
+`FS25_SiN_Server` and the old roots are moved into the excluded
+`FS25_SiN_Server.migration-archive` directory. A failed or interrupted run
+leaves the sources/stage intact so a later run can resume without re-pairing.
+Completed canonical migrations are not rediscovered from the archive.
 
 If the VM still has an older updater, bootstrap the next updater over HTTPS
 before running the normal deployment:
