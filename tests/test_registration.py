@@ -273,14 +273,39 @@ class RegistrationTests(unittest.TestCase):
     def test_server_runtime_restores_runtime_manager_permissions_and_uses_native_replication(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
             encoding="utf-8")
-        self.assertIn("function FS25SiNServer:enforceAuthorizedManagerState(user, farm, authorized)", source)
+        self.assertIn("function FS25SiNServer:enforceAuthorizedManagerState(user, farm, authorized, syncReason)", source)
         self.assertIn("farm.getUserPermissions", source)
         self.assertIn("farm:setUserPermission(userId, permission, true)", source)
         self.assertIn("PlayerPermissionsEvent.sendEvent", source)
-        self.assertIn("self:enforceAuthorizedManagerState(user, farm, authorized)", source)
-        self.assertIn("self:enforceAuthorizedManagerState(user, farm, isAuthorized)", source)
+        self.assertIn("pcall(PlayerPermissionsEvent.sendEvent, userId, permissions or {}, manager == true, false)", source)
+        self.assertIn('self:enforceAuthorizedManagerState(user, farm, authorized, "immediate")', source)
         self.assertIn("beforeManager", source)
         self.assertIn("afterManager", source)
+
+    def test_server_runtime_defers_and_validates_manager_client_sync_after_farm_change(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8")
+        self.assertIn("self.managerSyncDelay = 750", source)
+        self.assertIn("function FS25SiNServer:scheduleDeferredManagerSync(user, farm)", source)
+        self.assertIn("function FS25SiNServer:processDeferredManagerSyncs()", source)
+        self.assertIn("expectedFarmId", source)
+        self.assertIn("stale deferred sync discarded", source)
+        self.assertIn('user, farm, authorized, "deferred")', source)
+        self.assertIn('syncReason == "deferred"', source)
+        self.assertIn("final client-sync", source)
+        self.assertIn("self:processDeferredManagerSyncs()", source)
+
+    def test_server_runtime_periodic_manager_reconciliation_repairs_only_detected_drift(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8")
+        self.assertIn("function FS25SiNServer:reconcileManagerAuthorityDrift()", source)
+        self.assertIn("function FS25SiNServer:hasMissingManagerPermissions(farm, permissions)", source)
+        self.assertIn("local managerDrift = beforeManager ~= isAuthorized", source)
+        self.assertIn("local permissionDrift = isAuthorized and self:hasMissingManagerPermissions(farm, beforePermissions)", source)
+        self.assertIn('user, farm, isAuthorized, "periodic-drift")', source)
+        self.assertIn("unauthorized manager drift repaired", source)
+        self.assertIn("permission drift repaired", source)
+        self.assertIn("pcall(self.reconcileManagerAuthorityDrift, self)", source)
 
     def test_server_runtime_has_no_fixed_system_farm_id_assumption(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(

@@ -43,6 +43,9 @@ function FS25SiNServer:loadMap()
     self.registrationWarning = nil
     self.registrationWarningElapsed = 0
     self.heartbeatElapsed = 0
+    self.managerSyncClock = 0
+    self.managerSyncDelay = 750
+    self.deferredManagerSyncs = {}
     self.activitySampleElapsed = 0
     self.activityStates = {}
     self.activitySessionSequence = 0
@@ -134,7 +137,63 @@ function FS25SiNServer:enforceFarmChange(player)
     if farm == nil then return end
     local authorityFarmId = self:loadManagerAuthority()[tostring(user:getUniqueUserId())]
     local authorized = authorityFarmId ~= nil and tonumber(authorityFarmId) == tonumber(farm.farmId)
-    self:enforceAuthorizedManagerState(user, farm, authorized)
+    self:enforceAuthorizedManagerState(user, farm, authorized, "immediate")
+    self:scheduleDeferredManagerSync(user, farm)
+end
+
+function FS25SiNServer:scheduleDeferredManagerSync(user, farm)
+    if user == nil or farm == nil or farm.farmId == nil or farm.farmId <= 0 then return end
+    local uniqueId = tostring(user:getUniqueUserId() or "")
+    if uniqueId == "" then return end
+    local previous = self.deferredManagerSyncs[uniqueId]
+    if previous ~= nil and tonumber(previous.expectedFarmId) ~= tonumber(farm.farmId) then
+        Logging.info("[SiN Authorization] stale deferred sync discarded userId=%s expectedFarm=%s currentFarm=%s",
+            tostring(user:getId()), tostring(previous.expectedFarmId), tostring(farm.farmId))
+    end
+    self.deferredManagerSyncs[uniqueId] = {
+        uniqueUserId=uniqueId,
+        userId=user:getId(),
+        expectedFarmId=tonumber(farm.farmId),
+        executeAtMs=self.managerSyncClock + self.managerSyncDelay
+    }
+    Logging.info("[SiN Authorization] deferred permission sync scheduled userId=%s farmId=%s delayMs=%s",
+        tostring(user:getId()), tostring(farm.farmId), tostring(self.managerSyncDelay))
+end
+
+function FS25SiNServer:processDeferredManagerSyncs()
+    if self.deferredManagerSyncs == nil or g_currentMission == nil
+        or not g_currentMission:getIsServer() or g_currentMission.userManager == nil
+        or g_farmManager == nil then return end
+    local now = self.managerSyncClock
+    for uniqueId, deferred in pairs(self.deferredManagerSyncs) do
+        if now >= deferred.executeAtMs then
+            self.deferredManagerSyncs[uniqueId] = nil
+            local user = self:findConnectedUser(uniqueId)
+            if user == nil then
+                Logging.info("[SiN Authorization] stale deferred sync discarded userId=%s reason=player_not_connected",
+                    tostring(deferred.userId or "unknown"))
+            else
+                local farm = g_farmManager:getFarmByUserId(user:getId())
+                if farm == nil or tonumber(farm.farmId) ~= tonumber(deferred.expectedFarmId) then
+                    Logging.info("[SiN Authorization] stale deferred sync discarded userId=%s expectedFarm=%s currentFarm=%s",
+                        tostring(user:getId()), tostring(deferred.expectedFarmId), tostring(farm ~= nil and farm.farmId or 0))
+                elseif self:isDedicatedServerUser(user, farm) then
+                    Logging.info("[SiN Authorization] stale deferred sync discarded userId=%s reason=dedicated_server_user",
+                        tostring(user:getId()))
+                else
+                    local authorityFarmId = self:loadManagerAuthority()[uniqueId]
+                    local authorized = authorityFarmId ~= nil
+                        and tonumber(authorityFarmId) == tonumber(farm.farmId)
+                    local ok, errorMessage = pcall(self.enforceAuthorizedManagerState, self,
+                        user, farm, authorized, "deferred")
+                    if not ok then
+                        Logging.error("[SiN Authorization] deferred permission sync failed userId=%s farmId=%s error=%s",
+                            tostring(user:getId()), tostring(farm.farmId), tostring(errorMessage))
+                    end
+                end
+            end
+        end
+    end
 end
 
 function FS25SiNServer:isDedicatedServerUser(user, farm)
@@ -180,12 +239,21 @@ function FS25SiNServer:getFarmPermissionKeys(farm, permissions)
         if type(permission) == "string" then keys[permission] = true end
         if type(value) == "string" then keys[value] = true end
     end
-    if next(keys) == nil and Farm ~= nil and type(Farm.PERMISSION) == "table" then
+    if Farm ~= nil and type(Farm.PERMISSION) == "table" then
         for _, permission in pairs(Farm.PERMISSION) do
             if type(permission) == "string" then keys[permission] = true end
         end
     end
     return keys
+end
+
+function FS25SiNServer:hasMissingManagerPermissions(farm, permissions)
+    local permissionKeys = self:getFarmPermissionKeys(farm, permissions)
+    if next(permissionKeys) == nil then return false end
+    for permission, _ in pairs(permissionKeys) do
+        if permissions[permission] ~= true then return true end
+    end
+    return false
 end
 
 function FS25SiNServer:countFarmPermissions(permissions)
@@ -197,8 +265,13 @@ function FS25SiNServer:countFarmPermissions(permissions)
     return count, granted
 end
 
-function FS25SiNServer:replicateFarmPermissions(userId, permissions, manager)
+function FS25SiNServer:replicateFarmPermissions(userId, permissions, manager, farmId, syncReason)
     if PlayerPermissionsEvent == nil or PlayerPermissionsEvent.sendEvent == nil then return end
+    if syncReason == "deferred" then
+        local permissionCount, grantedCount = self:countFarmPermissions(permissions)
+        Logging.info("[SiN Authorization] final client-sync userId=%s farmId=%s manager=%s permissionCount=%s grantedPermissions=%s",
+            tostring(userId), tostring(farmId), tostring(manager == true), tostring(permissionCount), tostring(grantedCount))
+    end
     local ok, errorMessage = pcall(PlayerPermissionsEvent.sendEvent, userId, permissions or {}, manager == true, false)
     if not ok then
         Logging.warning("[SiN Authorization] farm permission replication failed userId=%s error=%s",
@@ -206,7 +279,7 @@ function FS25SiNServer:replicateFarmPermissions(userId, permissions, manager)
     end
 end
 
-function FS25SiNServer:enforceAuthorizedManagerState(user, farm, authorized)
+function FS25SiNServer:enforceAuthorizedManagerState(user, farm, authorized, syncReason)
     if user == nil or farm == nil or farm.farmId == nil or farm.farmId <= 0 then return false end
     local userId = user:getId()
     local beforeManager, beforePermissions = self:readFarmManagerState(farm, userId)
@@ -226,7 +299,7 @@ function FS25SiNServer:enforceAuthorizedManagerState(user, farm, authorized)
             end
         end
         afterManager, afterPermissions = self:readFarmManagerState(farm, userId)
-        self:replicateFarmPermissions(userId, afterPermissions, afterManager)
+        self:replicateFarmPermissions(userId, afterPermissions, afterManager, farm.farmId, syncReason)
     else
         if beforeManager then
             if farm.demoteUser == nil then error("FS25 demoteUser is unavailable") end
@@ -246,10 +319,11 @@ function FS25SiNServer:enforceAuthorizedManagerState(user, farm, authorized)
             end
             afterManager, afterPermissions = self:readFarmManagerState(farm, userId)
         end
-        self:replicateFarmPermissions(userId, afterPermissions, false)
+        self:replicateFarmPermissions(userId, afterPermissions, false, farm.farmId, syncReason)
     end
     local permissionCount, grantedCount = self:countFarmPermissions(afterPermissions)
-    Logging.info("[SiN Authorization] farm state uniqueUserId=%s farmId=%s authorizedManager=%s beforeManager=%s afterManager=%s permissionCount=%s grantedPermissions=%s",
+    Logging.info("[SiN Authorization] farm state sync=%s uniqueUserId=%s farmId=%s authorizedManager=%s beforeManager=%s afterManager=%s permissionCount=%s grantedPermissions=%s",
+        tostring(syncReason or "reconciliation"),
         self:shortIdentity(user:getUniqueUserId()), tostring(farm.farmId), tostring(authorized == true),
         tostring(beforeManager), tostring(afterManager), tostring(permissionCount), tostring(grantedCount))
     return afterManager == (authorized == true)
@@ -564,9 +638,11 @@ function FS25SiNServer:update(dt)
     end
     self.elapsed = self.elapsed + dt
     self.heartbeatElapsed = self.heartbeatElapsed + dt
+    self.managerSyncClock = self.managerSyncClock + dt
     self.clockElapsed = self.clockElapsed + dt
     self.clockTargetAge = self.clockTargetAge + dt
     self.registrationClock = self.registrationClock + dt
+    self:processDeferredManagerSyncs()
     local clockInterval = 60000
     if self.clockMode == "fast_catchup" then
         clockInterval = 1000
@@ -608,7 +684,7 @@ function FS25SiNServer:update(dt)
         Logging.error("[SiN (SimNet) Server] Permission mailbox error: %s", tostring(receiptError))
     end
     self:processPairingResponse()
-    local restoreOk, restoreError = pcall(self.restoreApprovedManagers, self)
+    local restoreOk, restoreError = pcall(self.reconcileManagerAuthorityDrift, self)
     if not restoreOk then
         Logging.error("[SiN (SimNet) Server] Manager restore error: %s", tostring(restoreError))
     end
@@ -1204,17 +1280,47 @@ function FS25SiNServer:processLandCommand(command, operationId)
     command:delete()
 end
 
-function FS25SiNServer:restoreApprovedManagers()
-    -- Immediate farm-change handling and this periodic fallback use the same
-    -- verified state transition. The XML remains the sole SiN authority source.
+function FS25SiNServer:reconcileManagerAuthorityDrift()
+    -- This is only a self-healing guardrail. Farm changes use the immediate
+    -- plus deferred path above; the XML remains the sole SiN authority source.
     local authorized = self:loadManagerAuthority()
     for _, user in ipairs(g_currentMission.userManager:getUsers()) do
         local userId = user:getId()
         local farm = g_farmManager:getFarmByUserId(userId)
         if farm ~= nil and not self:isDedicatedServerUser(user, farm) and farm.farmId > 0 then
-            local authorityFarmId = authorized[tostring(user:getUniqueUserId())]
+            local uniqueId = tostring(user:getUniqueUserId() or "")
+            local authorityFarmId = authorized[uniqueId]
             local isAuthorized = authorityFarmId ~= nil and tonumber(authorityFarmId) == tonumber(farm.farmId)
-            self:enforceAuthorizedManagerState(user, farm, isAuthorized)
+            local beforeManager, beforePermissions = self:readFarmManagerState(farm, userId)
+            local managerDrift = beforeManager ~= isAuthorized
+            local permissionDrift = isAuthorized and self:hasMissingManagerPermissions(farm, beforePermissions)
+            if managerDrift or permissionDrift then
+                local beforeCount, beforeGranted = self:countFarmPermissions(beforePermissions)
+                Logging.info("[SiN Authorization] manager drift detected uniqueUserId=%s farmId=%s authorizedManager=%s beforeManager=%s permissionCount=%s grantedPermissions=%s",
+                    self:shortIdentity(uniqueId), tostring(farm.farmId), tostring(isAuthorized),
+                    tostring(beforeManager), tostring(beforeCount), tostring(beforeGranted))
+                local ok, errorMessage = pcall(self.enforceAuthorizedManagerState, self,
+                    user, farm, isAuthorized, "periodic-drift")
+                if not ok then
+                    Logging.error("[SiN Authorization] manager drift repair failed uniqueUserId=%s farmId=%s error=%s",
+                        self:shortIdentity(uniqueId), tostring(farm.farmId), tostring(errorMessage))
+                else
+                    local afterManager, afterPermissions = self:readFarmManagerState(farm, userId)
+                    local afterCount, afterGranted = self:countFarmPermissions(afterPermissions)
+                    if not isAuthorized then
+                        Logging.info("[SiN Authorization] unauthorized manager drift repaired uniqueUserId=%s farmId=%s beforeManager=%s afterManager=%s permissionCount=%s grantedPermissions=%s",
+                            self:shortIdentity(uniqueId), tostring(farm.farmId), tostring(beforeManager),
+                            tostring(afterManager), tostring(afterCount), tostring(afterGranted))
+                    elseif managerDrift then
+                        Logging.info("[SiN Authorization] manager drift repaired uniqueUserId=%s farmId=%s beforeManager=%s afterManager=%s permissionCount=%s grantedPermissions=%s",
+                            self:shortIdentity(uniqueId), tostring(farm.farmId), tostring(beforeManager),
+                            tostring(afterManager), tostring(afterCount), tostring(afterGranted))
+                    else
+                        Logging.info("[SiN Authorization] permission drift repaired uniqueUserId=%s farmId=%s permissionCount=%s grantedPermissions=%s",
+                            self:shortIdentity(uniqueId), tostring(farm.farmId), tostring(afterCount), tostring(afterGranted))
+                    end
+                end
+            end
         end
     end
 end
