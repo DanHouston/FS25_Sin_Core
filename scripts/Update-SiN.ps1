@@ -241,14 +241,32 @@ function Invoke-LegacyMailboxMigration {
 
     $destinationExists = Test-Path -LiteralPath $destination -PathType Container
     $destinationFiles = if ($destinationExists) { @(Get-MailboxFiles -Root $destination) } else { @() }
+    # A legacy directory can be recreated by an old mod's startup code with
+    # only its mailbox subdirectories.  Directory existence is not durable
+    # mailbox state: only files participate in the binding/conflict rules.
+    # Classify the roots before deciding whether a populated canonical mailbox
+    # is in conflict with legacy state.
+    $nonEmptyLegacyPaths = @()
+    $emptyLegacyPaths = @()
+    foreach ($path in $legacyPaths) {
+        if (@(Get-MailboxFiles -Root $path).Count -eq 0) {
+            $emptyLegacyPaths += $path
+        } else {
+            $nonEmptyLegacyPaths += $path
+        }
+    }
     if ($destinationFiles.Count -ne 0) {
-        if ($legacyPaths.Count -ne 0) {
+        if ($nonEmptyLegacyPaths.Count -ne 0) {
             throw "Canonical mailbox is already populated while legacy mailbox directories remain; refusing to merge or overwrite."
         }
         if (Test-Path -LiteralPath $stage -PathType Container) {
             $staleStage = @(Get-MailboxFiles -Root $stage)
             $batch = New-MailboxArchiveBatch -Parent $parent
             Move-MailboxDirectory -Source $stage -Destination (Join-Path $batch (Split-Path -Leaf $stage))
+        }
+        if ($emptyLegacyPaths.Count -ne 0) {
+            $batch = New-MailboxArchiveBatch -Parent $parent
+            Archive-MailboxRoots -Roots $emptyLegacyPaths -Batch $batch
         }
         Write-Host "Canonical mailbox already exists; migration is complete."
         return

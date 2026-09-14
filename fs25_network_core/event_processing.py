@@ -1,16 +1,29 @@
 """Central processing for authenticated FS25_SiN_Server events."""
 import logging
+import hashlib
 from datetime import datetime, timezone
 
 from .activity import ActivityOutbox
 from .authorization import AuthorizationManager
 from .server_registry import ServerRegistry
 from .farm_lifecycle import FarmLifecycle
-from .activity_telemetry import ACTIVITY_EVENT_TYPE, ActivityTelemetryError, ActivityTelemetryProcessor
+from .activity_telemetry import (ACTIVITY_EVENT_TYPE, ActivityTelemetryError,
+                                 ActivityTelemetryProcessor, ActivitySessionProcessor)
+from .business_workflows import ChatService
+from .business_workflows import TransferService
+from .banking_engine import BankingEngine
 from pymongo.errors import DuplicateKeyError
 
 LOG = logging.getLogger(__name__)
-SUPPORTED_EVENTS = {"heartbeat", "player_connected", "player_disconnected", ACTIVITY_EVENT_TYPE}
+CHAT_EVENT_TYPE = "chat_message"
+SUPPORTED_EVENTS = {"heartbeat", "player_connected", "player_disconnected", ACTIVITY_EVENT_TYPE,
+                    CHAT_EVENT_TYPE}
+
+
+def scoped_event_id(server_key, save_key, event_id):
+    """Return the durable idempotency key for one server/save event stream."""
+    value = "|".join((str(server_key), str(save_key), str(event_id)))
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 class EventValidationError(ValueError):
@@ -33,6 +46,10 @@ class CentralEventProcessor:
         self.authorization = AuthorizationManager(database)
         self.farm_lifecycle = FarmLifecycle(database, self.authorization)
         self.telemetry = ActivityTelemetryProcessor(database)
+        self.telemetry_sessions = ActivitySessionProcessor(database)
+        self.chat = ChatService(database)
+        self.transfers = TransferService(database, self.authorization)
+        self.banking = BankingEngine(database)
 
     def process(self, event):
         if not isinstance(event, dict):
@@ -52,7 +69,9 @@ class CentralEventProcessor:
             save_key = self.registry.resolve_save(record["server_key"], event["save_id"])
         except ValueError as error:
             raise EventScopeError(str(error)) from None
-        if self.db.processed_server_events.find_one({"_id": event_id}):
+        processed_id = scoped_event_id(record["server_key"], save_key, event_id)
+        if self.db.processed_server_events.find_one({"_id": processed_id}):
+            LOG.info("[SiN Events] duplicate event ignored eventId=%s type=%s", event_id, event_type)
             return {"status": "accepted", "duplicate": True, "save_key": save_key}
 
         now = datetime.now(timezone.utc)
@@ -65,6 +84,63 @@ class CentralEventProcessor:
                 result = self.telemetry.process(record["server_key"], save_key, event_id, raw_payload)
             except ActivityTelemetryError as error:
                 raise EventValidationError(str(error)) from None
+        elif event_type == CHAT_EVENT_TYPE:
+            raw_payload = event.get("payload") or {}
+            if not isinstance(raw_payload, dict):
+                raise EventValidationError("event payload must be an object")
+            try:
+                chat_record = self.chat.ingest_fs25(record["server_key"], save_key, event_id, raw_payload)
+            except (TypeError, ValueError) as error:
+                raise EventValidationError(str(error)) from None
+            result = {"status": "accepted", "message_id": chat_record.get("message_id") if chat_record else event_id,
+                      "save_key": save_key}
+            if chat_record:
+                observed_name = raw_payload.get("display_name") or chat_record.get("unique_user_id") or "FS25"
+                resolved = self.authorization.resolve_player_identity(
+                    record["server_key"], save_key, chat_record.get("unique_user_id")) \
+                    if chat_record.get("unique_user_id") else {"fully_registered": False}
+                sender = resolved.get("canonical_name") if resolved.get("fully_registered") else observed_name
+                ActivityOutbox(self.database).enqueue(
+                    event_id, record["server_key"], CHAT_EVENT_TYPE,
+                    f"💬 {sender}: {chat_record.get('message', raw_payload.get('message', ''))}",
+                    save_key=save_key)
+        elif event_type == "player_connected":
+            raw_payload = event.get("payload") or {}
+            if not isinstance(raw_payload, dict):
+                raise EventValidationError("event payload must be an object")
+            try:
+                # Older NetworkLocal builds did not include a session_id on
+                # lifecycle events.  Preserve that mailbox contract while
+                # giving the session store a stable id for those events.
+                raw_payload = dict(raw_payload)
+                raw_payload.setdefault("session_id", event_id)
+                result = self.telemetry_sessions.connected(record["server_key"], save_key,
+                                                           event_id, raw_payload)
+            except ActivityTelemetryError as error:
+                raise EventValidationError(str(error)) from None
+            payload = dict(raw_payload)
+            payload["event_type"] = event_type
+            message = self.activity_message(record, save_key, payload)
+            if message is not None:
+                ActivityOutbox(self.database).enqueue(event_id, record["server_key"], event_type, message,
+                                                      save_key=save_key)
+        elif event_type == "player_disconnected":
+            raw_payload = event.get("payload") or {}
+            if not isinstance(raw_payload, dict):
+                raise EventValidationError("event payload must be an object")
+            try:
+                raw_payload = dict(raw_payload)
+                raw_payload.setdefault("session_id", event_id)
+                result = self.telemetry_sessions.disconnected(record["server_key"], save_key,
+                                                              event_id, raw_payload)
+            except ActivityTelemetryError as error:
+                raise EventValidationError(str(error)) from None
+            payload = dict(raw_payload)
+            payload["event_type"] = event_type
+            message = self.activity_message(record, save_key, payload)
+            if message is not None:
+                ActivityOutbox(self.database).enqueue(event_id, record["server_key"], event_type, message,
+                                                      save_key=save_key)
         elif event_type == "heartbeat":
             try:
                 self.farm_lifecycle.ensure_system_farm(record["server_key"], save_key)
@@ -76,8 +152,8 @@ class CentralEventProcessor:
                 name = record.get("display_name") or record["server_key"]
                 ActivityOutbox(self.database).enqueue(
                     event_id, record["server_key"], "server_online",
-                    f"🟢 Server Online\n{name} is connected to SiN JiN.")
-        else:
+                    f"🟢 Server Online\n{name} is connected to SiN JiN.", save_key=save_key)
+        elif event_type not in {"player_connected", "player_disconnected"}:
             raw_payload = event.get("payload") or {}
             if not isinstance(raw_payload, dict):
                 raise EventValidationError("event payload must be an object")
@@ -86,10 +162,11 @@ class CentralEventProcessor:
             message = self.activity_message(record, save_key, payload)
             if message is not None:
                 ActivityOutbox(self.database).enqueue(
-                    event_id, record["server_key"], event_type, message)
+                    event_id, record["server_key"], event_type, message, save_key=save_key)
         try:
             self.db.processed_server_events.insert_one(
-                {"_id": event_id, "server_key": record["server_key"], "processed_at": now})
+                {"_id": processed_id, "event_id": event_id, "server_key": record["server_key"],
+                 "save_key": save_key, "processed_at": now})
         except DuplicateKeyError:
             pass
         LOG.info("[SiN Events] processed type=%s serverKey=%s", event_type, record["server_key"])

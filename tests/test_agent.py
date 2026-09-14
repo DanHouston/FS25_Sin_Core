@@ -138,6 +138,23 @@ class AgentTests(unittest.TestCase):
             PairingAgent(folder, "http://central", opener).process_events_once()
             self.assertTrue(event.exists())
 
+    def test_chat_event_uses_authenticated_event_transport(self):
+        opener = MagicMock(return_value=Response())
+        with tempfile.TemporaryDirectory() as folder:
+            events = Path(folder) / "events"
+            events.mkdir()
+            event = events / "chat-1.xml"
+            event.write_text(
+                '<serverEvent event_id="chat-1" event_type="chat_message" '
+                'server_key="server" server_credential="secret" save_id="1" '
+                'message_id="message-1" message="hello" source="fs25" unique_user_id="stable"/>',
+                encoding="utf-8")
+            self.assertEqual(PairingAgent(folder, "http://central", opener).process_events_once(), [event.name])
+            self.assertFalse(event.exists())
+            sent = json.loads(opener.call_args.args[0].data)
+            self.assertEqual(sent["event_type"], "chat_message")
+            self.assertEqual(sent["payload"]["message"], "hello")
+
     def test_malformed_event_is_quarantined(self):
         with tempfile.TemporaryDirectory() as folder:
             events = Path(folder) / "events"

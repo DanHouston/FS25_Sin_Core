@@ -59,6 +59,7 @@ function FS25SiNServer:loadMap()
     self.invalidFarmVisualStateLogged = {}
     self:installLifecycleHooks()
     addConsoleCommand("sinPermissions", "Report local FS25 farm permission state", "consoleCommandPermissions", self)
+    addConsoleCommand("sinSelfTest", "Report read-only SiN runtime integration checks", "consoleCommandSelfTest", self)
     addConsoleCommand("sinPair", "Pair this server with a SiN pairing code", "consoleCommandPair", self)
     if g_messageCenter ~= nil and MessageType ~= nil and MessageType.PLAYER_FARM_CHANGED ~= nil then
         g_messageCenter:subscribe(MessageType.PLAYER_FARM_CHANGED, self.onPlayerFarmChanged, self)
@@ -265,18 +266,71 @@ function FS25SiNServer:countFarmPermissions(permissions)
     return count, granted
 end
 
-function FS25SiNServer:replicateFarmPermissions(userId, permissions, manager, farmId, syncReason)
-    if PlayerPermissionsEvent == nil or PlayerPermissionsEvent.sendEvent == nil then return end
-    if syncReason == "deferred" then
-        local permissionCount, grantedCount = self:countFarmPermissions(permissions)
-        Logging.info("[SiN Authorization] final client-sync userId=%s farmId=%s manager=%s permissionCount=%s grantedPermissions=%s",
-            tostring(userId), tostring(farmId), tostring(manager == true), tostring(permissionCount), tostring(grantedCount))
+function FS25SiNServer:resolvePermissionRecipient(userId, farm)
+    local player = nil
+    if farm ~= nil and farm.userIdToPlayer ~= nil then
+        player = farm.userIdToPlayer[userId]
     end
-    local ok, errorMessage = pcall(PlayerPermissionsEvent.sendEvent, userId, permissions or {}, manager == true, false)
+
+    local connection = player ~= nil and player.connection or nil
+    if connection == nil then
+        for _, record in pairs(self.connectedPlayers or {}) do
+            if tonumber(record.user_id) == tonumber(userId) then
+                connection = record.connection
+                break
+            end
+        end
+    end
+    return player, connection
+end
+
+function FS25SiNServer:replicateFarmPermissions(userId, farm, permissions, manager, farmId, syncReason)
+    if PlayerPermissionsEvent == nil or PlayerPermissionsEvent.new == nil then
+        Logging.warning("[SiN Authorization] permission sync unavailable userId=%s farmId=%s",
+            tostring(userId), tostring(farmId))
+        return false
+    end
+
+    local player, connection = self:resolvePermissionRecipient(userId, farm)
+    local connectionUserId = nil
+    if connection ~= nil and g_currentMission ~= nil and g_currentMission.userManager ~= nil
+        and g_currentMission.userManager.getUserIdByConnection ~= nil then
+        local resolvedOk, resolvedUserId = pcall(g_currentMission.userManager.getUserIdByConnection,
+            g_currentMission.userManager, connection)
+        if resolvedOk then connectionUserId = resolvedUserId end
+    end
+    local permissionCount, grantedCount = self:countFarmPermissions(permissions)
+    Logging.info("[SiN Authorization] permission client-sync sync=%s userId=%s farmId=%s playerPresent=%s playerConnectionPresent=%s connectionPresent=%s connectionUserId=%s manager=%s permissionCount=%s grantedPermissions=%s delivery=directConnection",
+        tostring(syncReason or "reconciliation"), tostring(userId), tostring(farmId),
+        tostring(player ~= nil), tostring(player ~= nil and player.connection ~= nil),
+        tostring(connection ~= nil), tostring(connectionUserId or "unknown"), tostring(manager == true),
+        tostring(permissionCount), tostring(grantedCount))
+
+    if connection == nil or connection.sendEvent == nil then
+        Logging.warning("[SiN Authorization] permission client-sync not queued; recipient connection unavailable userId=%s farmId=%s",
+            tostring(userId), tostring(farmId))
+        return false
+    end
+
+    -- GIANTS' stock permission-event helper resolves the farm player and routes
+    -- through broadcastEvent(..., player). During a dedicated-server
+    -- farm switch, use the current Player.connection explicitly so this native
+    -- event has an unambiguous remote recipient.
+    local event = PlayerPermissionsEvent.new(userId, permissions or {}, manager == true)
+    local ok, errorMessage = pcall(connection.sendEvent, connection, event)
     if not ok then
-        Logging.warning("[SiN Authorization] farm permission replication failed userId=%s error=%s",
-            tostring(userId), tostring(errorMessage))
+        Logging.warning("[SiN Authorization] permission client-sync failed userId=%s farmId=%s error=%s",
+            tostring(userId), tostring(farmId), tostring(errorMessage))
+        return false
     end
+    if syncReason == "deferred" then
+        Logging.info("[SiN Authorization] final client-sync userId=%s farmId=%s manager=%s delivery=directConnection",
+            tostring(userId), tostring(farmId), tostring(manager == true))
+    else
+        Logging.info("[SiN Authorization] permission client-sync queued userId=%s farmId=%s manager=%s delivery=directConnection",
+            tostring(userId), tostring(farmId), tostring(manager == true))
+    end
+    return true
 end
 
 function FS25SiNServer:enforceAuthorizedManagerState(user, farm, authorized, syncReason)
@@ -299,7 +353,7 @@ function FS25SiNServer:enforceAuthorizedManagerState(user, farm, authorized, syn
             end
         end
         afterManager, afterPermissions = self:readFarmManagerState(farm, userId)
-        self:replicateFarmPermissions(userId, afterPermissions, afterManager, farm.farmId, syncReason)
+        self:replicateFarmPermissions(userId, farm, afterPermissions, afterManager, farm.farmId, syncReason)
     else
         if beforeManager then
             if farm.demoteUser == nil then error("FS25 demoteUser is unavailable") end
@@ -319,7 +373,7 @@ function FS25SiNServer:enforceAuthorizedManagerState(user, farm, authorized, syn
             end
             afterManager, afterPermissions = self:readFarmManagerState(farm, userId)
         end
-        self:replicateFarmPermissions(userId, afterPermissions, false, farm.farmId, syncReason)
+        self:replicateFarmPermissions(userId, farm, afterPermissions, false, farm.farmId, syncReason)
     end
     local permissionCount, grantedCount = self:countFarmPermissions(afterPermissions)
     Logging.info("[SiN Authorization] farm state sync=%s uniqueUserId=%s farmId=%s authorizedManager=%s beforeManager=%s afterManager=%s permissionCount=%s grantedPermissions=%s",
@@ -469,8 +523,10 @@ function FS25SiNServer:onPlayerConnected(user, connection, farmId)
     if not wasTracked then
         self:startActivityTracking(uniqueId, record)
         Logging.info("[SiN Player] connected uniqueUserId=%s userId=%s", self:shortIdentity(uniqueId), tostring(record.user_id))
+        local activityState = self.activityStates[uniqueId]
         self:emitServerEvent("player_connected", {unique_user_id=uniqueId, user_id=record.user_id,
-            farm_id=record.farm_id, display_name=record.name})
+            farm_id=record.farm_id, display_name=record.name,
+            session_id=activityState ~= nil and activityState.sessionId or ""})
     end
     self:queueRegistrationRequest(user, farm, true)
     self:enforceRegistration(user, farm)
@@ -500,11 +556,13 @@ function FS25SiNServer:onPlayerDisconnected(userId)
     if uniqueId == nil or record == nil then return end
     self.connectedPlayers[uniqueId] = nil
     self.previousPlayers[uniqueId] = nil
+    local activityState = self.activityStates[uniqueId]
     self.activityStates[uniqueId] = nil
     self.registrationPromptAt[uniqueId] = nil
     Logging.info("[SiN Player] disconnected uniqueUserId=%s userId=%s", self:shortIdentity(uniqueId), matchId)
     self:emitServerEvent("player_disconnected", {unique_user_id=uniqueId, user_id=record.user_id,
-        farm_id=record.farm_id, display_name=record.name})
+        farm_id=record.farm_id, display_name=record.name,
+        session_id=activityState ~= nil and activityState.sessionId or ""})
 end
 
 function FS25SiNServer:setClientRegistrationWarning(required, code)
@@ -708,6 +766,58 @@ function FS25SiNServer:consoleCommandPermissions()
         table.insert(lines, string.format("[SiN Diagnostic] permission %s=%s", permission,
             value == nil and "nil" or tostring(value == true)))
     end
+    return table.concat(lines, "\n")
+end
+
+function FS25SiNServer:consoleCommandSelfTest()
+    local lines = {"SiN Integration Self-Test"}
+    local function tableCount(value)
+        local count = 0
+        if type(value) == "table" then
+            for _ in pairs(value) do count = count + 1 end
+        end
+        return count
+    end
+    local function result(name, state, details)
+        table.insert(lines, string.format("%-24s %s%s", name, state,
+            details ~= nil and (" " .. tostring(details)) or ""))
+    end
+    result("Mod/runtime", self.failed and "FAIL" or "PASS", "FS25_SiN_Server loaded")
+    result("Execution side", self:getDiagnosticExecutionSide(), nil)
+    local player = self:getDiagnosticLocalPlayer()
+    if player == nil then
+        result("Local player", "WARN", "unavailable on dedicated server")
+    else
+        result("Local player", "PASS", "userId=" .. tostring(player.userId or "unavailable"))
+        result("Current farm", player.farmId ~= nil and "PASS" or "WARN",
+            "farmId=" .. tostring(player.farmId or "unavailable"))
+        local farm = player.farmId ~= nil and g_farmManager ~= nil
+            and g_farmManager:getFarmById(player.farmId) or nil
+        if farm ~= nil then
+            local manager, permissions = self:readFarmManagerState(farm, player.userId)
+            local count, granted = self:countFarmPermissions(permissions)
+            result("Manager state", "PASS", "manager=" .. tostring(manager))
+            result("Permissions", count > 0 and "PASS" or "WARN",
+                tostring(granted) .. "/" .. tostring(count))
+        else
+            result("Current farm object", "WARN", "unavailable")
+        end
+    end
+    local configuredFarm, farmError = self:resolveConfiguredSystemFarm()
+    if configuredFarm ~= nil then
+        result("System farm", "PASS", "farmId=" .. tostring(configuredFarm.farmId))
+    else
+        result("System farm", "WARN", tostring(farmError or "unavailable"))
+    end
+    result("Authority snapshot", fileExists(self.directory .. "manager-authority.xml") and "PASS" or "WARN",
+        "manager-authority.xml")
+    result("Telemetry session", self.activityStates ~= nil and "PASS" or "FAIL",
+        "tracked=" .. tostring(tableCount(self.activityStates)))
+    result("Connected tracking", self.connectedPlayers ~= nil and "PASS" or "FAIL", nil)
+    result("Deferred sync", self.deferredManagerSyncs ~= nil and "PASS" or "WARN",
+        "queued=" .. tostring(tableCount(self.deferredManagerSyncs)))
+    local overall = self.failed and "FAIL" or "PASS"
+    table.insert(lines, "OVERALL: " .. overall)
     return table.concat(lines, "\n")
 end
 
@@ -1048,6 +1158,8 @@ function FS25SiNServer:processPermissionCommands()
                 self:processLandCommand(command, operationId)
             elseif operationType == "align_name" then
                 self:processNameAlignment(command, operationId)
+            elseif operationType == "chat_message" then
+                self:processChatCommand(command, operationId)
             else
             local playerId = command:getString("permissionCommand#game_player_id")
             local farmId = command:getInt("permissionCommand#farm_id")
@@ -1076,6 +1188,22 @@ function FS25SiNServer:processPermissionCommands()
         index = index + 1
     end
     manifest:delete()
+end
+
+-- The central chat mailbox contract is in place, but this build deliberately
+-- does not call an undocumented GIANTS chat-injection method.  Returning a
+-- durable non-success receipt prevents the operation from being reported as
+-- delivered while keeping the queued message auditable for the next verified
+-- runtime adapter.
+function FS25SiNServer:processChatCommand(command, operationId)
+    local receipt = XMLFile.create("networkLocalReceipt", self.receiptDirectory .. operationId .. ".xml", "permissionReceipt")
+    receipt:setString("permissionReceipt#operation_id", operationId)
+    receipt:setString("permissionReceipt#operation_type", "chat_message")
+    receipt:setString("permissionReceipt#server_id", command:getString("networkLocalCommand#server_id"))
+    receipt:setString("permissionReceipt#save_id", command:getString("networkLocalCommand#save_id"))
+    receipt:setString("permissionReceipt#status", "pending_validation")
+    receipt:setString("permissionReceipt#receipt", "FS25 chat display API requires live runtime verification; no chat mutation was attempted")
+    receipt:save(); receipt:delete(); command:delete()
 end
 
 function FS25SiNServer:findFarmByName(name)
@@ -1482,6 +1610,7 @@ end
 function FS25SiNServer:deleteMap()
     self.failed = true
     removeConsoleCommand("sinPermissions")
+    removeConsoleCommand("sinSelfTest")
     if g_messageCenter ~= nil and MessageType ~= nil and MessageType.PLAYER_FARM_CHANGED ~= nil then
         g_messageCenter:unsubscribe(MessageType.PLAYER_FARM_CHANGED, self)
     end

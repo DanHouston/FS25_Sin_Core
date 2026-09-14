@@ -385,7 +385,7 @@ class PairingAgent:
                 event = dict(root.attrib)
                 event["payload"] = {key: value for key, value in event.items() if key not in required}
                 if event["event_type"] not in {"heartbeat", "player_connected", "player_disconnected",
-                                                "player_activity_minute"}:
+                                                "player_activity_minute", "chat_message"}:
                     raise ValueError("unsupported event type")
                 self._post_event(event)
                 path.unlink()

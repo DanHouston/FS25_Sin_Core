@@ -1,7 +1,8 @@
 import unittest
 from unittest.mock import MagicMock
 
-from fs25_network_core.activity_telemetry import ActivityMinuteTracker, ActivityTelemetryProcessor
+from fs25_network_core.activity_telemetry import (ActivityMinuteTracker, ActivityTelemetryProcessor,
+                                                  ActivitySessionProcessor)
 
 
 class ActivityMinuteTrackerTests(unittest.TestCase):
@@ -96,6 +97,13 @@ class ActivityTelemetryPersistenceTests(unittest.TestCase):
         aggregate_filters = [call.args[0] for call in self.db.player_activity_aggregates.update_one.call_args_list]
         self.assertEqual(aggregate_filters[0]["_id"], aggregate_filters[1]["_id"])
 
+    def test_event_storage_id_is_scoped_by_server_and_save(self):
+        self.processor.process("server-a", "save", "event-1", self.payload())
+        self.processor.process("server-b", "save", "event-1", self.payload())
+        documents = [call.args[0] for call in self.db.player_activity_minutes.insert_one.call_args_list]
+        self.assertEqual(len(documents), 2)
+        self.assertNotEqual(documents[0]["_id"], documents[1]["_id"])
+
     def test_pseudo_user_is_ignored(self):
         result = self.processor.process("server", "save", "event-server", self.payload(
             user_id="1", farm_id="0", display_name="Server"))
@@ -106,3 +114,36 @@ class ActivityTelemetryPersistenceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.processor.process("server", "save", "event-invalid", self.payload(
                 activity_bucket="afk", inactive_minutes=10))
+
+
+class ActivitySessionPersistenceTests(unittest.TestCase):
+    def setUp(self):
+        self.database = MagicMock()
+        self.db = self.database.db
+        self.db.player_activity_sessions.find_one.return_value = None
+        self.processor = ActivitySessionProcessor(self.database)
+
+    def payload(self, **changes):
+        result = {"unique_user_id": "stable-player", "user_id": "2", "farm_id": "1",
+                  "display_name": "Observed", "session_id": "session-1"}
+        result.update(changes)
+        return result
+
+    def test_connect_disconnect_creates_one_completed_session(self):
+        connected = self.processor.connected("server", "save", "connect-event", self.payload())
+        self.assertEqual(connected["session_id"], "session-1")
+        self.db.player_activity_sessions.find_one.return_value = {
+            "_id": "session-key", "state": "active"}
+        disconnected = self.processor.disconnected("server", "save", "disconnect-event", self.payload())
+        self.assertFalse(disconnected["duplicate"])
+        update = self.db.player_activity_sessions.update_one.call_args.args[1]
+        self.assertEqual(update["$set"]["state"], "completed")
+        self.db.player_activity_sessions.find_one.return_value = {"state": "completed"}
+        duplicate = self.processor.disconnected("server", "save", "disconnect-retry", self.payload())
+        self.assertTrue(duplicate["duplicate"])
+
+    def test_dedicated_server_session_is_ignored(self):
+        result = self.processor.connected("server", "save", "event", self.payload(
+            user_id="1", farm_id="0", display_name="Server"))
+        self.assertTrue(result["ignored"])
+        self.db.player_activity_sessions.update_one.assert_not_called()

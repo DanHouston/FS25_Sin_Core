@@ -2,7 +2,8 @@ import unittest
 from unittest.mock import MagicMock
 from pymongo.errors import DuplicateKeyError
 
-from fs25_network_core.event_processing import CentralEventProcessor, EventAuthenticationError, EventScopeError
+from fs25_network_core.event_processing import (CentralEventProcessor, EventAuthenticationError,
+                                                EventScopeError, scoped_event_id)
 
 
 class EventProcessingTests(unittest.TestCase):
@@ -48,6 +49,22 @@ class EventProcessingTests(unittest.TestCase):
         self.assertTrue(result["duplicate"])
         self.database.db.activity_outbox.insert_one.assert_not_called()
 
+    def test_processed_event_id_is_scoped_to_server_and_save(self):
+        self.database.db.processed_server_events.find_one.return_value = None
+        self.processor.process(self.event("heartbeat"))
+        query = self.database.db.processed_server_events.find_one.call_args.args[0]
+        self.assertEqual(query["_id"], scoped_event_id("sin-fs25-01", "main-save", "event-1"))
+        self.assertNotEqual(query["_id"], scoped_event_id("another-server", "main-save", "event-1"))
+        self.assertNotEqual(query["_id"], scoped_event_id("sin-fs25-01", "other-save", "event-1"))
+
+    def test_activity_outbox_receives_save_scope(self):
+        self.database.db.processed_server_events.find_one.return_value = None
+        self.processor.process(self.event("player_connected"))
+        document = self.database.db.activity_outbox.insert_one.call_args.args[0]
+        self.assertEqual(document["server_key"], "sin-fs25-01")
+        self.assertEqual(document["save_key"], "main-save")
+        self.assertEqual(document["_id"], document["activity_id"])
+
     def test_duplicate_processed_event_key_is_safe(self):
         self.database.db.processed_server_events.insert_one.side_effect = DuplicateKeyError("duplicate key")
         result = self.processor.process(self.event("heartbeat"))
@@ -65,3 +82,21 @@ class EventProcessingTests(unittest.TestCase):
         self.processor.telemetry.process.assert_called_once_with(
             "sin-fs25-01", "main-save", "event-1", event["payload"])
         self.processor.authorization.activity_message.assert_not_called()
+
+    def test_chat_message_uses_existing_authenticated_event_transport(self):
+        self.processor.chat = MagicMock()
+        self.processor.chat.ingest_fs25.return_value = {"message_id": "message-1"}
+        event = self.event("chat_message")
+        event["payload"] = {"message_id": "message-1", "message": "hello", "source": "fs25"}
+        result = self.processor.process(event)
+        self.assertEqual(result["message_id"], "message-1")
+        self.processor.chat.ingest_fs25.assert_called_once_with(
+            "sin-fs25-01", "main-save", "event-1", event["payload"])
+
+    def test_lifecycle_event_without_session_id_remains_compatible(self):
+        self.processor.telemetry_sessions = MagicMock()
+        self.processor.telemetry_sessions.connected.return_value = {"status": "accepted"}
+        result = self.processor.process(self.event("player_connected"))
+        self.assertEqual(result["status"], "accepted")
+        payload = self.processor.telemetry_sessions.connected.call_args.args[3]
+        self.assertEqual(payload["session_id"], "event-1")

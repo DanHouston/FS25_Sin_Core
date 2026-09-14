@@ -209,6 +209,32 @@ class DeploymentPackagingTests(unittest.TestCase):
             self.assertFalse(stage.exists())
             self.assertNotIn("secret", result.stdout + result.stderr)
 
+    def test_updater_ignores_and_archives_empty_legacy_skeleton_when_canonical_is_populated(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("pwsh")
+        if powershell is None:
+            self.skipTest("PowerShell is not installed on this runner")
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            new = root / "FS25_SiN_Server"
+            binding = b'<serverBinding serverKey="opaque" credential="not-printed"/>'
+            new.mkdir()
+            (new / "serverBinding.xml").write_bytes(binding)
+            (new / "events").mkdir()
+            old = root / "FS25_SiN_NetworkLocal"
+            (old / "events").mkdir(parents=True)
+            (old / "permission-commands").mkdir()
+            (old / "registration-requests").mkdir()
+
+            result = self._run_migration(new)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((new / "serverBinding.xml").read_bytes(), binding)
+            self.assertFalse(old.exists())
+            archive_root = root / "FS25_SiN_Server.migration-archive"
+            archived = list(archive_root.rglob("FS25_SiN_NetworkLocal"))
+            self.assertEqual(len(archived), 1)
+            self.assertNotIn("not-printed", result.stdout + result.stderr)
+
     def test_updater_keeps_agent_stopped_if_mailbox_migration_fails(self):
         source = (self.root / "scripts" / "Update-SiN.ps1").read_text(encoding="utf-8")
         stop_before_migration = source.index("    Stop-Agent\n    # Migration")

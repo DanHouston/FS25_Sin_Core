@@ -5,6 +5,7 @@ adapter emits one completed-minute observation; this central component validates
 and durably projects it into an interval history and cumulative player totals.
 """
 import hashlib
+import logging
 from datetime import datetime, timezone
 
 from pymongo.errors import DuplicateKeyError
@@ -14,6 +15,7 @@ ACTIVITY_EVENT_TYPE = "player_activity_minute"
 ACTIVITY_BUCKETS = {"active", "idle", "afk"}
 DEFAULT_AFK_THRESHOLD_MINUTES = 10
 DEFAULT_MOVEMENT_TOLERANCE_METERS = 0.5
+LOG = logging.getLogger(__name__)
 
 
 class ActivityTelemetryError(ValueError):
@@ -135,9 +137,14 @@ class ActivityTelemetryProcessor:
 
         def apply(session=None):
             if self.db.player_activity_minutes.find_one({"interval_key": interval_key}, session=session):
+                LOG.info("[SiN Telemetry] duplicate interval ignored serverKey=%s saveKey=%s player=%s session=%s minute=%s",
+                         server_key, save_key, values["unique_id"], values["session_id"],
+                         values["minute_sequence"])
                 return {"status": "accepted", "duplicate": True, "save_key": save_key}
             self.db.player_activity_minutes.insert_one({
-                "_id": str(event_id), "interval_key": interval_key,
+                # Event IDs are only unique within a server/save mailbox
+                # stream; scope the Mongo _id as well as the interval key.
+                "_id": _key(server_key, save_key, "event", event_id), "interval_key": interval_key,
                 "server_key": server_key, "save_key": save_key,
                 "fs25_unique_user_id": values["unique_id"],
                 "session_id": values["session_id"],
@@ -162,6 +169,20 @@ class ActivityTelemetryProcessor:
                 {"_id": aggregate_id},
                 {"$setOnInsert": insert_values,
                  "$set": current, "$inc": increments}, upsert=True, session=session)
+            session_id = values["session_id"]
+            session_key = _key(server_key, save_key, values["unique_id"], session_id)
+            session_insert = {"_id": session_key, "server_key": server_key, "save_key": save_key,
+                              "fs25_unique_user_id": values["unique_id"], "session_id": session_id,
+                              "connected_at": now, "state": "active", "created_at": now}
+            self.db.player_activity_sessions.update_one(
+                {"_id": session_key},
+                {"$setOnInsert": session_insert,
+                 "$set": {"last_seen_at": now, "current_state": values["bucket"],
+                           "current_inactive_minutes": values["inactive_minutes"], "updated_at": now},
+                  "$inc": dict(increments, total_counted_minutes=1)}, upsert=True, session=session)
+            LOG.info("[SiN Telemetry] activity interval accepted serverKey=%s saveKey=%s player=%s session=%s minute=%s bucket=%s",
+                     server_key, save_key, values["unique_id"], session_id,
+                     values["minute_sequence"], values["bucket"])
             return {"status": "accepted", "duplicate": False, "save_key": save_key}
 
         try:
@@ -170,3 +191,85 @@ class ActivityTelemetryProcessor:
             # A retry may race another delivery using either the same event ID
             # or a different event ID for the same deterministic minute.
             return {"status": "accepted", "duplicate": True, "save_key": save_key}
+
+    def status(self, server_key, save_key, unique_user_id):
+        """Return aggregate/session diagnostics without exposing coordinates."""
+        unique_user_id = str(unique_user_id or "").strip()
+        if not unique_user_id:
+            raise ActivityTelemetryError("stable player identity is required")
+        aggregate = self.db.player_activity_aggregates.find_one({
+            "server_key": str(server_key), "save_key": str(save_key),
+            "fs25_unique_user_id": unique_user_id})
+        sessions = list(self.db.player_activity_sessions.find({
+            "server_key": str(server_key), "save_key": str(save_key),
+            "fs25_unique_user_id": unique_user_id}).sort("connected_at", -1).limit(5))
+        return {"aggregate": aggregate, "sessions": sessions}
+
+
+class ActivitySessionProcessor:
+    """Idempotent connection/session lifecycle projection for telemetry."""
+
+    def __init__(self, database):
+        self.database = database
+        self.db = database.db
+
+    @staticmethod
+    def _identity(payload):
+        if not isinstance(payload, dict):
+            raise ActivityTelemetryError("session payload must be an object")
+        unique_id = str(payload.get("unique_user_id", "")).strip()
+        session_id = str(payload.get("session_id", "")).strip()
+        if not unique_id or not session_id:
+            raise ActivityTelemetryError("session identity is required")
+        if is_dedicated_server_user(payload):
+            return None
+        return unique_id, session_id
+
+    def connected(self, server_key, save_key, event_id, payload):
+        values = self._identity(payload)
+        if values is None:
+            return {"status": "accepted", "ignored": True, "duplicate": False, "save_key": save_key}
+        unique_id, session_id = values
+        now = datetime.now(timezone.utc)
+        session_key = _key(server_key, save_key, unique_id, session_id)
+        self.db.player_activity_sessions.update_one(
+            {"_id": session_key},
+            {"$setOnInsert": {"_id": session_key, "server_key": server_key,
+                               "save_key": save_key, "fs25_unique_user_id": unique_id,
+                               "session_id": session_id, "connected_at": now,
+                               "state": "active", "created_at": now},
+             "$set": {"last_seen_at": now, "updated_at": now,
+                       "transient_user_id": str(payload.get("user_id", "")),
+                       "observed_farm_id": str(payload.get("farm_id", "0")),
+                       "observed_display_name": str(payload.get("display_name", ""))}},
+            upsert=True)
+        LOG.info("[SiN Telemetry] session observed/started serverKey=%s saveKey=%s player=%s session=%s",
+                 server_key, save_key, unique_id, session_id)
+        return {"status": "accepted", "duplicate": False, "save_key": save_key,
+                "session_id": session_id}
+
+    def disconnected(self, server_key, save_key, event_id, payload):
+        values = self._identity(payload)
+        if values is None:
+            return {"status": "accepted", "ignored": True, "duplicate": False, "save_key": save_key}
+        unique_id, session_id = values
+        now = datetime.now(timezone.utc)
+        session_key = _key(server_key, save_key, unique_id, session_id)
+        existing = self.db.player_activity_sessions.find_one({"_id": session_key})
+        if existing and existing.get("state") == "completed":
+            LOG.info("[SiN Telemetry] duplicate session completion ignored serverKey=%s saveKey=%s player=%s session=%s",
+                     server_key, save_key, unique_id, session_id)
+            return {"status": "accepted", "duplicate": True, "save_key": save_key,
+                    "session_id": session_id}
+        self.db.player_activity_sessions.update_one(
+            {"_id": session_key},
+            {"$setOnInsert": {"_id": session_key, "server_key": server_key,
+                               "save_key": save_key, "fs25_unique_user_id": unique_id,
+                               "session_id": session_id, "connected_at": now,
+                               "created_at": now},
+             "$set": {"state": "completed", "disconnected_at": now,
+                       "last_seen_at": now, "updated_at": now}}, upsert=True)
+        LOG.info("[SiN Telemetry] session completed serverKey=%s saveKey=%s player=%s session=%s",
+                 server_key, save_key, unique_id, session_id)
+        return {"status": "accepted", "duplicate": False, "save_key": save_key,
+                "session_id": session_id}

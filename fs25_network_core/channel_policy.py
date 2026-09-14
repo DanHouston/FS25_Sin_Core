@@ -19,6 +19,30 @@ COMMAND_CHANNELS = {
     "withdraw": "bank",
     "farm_assign": "farm_approvals",
     "server_reconcile": "farm_approvals",
+    "activity_status": "farm_approvals",
+    "chat_send": "farm_approvals",
+    "contract_create": "link_account",
+    "contract_list": "link_account",
+    "contract_view": "link_account",
+    "contract_accept": "link_account",
+    "contract_cancel": "link_account",
+    "contract_complete": "link_account",
+    "invoice_create": "link_account",
+    "invoice_list": "link_account",
+    "invoice_view": "link_account",
+    "invoice_pay": "link_account",
+    "invoice_cancel": "link_account",
+    "event_create": "farm_approvals",
+    "event_list": "link_account",
+    "event_view": "link_account",
+    "event_join": "link_account",
+    "event_leave": "link_account",
+    "event_cancel": "farm_approvals",
+    "event_complete": "farm_approvals",
+    "transfer_request": "farm_approvals",
+    "transfer_list": "farm_approvals",
+    "transfer_accept": "farm_approvals",
+    "transfer_dispatch": "farm_approvals",
 }
 
 # Member self-service commands still require the configured guild, but their
@@ -26,6 +50,9 @@ COMMAND_CHANNELS = {
 # boundary. Staff/operator workflows remain channel-scoped below.
 UNRESTRICTED_MEMBER_COMMANDS = {
     "apply", "register", "farm_request", "farm_status", "balance", "deposit", "withdraw",
+    "contract_create", "contract_list", "contract_view", "contract_accept", "contract_cancel",
+    "contract_complete", "invoice_create", "invoice_list", "invoice_view", "invoice_pay",
+    "invoice_cancel", "event_list", "event_view", "event_join", "event_leave",
 }
 
 

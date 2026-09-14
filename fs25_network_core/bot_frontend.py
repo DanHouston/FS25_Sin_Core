@@ -16,6 +16,9 @@ from .channel_policy import require_command_channel
 from .community import CommunityApplications
 from .server_registry import ServerRegistry
 from .activity import ActivityPublisher
+from .activity_telemetry import ActivityTelemetryProcessor
+from .business_workflows import (ChatService, ContractService, InvoiceService,
+                                  CommunityEventService, TransferService)
 from .farm_lifecycle import FarmLifecycle, SYSTEM_FARM_NAME
 
 
@@ -47,6 +50,12 @@ class NetworkBot(discord.Client):
         self.server_registry = ServerRegistry(bank.database)
         self.farm_lifecycle = FarmLifecycle(bank.database, self.authorization)
         self.activity_publisher = ActivityPublisher(self, bank.database)
+        self.telemetry = ActivityTelemetryProcessor(bank.database)
+        self.chat = ChatService(bank.database)
+        self.contracts = ContractService(bank.database)
+        self.invoices = InvoiceService(bank.database, bank)
+        self.community_events = CommunityEventService(bank.database)
+        self.transfers = TransferService(bank.database, self.authorization)
         self.sin_member_role_id = int(sin_member_role_id) if sin_member_role_id else None
         role_override = os.environ.get("DISCORD_OPERATOR_ROLE_IDS")
         self.operator_role_ids = (
@@ -477,12 +486,21 @@ class NetworkBot(discord.Client):
             value = await asyncio.to_thread(self.bank.balance, str(interaction.user.id))
             await interaction.followup.send(f"Available balance: {value:,}", ephemeral=True)
 
-        @self.tree.command(name="deposit", description="Learn how to credit a verified game transfer")
+        @self.tree.command(name="deposit", description="Queue a game-to-SiN bank deposit")
         @app_commands.check(channel_check)
-        async def deposit(interaction: discord.Interaction, amount: app_commands.Range[int, 1, 1_000_000_000]):
+        async def deposit(interaction: discord.Interaction, server: str,
+                          amount: app_commands.Range[int, 1, 1_000_000_000]):
+            config = server_config(interaction, server, "reconcile")
+            save_key = selected_save(config)
+            state = await asyncio.to_thread(self.bank.request_deposit, str(interaction.id),
+                                            str(interaction.user.id), server, save_key, amount)
             await interaction.response.send_message(
-                f"To deposit {amount:,}, transfer funds to your server's designated bank farm and give an operator the transfer ID. "
-                "Your wallet is credited after the sender and completed transfer are verified. This command does not credit funds.", ephemeral=True)
+                f"Deposit {interaction.id} is {state}. The game-side debit must be confirmed before your balance changes.",
+                ephemeral=True)
+
+        @deposit.autocomplete("server")
+        async def deposit_server_autocomplete(interaction: discord.Interaction, current: str):
+            return await server_choices(interaction, current, "reconcile")
 
         @self.tree.command(name="withdraw", description="Reserve funds for delivery to your approved farm")
         @app_commands.check(channel_check)
@@ -499,6 +517,227 @@ class NetworkBot(discord.Client):
 
         @withdraw.autocomplete("server")
         async def withdraw_server_autocomplete(interaction: discord.Interaction, current: str):
+            return await server_choices(interaction, current, "reconcile")
+
+        @self.tree.command(name="chat_send", description="Staff: send a message to an FS25 server chat")
+        @app_commands.check(channel_check)
+        @app_commands.default_permissions(administrator=True)
+        async def chat_send(interaction: discord.Interaction, server: str, message: str):
+            staff_check(interaction)
+            save_key = selected_save(server_config(interaction, server, "reconcile"))
+            operation_id = await asyncio.to_thread(self.chat.queue_to_fs25, server, save_key,
+                                                   str(interaction.user.id), message)
+            await interaction.response.send_message(
+                f"Game chat operation `{operation_id}` queued for the selected server.", ephemeral=True)
+
+        @chat_send.autocomplete("server")
+        async def chat_send_server_autocomplete(interaction: discord.Interaction, current: str):
+            return await server_choices(interaction, current, "reconcile")
+
+        @self.tree.command(name="contract_create", description="Create a SiN community contract")
+        @app_commands.check(channel_check)
+        async def contract_create(interaction: discord.Interaction, title: str, description: str,
+                                  value: app_commands.Range[int, 0, 1_000_000_000]):
+            record = await asyncio.to_thread(self.contracts.create, str(interaction.user.id), title,
+                                             description, value)
+            await interaction.response.send_message(f"Contract `{record['contract_id']}` created and open.", ephemeral=True)
+
+        @self.tree.command(name="contract_list", description="List open SiN contracts")
+        @app_commands.check(channel_check)
+        async def contract_list(interaction: discord.Interaction):
+            records = await asyncio.to_thread(self.contracts.open)
+            text = "\n".join(f"`{r['contract_id']}` **{r['title']}** — {r['value']:,}" for r in records)
+            await interaction.response.send_message(text or "No open contracts.", ephemeral=True)
+
+        @self.tree.command(name="contract_view", description="View a SiN contract")
+        @app_commands.check(channel_check)
+        async def contract_view(interaction: discord.Interaction, contract_id: str):
+            record = await asyncio.to_thread(self.contracts.get, contract_id)
+            if not record:
+                raise ValueError("Unknown contract")
+            await interaction.response.send_message(
+                f"**{record['title']}**\n{record['description']}\nStatus: {record['status']}\n"
+                f"Value: {record['value']:,}\nID: `{record['contract_id']}`", ephemeral=True)
+
+        @self.tree.command(name="contract_accept", description="Accept an open SiN contract")
+        @app_commands.check(channel_check)
+        async def contract_accept(interaction: discord.Interaction, contract_id: str):
+            record = await asyncio.to_thread(self.contracts.accept, contract_id, str(interaction.user.id))
+            await interaction.response.send_message(f"Contract `{record['contract_id']}` accepted.", ephemeral=True)
+
+        @self.tree.command(name="contract_cancel", description="Cancel your SiN contract")
+        @app_commands.check(channel_check)
+        async def contract_cancel(interaction: discord.Interaction, contract_id: str, reason: str):
+            record = await asyncio.to_thread(self.contracts.cancel, contract_id, str(interaction.user.id), reason)
+            await interaction.response.send_message(f"Contract `{record['contract_id']}` cancelled.", ephemeral=True)
+
+        @self.tree.command(name="contract_complete", description="Complete a SiN contract")
+        @app_commands.check(channel_check)
+        async def contract_complete(interaction: discord.Interaction, contract_id: str, note: str = ""):
+            record = await asyncio.to_thread(self.contracts.complete, contract_id, str(interaction.user.id), note)
+            await interaction.response.send_message(f"Contract `{record['contract_id']}` completed.", ephemeral=True)
+
+        @self.tree.command(name="invoice_create", description="Issue a SiN invoice")
+        @app_commands.check(channel_check)
+        async def invoice_create(interaction: discord.Interaction, recipient: discord.Member,
+                                 amount: app_commands.Range[int, 1, 1_000_000_000], description: str):
+            record = await asyncio.to_thread(self.invoices.create, str(interaction.user.id),
+                                             str(recipient.id), amount, description)
+            await interaction.response.send_message(f"Invoice `{record['invoice_id']}` issued.", ephemeral=True)
+
+        @self.tree.command(name="invoice_list", description="List your SiN invoices")
+        @app_commands.check(channel_check)
+        async def invoice_list(interaction: discord.Interaction):
+            records = await asyncio.to_thread(self.invoices.list_for, str(interaction.user.id))
+            text = "\n".join(f"`{r['invoice_id']}` {r['status']} — {r['amount']:,} — {r['description']}" for r in records)
+            await interaction.response.send_message(text or "No invoices.", ephemeral=True)
+
+        @self.tree.command(name="invoice_view", description="View a SiN invoice")
+        @app_commands.check(channel_check)
+        async def invoice_view(interaction: discord.Interaction, invoice_id: str):
+            record = await asyncio.to_thread(self.invoices.get, invoice_id)
+            if not record or str(interaction.user.id) not in {record.get('issuer_discord_id'), record.get('recipient_discord_id')}:
+                raise ValueError("Unknown invoice")
+            await interaction.response.send_message(
+                f"Invoice `{record['invoice_id']}`\nAmount: {record['amount']:,}\n"
+                f"Status: {record['status']}\n{record['description']}", ephemeral=True)
+
+        @self.tree.command(name="invoice_pay", description="Pay a SiN invoice")
+        @app_commands.check(channel_check)
+        async def invoice_pay(interaction: discord.Interaction, invoice_id: str):
+            record = await asyncio.to_thread(self.invoices.pay, invoice_id, str(interaction.user.id))
+            await interaction.response.send_message(f"Invoice `{record['invoice_id']}` is {record['status']}.", ephemeral=True)
+
+        @self.tree.command(name="invoice_cancel", description="Cancel an issued SiN invoice")
+        @app_commands.check(channel_check)
+        async def invoice_cancel(interaction: discord.Interaction, invoice_id: str):
+            record = await asyncio.to_thread(self.invoices.cancel, invoice_id, str(interaction.user.id))
+            await interaction.response.send_message(f"Invoice `{record['invoice_id']}` cancelled.", ephemeral=True)
+
+        @self.tree.command(name="event_create", description="Staff: create a SiN community event")
+        @app_commands.check(channel_check)
+        @app_commands.default_permissions(administrator=True)
+        async def event_create(interaction: discord.Interaction, name: str, description: str, scheduled_start: str):
+            staff_check(interaction)
+            record = await asyncio.to_thread(self.community_events.create, str(interaction.user.id), name,
+                                             description, scheduled_start)
+            await interaction.response.send_message(f"Community event `{record['event_id']}` scheduled.", ephemeral=True)
+
+        @self.tree.command(name="event_list", description="List SiN community events")
+        @app_commands.check(channel_check)
+        async def event_list(interaction: discord.Interaction):
+            records = await asyncio.to_thread(self.community_events.list)
+            text = "\n".join(f"`{r['event_id']}` **{r['name']}** — {r['status']} — {r['scheduled_start']}" for r in records)
+            await interaction.response.send_message(text or "No community events.", ephemeral=True)
+
+        @self.tree.command(name="event_view", description="View a SiN community event")
+        @app_commands.check(channel_check)
+        async def event_view(interaction: discord.Interaction, event_id: str):
+            record = await asyncio.to_thread(self.community_events.get, event_id)
+            if not record:
+                raise ValueError("Unknown community event")
+            await interaction.response.send_message(
+                f"**{record['name']}**\n{record['description']}\nStatus: {record['status']}\n"
+                f"Participants: {len(record.get('participants', []))}\nID: `{record['event_id']}`", ephemeral=True)
+
+        @self.tree.command(name="event_join", description="Join a SiN community event")
+        @app_commands.check(channel_check)
+        async def event_join(interaction: discord.Interaction, event_id: str):
+            record = await asyncio.to_thread(self.community_events.join, event_id, str(interaction.user.id))
+            await interaction.response.send_message(f"Joined **{record['name']}**.", ephemeral=True)
+
+        @self.tree.command(name="event_leave", description="Leave a SiN community event")
+        @app_commands.check(channel_check)
+        async def event_leave(interaction: discord.Interaction, event_id: str):
+            record = await asyncio.to_thread(self.community_events.leave, event_id, str(interaction.user.id))
+            await interaction.response.send_message(f"Left **{record['name']}**.", ephemeral=True)
+
+        @self.tree.command(name="event_cancel", description="Staff: cancel a SiN community event")
+        @app_commands.check(channel_check)
+        @app_commands.default_permissions(administrator=True)
+        async def event_cancel(interaction: discord.Interaction, event_id: str):
+            staff_check(interaction)
+            record = await asyncio.to_thread(self.community_events.finish, event_id, str(interaction.user.id), "cancelled", True)
+            await interaction.response.send_message(f"Event `{record['event_id']}` cancelled.", ephemeral=True)
+
+        @self.tree.command(name="event_complete", description="Staff: complete a SiN community event")
+        @app_commands.check(channel_check)
+        @app_commands.default_permissions(administrator=True)
+        async def event_complete(interaction: discord.Interaction, event_id: str):
+            staff_check(interaction)
+            record = await asyncio.to_thread(self.community_events.finish, event_id, str(interaction.user.id), "completed", True)
+            await interaction.response.send_message(f"Event `{record['event_id']}` completed.", ephemeral=True)
+
+        @self.tree.command(name="transfer_request", description="Staff: request a durable farm transfer")
+        @app_commands.check(channel_check)
+        @app_commands.default_permissions(administrator=True)
+        @app_commands.choices(kind=[app_commands.Choice(name="Vehicle", value="vehicle"),
+                                    app_commands.Choice(name="Product", value="product")])
+        async def transfer_request(interaction: discord.Interaction, kind: app_commands.Choice[str], server: str,
+                                   source_farm_id: app_commands.Range[int, 1], destination_farm_id: app_commands.Range[int, 1],
+                                   item: str, quantity: float):
+            staff_check(interaction)
+            save_key = selected_save(server_config(interaction, server, "reconcile"))
+            record = await asyncio.to_thread(self.transfers.create, kind.value, str(interaction.user.id), server,
+                                             save_key, source_farm_id, destination_farm_id, item, quantity)
+            await interaction.response.send_message(f"Transfer `{record['transfer_id']}` requested.", ephemeral=True)
+
+        @transfer_request.autocomplete("server")
+        async def transfer_request_server_autocomplete(interaction: discord.Interaction, current: str):
+            return await server_choices(interaction, current, "reconcile")
+
+        @self.tree.command(name="transfer_list", description="Staff: list durable farm transfers")
+        @app_commands.check(channel_check)
+        @app_commands.default_permissions(administrator=True)
+        async def transfer_list(interaction: discord.Interaction):
+            staff_check(interaction)
+            records = await asyncio.to_thread(lambda: list(self.transfers.db.transfers.find({}).sort("created_at", -1).limit(50)))
+            text = "\n".join(f"`{r['transfer_id']}` {r['kind']} {r['item']} — {r['status']}" for r in records)
+            await interaction.response.send_message(text or "No transfers.", ephemeral=True)
+
+        @self.tree.command(name="transfer_accept", description="Staff: accept a durable farm transfer")
+        @app_commands.check(channel_check)
+        @app_commands.default_permissions(administrator=True)
+        async def transfer_accept(interaction: discord.Interaction, transfer_id: str):
+            staff_check(interaction)
+            record = await asyncio.to_thread(self.transfers.accept, transfer_id, str(interaction.user.id))
+            await interaction.response.send_message(f"Transfer `{record['transfer_id']}` accepted.", ephemeral=True)
+
+        @self.tree.command(name="transfer_dispatch", description="Staff: queue an accepted transfer for FS25")
+        @app_commands.check(channel_check)
+        @app_commands.default_permissions(administrator=True)
+        async def transfer_dispatch(interaction: discord.Interaction, transfer_id: str):
+            staff_check(interaction)
+            operation_id = await asyncio.to_thread(self.transfers.queue_game_operation, transfer_id, str(interaction.user.id))
+            await interaction.response.send_message(f"Transfer operation `{operation_id}` queued; receipt confirmation is required.", ephemeral=True)
+
+        @self.tree.command(name="activity_status", description="Staff: inspect a player's SiN activity telemetry")
+        @app_commands.check(channel_check)
+        @app_commands.default_permissions(administrator=True)
+        async def activity_status(interaction: discord.Interaction, server: str, unique_user_id: str):
+            staff_check(interaction)
+            config = server_config(interaction, server, "reconcile")
+            save_key = selected_save(config)
+            await interaction.response.defer(ephemeral=True)
+            status = await asyncio.to_thread(self.telemetry.status, server, save_key, unique_user_id)
+            aggregate = status.get("aggregate") or {}
+            sessions = status.get("sessions") or []
+            if not aggregate and not sessions:
+                await interaction.followup.send("No activity telemetry is recorded for that stable FS25 identity.", ephemeral=True)
+                return
+            message = (f"Player: `{unique_user_id}`\nServer: {server}\nSave: {save_key}\n"
+                       f"Connected: {aggregate.get('connected_minutes', 0)} min\n"
+                       f"Active: {aggregate.get('active_minutes', 0)} min\n"
+                       f"Idle: {aggregate.get('idle_minutes', 0)} min\n"
+                       f"AFK: {aggregate.get('afk_minutes', 0)} min\n"
+                       f"Current: {aggregate.get('current_state', 'unknown')}\n"
+                       f"Inactivity streak: {aggregate.get('current_inactive_minutes', 0)} min\n"
+                       f"Sessions observed: {len(sessions)}")
+            await interaction.followup.send(message, ephemeral=True,
+                                            allowed_mentions=discord.AllowedMentions.none())
+
+        @activity_status.autocomplete("server")
+        async def activity_status_server_autocomplete(interaction: discord.Interaction, current: str):
             return await server_choices(interaction, current, "reconcile")
 
         @self.tree.error

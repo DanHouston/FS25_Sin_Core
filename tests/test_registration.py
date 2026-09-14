@@ -276,8 +276,16 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("function FS25SiNServer:enforceAuthorizedManagerState(user, farm, authorized, syncReason)", source)
         self.assertIn("farm.getUserPermissions", source)
         self.assertIn("farm:setUserPermission(userId, permission, true)", source)
-        self.assertIn("PlayerPermissionsEvent.sendEvent", source)
-        self.assertIn("pcall(PlayerPermissionsEvent.sendEvent, userId, permissions or {}, manager == true, false)", source)
+        self.assertIn("function FS25SiNServer:resolvePermissionRecipient(userId, farm)", source)
+        self.assertIn("farm.userIdToPlayer[userId]", source)
+        self.assertIn("player.connection", source)
+        self.assertIn("function FS25SiNServer:replicateFarmPermissions(userId, farm, permissions, manager, farmId, syncReason)", source)
+        self.assertIn("PlayerPermissionsEvent.new(userId, permissions or {}, manager == true)", source)
+        self.assertIn("pcall(connection.sendEvent, connection, event)", source)
+        for diagnostic in ("connectionPresent", "connectionUserId", "delivery=directConnection"):
+            self.assertIn(diagnostic, source)
+        self.assertNotIn("PlayerPermissionsEvent.sendEvent", source)
+        self.assertNotIn("g_server:broadcastEvent(event, nil, nil, player)", source)
         self.assertIn('self:enforceAuthorizedManagerState(user, farm, authorized, "immediate")', source)
         self.assertIn("beforeManager", source)
         self.assertIn("afterManager", source)
@@ -293,6 +301,7 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn('user, farm, authorized, "deferred")', source)
         self.assertIn('syncReason == "deferred"', source)
         self.assertIn("final client-sync", source)
+        self.assertIn("delivery=directConnection", source)
         self.assertIn("self:processDeferredManagerSyncs()", source)
 
     def test_server_runtime_periodic_manager_reconciliation_repairs_only_detected_drift(self):
@@ -322,6 +331,27 @@ class RegistrationTests(unittest.TestCase):
             self.assertNotIn(forbidden, command)
         self.assertIn("localPlayer=unavailable", command)
         self.assertIn("side=", command)
+
+    def test_sin_self_test_is_registered_read_only_and_counts_map_state(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8")
+        self.assertIn('addConsoleCommand("sinSelfTest"', source)
+        self.assertIn("function FS25SiNServer:consoleCommandSelfTest()", source)
+        self.assertIn("SiN Integration Self-Test", source)
+        self.assertIn("tableCount(self.activityStates)", source)
+        self.assertIn("tableCount(self.deferredManagerSyncs)", source)
+        start = source.index("function FS25SiNServer:consoleCommandSelfTest()")
+        end = source.index("function FS25SiNServer:update(dt)", start)
+        command = source[start:end]
+        for mutation in ("promoteUser", "demoteUser", "setUserPermission", "sendEvent", "emitServerEvent"):
+            self.assertNotIn(mutation, command)
+
+    def test_chat_operation_has_safe_runtime_boundary_and_event_schema(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8")
+        self.assertIn('operationType == "chat_message"', source)
+        self.assertIn('permissionReceipt#status", "pending_validation"', source)
+        self.assertIn("FS25 chat display API requires live runtime verification", source)
 
     def test_server_runtime_has_no_fixed_system_farm_id_assumption(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(

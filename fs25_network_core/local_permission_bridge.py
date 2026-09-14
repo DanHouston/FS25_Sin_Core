@@ -166,11 +166,15 @@ class LocalPermissionBridge:
                     if not was_online:
                         from .activity import ActivityOutbox
                         name = record.get("display_name") or record["server_key"]
-                        ActivityOutbox(self.authorization.database).enqueue(event_id, record["server_key"], "server_online", f"🟢 Server Online\n{name} is connected to SiN JiN.")
+                        ActivityOutbox(self.authorization.database).enqueue(
+                            event_id, record["server_key"], "server_online",
+                            f"🟢 Server Online\n{name} is connected to SiN JiN.", save_key=self.save_id)
                 elif event_type in {"player_connected", "player_disconnected"}:
                     details = dict(event.get("payload") or {}, event_type=event_type)
                     from .activity import ActivityOutbox
-                    ActivityOutbox(self.authorization.database).enqueue(event_id, record["server_key"], event_type, self.activity_message(record, details))
+                    ActivityOutbox(self.authorization.database).enqueue(
+                        event_id, record["server_key"], event_type,
+                        self.activity_message(record, details), save_key=self.save_id)
                 LOG.info("[SiN Bridge] processed type=%s serverKey=%s", event_type, record["server_key"])
                 self.authorization.db.processed_server_events.insert_one({"_id": event_id, "server_key": record["server_key"], "processed_at": now})
                 path.unlink(); processed.append(event_id)

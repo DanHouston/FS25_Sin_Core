@@ -217,6 +217,25 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
                     int(receipt["owner_farm_id"]), receipt.get("status") == "applied",
                     receipt.get("receipt"))
                 result = {"operation_id": receipt["operation_id"], "state": result}
+            elif receipt.get("operation_type") in {"vehicle_transfer", "product_transfer"}:
+                result = self.event_processor.transfers.accept_receipt(
+                    receipt["transfer_id"], receipt, record["server_key"], save_key)
+                result = {"operation_id": receipt["operation_id"], "state": result.get("status")}
+            elif receipt.get("operation_type") == "chat_message":
+                result = self.event_processor.chat.accept_receipt(
+                    receipt["operation_id"], receipt.get("status"), receipt.get("receipt"),
+                    record["server_key"], save_key)
+                result = {"operation_id": receipt["operation_id"], "state": result}
+            elif receipt.get("operation_type") == "withdraw_funds":
+                result = self.event_processor.banking.settle_withdrawal(
+                    receipt["withdrawal_id"], receipt.get("status"), receipt,
+                    record["server_key"], save_key)
+                result = {"operation_id": receipt["operation_id"], "state": result}
+            elif receipt.get("operation_type") == "deposit_funds":
+                result = self.event_processor.banking.settle_deposit(
+                    receipt["deposit_id"], receipt.get("status"), receipt,
+                    record["server_key"], save_key)
+                result = {"operation_id": receipt["operation_id"], "state": result}
             elif receipt.get("revision") is not None and receipt.get("operation_type") not in {"ensure_farm", "provision_farm"}:
                 result = self.event_processor.authorization.acknowledge(
                     receipt["operation_id"], record["server_key"], save_key,

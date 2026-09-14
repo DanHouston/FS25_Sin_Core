@@ -40,3 +40,46 @@ class DatabaseConfigurationTests(unittest.TestCase):
         self.assertIn("database = Database()", inspect.getsource(server_api.main))
         self.assertNotIn("Database(name=", inspect.getsource(bot_frontend.main))
         self.assertNotIn("Database(name=", inspect.getsource(server_api.main))
+
+    def test_legacy_event_indexes_are_replaced_only_when_exactly_matching(self):
+        collection = MagicMock()
+        collection.index_information.return_value = {
+            "server_id_1_save_id_1_event_id_1": {
+                "key": [("server_id", 1), ("save_id", 1), ("event_id", 1)],
+                "unique": True,
+            },
+            "source_event_id_1": {
+                "key": [("source_event_id", 1)],
+                "unique": True,
+            },
+            "unrelated": {
+                "key": [("event_id", 1)],
+                "unique": True,
+            },
+        }
+        Database._replace_legacy_unique_index(
+            collection,
+            [("source_event_id", 1)],
+            [("server_key", 1), ("save_key", 1), ("source_event_id", 1)],
+            name="activity_event_scope", unique=True)
+        collection.drop_index.assert_called_once_with("source_event_id_1")
+        collection.create_index.assert_called_once_with(
+            [("server_key", 1), ("save_key", 1), ("source_event_id", 1)],
+            name="activity_event_scope", unique=True)
+
+    def test_legacy_unique_index_with_partial_filter_is_not_dropped(self):
+        collection = MagicMock()
+        collection.index_information.return_value = {
+            "already_scoped": {
+                "key": [("server_id", 1), ("save_id", 1), ("event_id", 1)],
+                "unique": True,
+                "partialFilterExpression": {"event_id": {"$type": "string"}},
+            }
+        }
+        Database._replace_legacy_unique_index(
+            collection,
+            [("server_id", 1), ("save_id", 1), ("event_id", 1)],
+            [("server_id", 1), ("save_id", 1), ("event_id", 1)],
+            name="verified_transfer_event_scope", unique=True,
+            partialFilterExpression={"event_id": {"$type": "string"}})
+        collection.drop_index.assert_not_called()

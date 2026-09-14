@@ -1,5 +1,6 @@
 """Durable Discord activity outbox and publisher."""
 import asyncio
+import hashlib
 import logging
 from datetime import datetime, timezone
 import discord
@@ -9,9 +10,15 @@ LOG = logging.getLogger(__name__)
 
 class ActivityOutbox:
     def __init__(self, database): self.db = database.db
-    def enqueue(self, source_event_id, server_key, activity_type, message):
-        doc = {"_id": source_event_id, "activity_id": source_event_id, "source_event_id": source_event_id,
-               "server_key": server_key, "activity_type": activity_type, "message": message,
+    @staticmethod
+    def _scoped_id(source_event_id, server_key, save_key=None):
+        return hashlib.sha256("|".join((str(server_key), str(save_key or ""),
+                                         str(source_event_id))).encode("utf-8")).hexdigest()
+
+    def enqueue(self, source_event_id, server_key, activity_type, message, save_key=None):
+        scoped_id = self._scoped_id(source_event_id, server_key, save_key)
+        doc = {"_id": scoped_id, "activity_id": scoped_id, "source_event_id": source_event_id,
+               "server_key": server_key, "save_key": save_key, "activity_type": activity_type, "message": message,
                "created_at": datetime.now(timezone.utc), "status": "pending", "attempts": 0}
         try: self.db.activity_outbox.insert_one(doc)
         except DuplicateKeyError:
@@ -91,7 +98,9 @@ class ActivityPublisher:
             if missing:
                 permanent = True
                 raise ValueError("missing channel permissions: " + ", ".join(missing))
-            await channel.send(record["message"])
+            # FS25/Discord-originated text is untrusted community content;
+            # never let a mirrored message create Discord mentions.
+            await channel.send(record["message"], allowed_mentions=discord.AllowedMentions.none())
             self.outbox.db.activity_outbox.update_one({"_id": record["_id"], "status": "pending"}, {"$set": {"status": "published", "published_at": datetime.now(timezone.utc)}, "$inc": {"attempts": 1}})
             LOG.info("[SiN Activity] published type=%s serverKey=%s", record["activity_type"], record["server_key"])
         except discord.Forbidden as error:
@@ -107,6 +116,13 @@ class ActivityPublisher:
             self._record_failure(record, error, permanent)
 
     def _record_failure(self, record, error, permanent=False):
-            attempts = int(record.get("attempts", 0)) + 1; state = "failed" if permanent or attempts >= self.max_attempts else "pending"
-            self.outbox.db.activity_outbox.update_one({"_id": record["_id"], "status": "pending"}, {"$set": {"status": state, "last_error": str(error), "last_attempt_at": datetime.now(timezone.utc)}, "$inc": {"attempts": 1}})
-            LOG.warning("[SiN Activity] publish %s type=%s serverKey=%s attempt=%s error=%s: %s", "failed" if state == "failed" else "retry", record.get("activity_type"), record.get("server_key"), attempts, type(error).__name__, str(error))
+        attempts = int(record.get("attempts", 0)) + 1
+        state = "failed" if permanent or attempts >= self.max_attempts else "pending"
+        self.outbox.db.activity_outbox.update_one(
+            {"_id": record["_id"], "status": "pending"},
+            {"$set": {"status": state, "last_error": str(error),
+                      "last_attempt_at": datetime.now(timezone.utc)},
+             "$inc": {"attempts": 1}})
+        LOG.warning("[SiN Activity] publish %s type=%s serverKey=%s attempt=%s error=%s: %s",
+                    "failed" if state == "failed" else "retry", record.get("activity_type"),
+                    record.get("server_key"), attempts, type(error).__name__, str(error))
