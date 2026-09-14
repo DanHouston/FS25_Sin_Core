@@ -58,7 +58,7 @@ function FS25SiNServer:loadMap()
     self.clockHardFallbackLogged = false
     self.invalidFarmVisualStateLogged = {}
     self:installLifecycleHooks()
-    addConsoleCommand("sinPermissions", "List FS25 farm permission keys", "consoleCommandPermissions", self)
+    addConsoleCommand("sinPermissions", "Report local FS25 farm permission state", "consoleCommandPermissions", self)
     addConsoleCommand("sinPair", "Pair this server with a SiN pairing code", "consoleCommandPair", self)
     if g_messageCenter ~= nil and MessageType ~= nil and MessageType.PLAYER_FARM_CHANGED ~= nil then
         g_messageCenter:subscribe(MessageType.PLAYER_FARM_CHANGED, self.onPlayerFarmChanged, self)
@@ -621,12 +621,94 @@ function FS25SiNServer:enforceRegistration(user, farm)
     end
 end
 
+function FS25SiNServer:getDiagnosticExecutionSide()
+    local isServer = g_currentMission ~= nil and g_currentMission.getIsServer ~= nil
+        and g_currentMission:getIsServer()
+    local isClient = g_currentMission ~= nil and g_currentMission.getIsClient ~= nil
+        and g_currentMission:getIsClient()
+    if isServer and isClient then return "listen-server" end
+    if isServer then return "server" end
+    if isClient then return "client" end
+    return "unknown"
+end
+
+function FS25SiNServer:getDiagnosticLocalPlayer()
+    if g_localPlayer ~= nil then return g_localPlayer end
+    if g_currentMission ~= nil and g_currentMission.player ~= nil then
+        return g_currentMission.player
+    end
+    return nil
+end
+
+function FS25SiNServer:getDiagnosticUniqueUserId(player, userId)
+    if player ~= nil and player.getUniqueUserId ~= nil then
+        local ok, value = pcall(player.getUniqueUserId, player)
+        if ok and value ~= nil and tostring(value) ~= "" then return tostring(value) end
+    end
+    if g_currentMission ~= nil and g_currentMission.userManager ~= nil
+        and g_currentMission.userManager.getUniqueUserIdByUserId ~= nil and userId ~= nil then
+        local ok, value = pcall(g_currentMission.userManager.getUniqueUserIdByUserId,
+            g_currentMission.userManager, userId)
+        if ok and value ~= nil and tostring(value) ~= "" then return tostring(value) end
+    end
+    return nil
+end
+
 function FS25SiNServer:consoleCommandPermissions()
-    if Farm == nil or Farm.PERMISSION == nil then return "Farm permissions are unavailable" end
-    local keys = {}
-    for permission, _ in pairs(Farm.PERMISSION) do table.insert(keys, tostring(permission)) end
-    table.sort(keys)
-    return "FS25 permission keys: " .. table.concat(keys, ", ")
+    local lines = {"[SiN Diagnostic] side=" .. self:getDiagnosticExecutionSide()}
+    local player = self:getDiagnosticLocalPlayer()
+    if player == nil then
+        table.insert(lines, "[SiN Diagnostic] localPlayer=unavailable; no local client player exists on this side")
+        return table.concat(lines, "\n")
+    end
+
+    local userId = player.userId
+    local uniqueUserId = self:getDiagnosticUniqueUserId(player, userId)
+    local uniqueUserIdText = uniqueUserId ~= nil and self:shortIdentity(uniqueUserId) or "unavailable"
+    local farmId = player.farmId
+    local farm = nil
+    if farmId ~= nil and g_farmManager ~= nil and g_farmManager.getFarmById ~= nil then
+        local ok, value = pcall(g_farmManager.getFarmById, g_farmManager, farmId)
+        if ok then farm = value end
+    end
+    local farmName = farm ~= nil and tostring(farm.name or "") or "unavailable"
+    local farmObjectId = farm ~= nil and farm.farmId or nil
+    table.insert(lines, string.format("[SiN Diagnostic] local userId=%s uniqueUserId=%s farmId=%s farmObjectId=%s farm=\"%s\"",
+        tostring(userId or "unavailable"), uniqueUserIdText,
+        tostring(farmId or "unavailable"), tostring(farmObjectId or "unavailable"), farmName))
+    if farm == nil then
+        table.insert(lines, "[SiN Diagnostic] current farm object=unavailable")
+        return table.concat(lines, "\n")
+    end
+
+    local managerText = "unavailable"
+    local permissions = nil
+    if userId ~= nil and farm.isUserFarmManager ~= nil then
+        local ok, value = pcall(farm.isUserFarmManager, farm, userId)
+        if ok then managerText = tostring(value == true) end
+    end
+    if userId ~= nil and farm.getUserPermissions ~= nil then
+        local ok, value = pcall(farm.getUserPermissions, farm, userId)
+        if ok and type(value) == "table" then permissions = value end
+    end
+    if permissions == nil then
+        table.insert(lines, "[SiN Diagnostic] farmManager=" .. managerText .. " permissions=unavailable")
+        return table.concat(lines, "\n")
+    end
+
+    local permissionCount, grantedPermissions = self:countFarmPermissions(permissions)
+    table.insert(lines, string.format("[SiN Diagnostic] farmManager=%s permissionCount=%s grantedPermissions=%s",
+        managerText, tostring(permissionCount), tostring(grantedPermissions)))
+    local permissionKeys = self:getFarmPermissionKeys(farm, permissions)
+    local sortedPermissions = {}
+    for permission, _ in pairs(permissionKeys) do table.insert(sortedPermissions, tostring(permission)) end
+    table.sort(sortedPermissions)
+    for _, permission in ipairs(sortedPermissions) do
+        local value = permissions[permission]
+        table.insert(lines, string.format("[SiN Diagnostic] permission %s=%s", permission,
+            value == nil and "nil" or tostring(value == true)))
+    end
+    return table.concat(lines, "\n")
 end
 
 function FS25SiNServer:update(dt)

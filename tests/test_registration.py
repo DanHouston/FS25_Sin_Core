@@ -307,6 +307,22 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("permission drift repaired", source)
         self.assertIn("pcall(self.reconcileManagerAuthorityDrift, self)", source)
 
+    def test_sin_permissions_reports_local_client_state_read_only(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8")
+        self.assertIn('addConsoleCommand("sinPermissions"', source)
+        start = source.index("function FS25SiNServer:consoleCommandPermissions()")
+        end = source.index("function FS25SiNServer:update(dt)", start)
+        command = source[start:end]
+        for field in ("getDiagnosticExecutionSide", "getDiagnosticLocalPlayer", "farmId", "userId",
+                      "farmObjectId", "getDiagnosticUniqueUserId", "isUserFarmManager", "getUserPermissions",
+                      "permissionCount", "grantedPermissions", "permission "):
+            self.assertIn(field, command)
+        for forbidden in ("promoteUser", "demoteUser", "setUserPermission", "PlayerPermissionsEvent.sendEvent"):
+            self.assertNotIn(forbidden, command)
+        self.assertIn("localPlayer=unavailable", command)
+        self.assertIn("side=", command)
+
     def test_server_runtime_has_no_fixed_system_farm_id_assumption(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
             encoding="utf-8")
