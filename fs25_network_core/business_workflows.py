@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import hashlib
 import re
 import uuid
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 MAX_TEXT = 1000
@@ -42,7 +43,7 @@ def _amount(value):
     return value
 
 
-def parse_scheduled_start(value):
+def parse_scheduled_start(value, default_timezone=None):
     """Parse an explicit ISO-8601 timestamp and normalize it to UTC.
 
     A timezone is required so a community event cannot silently move based on
@@ -57,7 +58,12 @@ def parse_scheduled_start(value):
         except ValueError:
             raise ValueError("Scheduled start must be ISO-8601, for example 2026-09-15T20:00-04:00") from None
     if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise ValueError("Scheduled start must include a timezone offset, for example -04:00 or Z")
+        if not default_timezone:
+            raise ValueError("Scheduled start must include a timezone offset, for example -04:00 or Z")
+        try:
+            parsed = parsed.replace(tzinfo=ZoneInfo(str(default_timezone)))
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ValueError("The configured community timezone is invalid") from None
     return parsed.astimezone(timezone.utc)
 
 
@@ -149,7 +155,7 @@ class ContractService:
         self.db = database.db
 
     def create(self, creator_id, title, description, value=0, server_key=None, save_key=None, due_at=None,
-               work_type=None, fields=None, compensation_type="fixed", rate=None):
+               work_type=None, fields=None, compensation_type="fixed", rate=None, server_name=None):
         if work_type is not None:
             work_type = str(work_type).strip().lower()
             if work_type not in self.WORK_TYPES:
@@ -185,6 +191,7 @@ class ContractService:
         record = {"contract_id": contract_id, "creator_discord_id": str(creator_id),
                   "acceptor_discord_id": None, "creator_farm_id": None, "acceptor_farm_id": None,
                   "server_key": server_key, "save_key": save_key, "title": title,
+                  "server_name": server_name,
                   "description": description, "value": value, "work_type": work_type,
                   "fields": fields, "compensation_type": compensation_type, "rate": value,
                   "status": "open",
@@ -201,6 +208,14 @@ class ContractService:
         if server_key is not None: query["server_key"] = server_key
         if save_key is not None: query["save_key"] = save_key
         return list(self.db.contracts.find(query).sort("created_at", 1).limit(50))
+
+    def set_marketplace_message(self, contract_id, channel_id, message_id):
+        """Record the public card location without changing contract state."""
+        self.db.contracts.update_one(
+            {"contract_id": str(contract_id)},
+            {"$set": {"marketplace_channel_id": str(channel_id),
+                       "marketplace_message_id": str(message_id),
+                       "marketplace_updated_at": _now()}})
 
     def accept(self, contract_id, actor_id, farm_id=None):
         existing = self.get(contract_id)
@@ -253,6 +268,8 @@ class InvoiceService:
         self.db, self.banking = database.db, banking
 
     def create(self, issuer_id, recipient_id, amount, description, due_at=None):
+        if str(issuer_id) == str(recipient_id):
+            raise ValueError("You cannot invoice yourself")
         amount = _amount(amount)
         description = _text(description, "Invoice description", MAX_TEXT)
         invoice_id = str(uuid.uuid4())
@@ -311,10 +328,11 @@ class CommunityEventService:
 
     def __init__(self, database): self.db = database.db
 
-    def create(self, organizer_id, name, description, scheduled_start, server_key=None, save_key=None, max_participants=None):
+    def create(self, organizer_id, name, description, scheduled_start, server_key=None, save_key=None,
+               max_participants=None, default_timezone=None):
         name = _text(name, "Event name", 120)
         description = _text(description, "Event description", MAX_TEXT)
-        scheduled_start = parse_scheduled_start(scheduled_start)
+        scheduled_start = parse_scheduled_start(scheduled_start, default_timezone)
         if max_participants is not None and (type(max_participants) is not int or not 1 <= max_participants <= 500):
             raise ValueError("Maximum participants must be between 1 and 500")
         event_id = str(uuid.uuid4())
@@ -329,6 +347,13 @@ class CommunityEventService:
     def get(self, event_id): return self.db.community_events.find_one({"event_id": str(event_id)})
     def list(self, status=None):
         return list(self.db.community_events.find({} if status is None else {"status": status}).sort("scheduled_start", 1).limit(50))
+
+    def set_board_message(self, event_id, channel_id, message_id):
+        self.db.community_events.update_one(
+            {"event_id": str(event_id)},
+            {"$set": {"board_channel_id": str(channel_id),
+                       "board_message_id": str(message_id),
+                       "board_updated_at": _now()}})
 
     def join(self, event_id, discord_id):
         event = self.get(event_id)

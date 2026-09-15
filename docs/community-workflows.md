@@ -20,6 +20,14 @@ operations remain auditable for controlled adapter work, but are never treated
 as delivery. Do not claim either direction is live until its runtime adapter is
 proven independently.
 
+The source audit did confirm the documented `ChatDisplay` client HUD class,
+including its message-history/display state, but that is not a server-side
+capture or remote injection contract. The project therefore does not treat
+`ChatDisplay` as evidence that a dedicated-server relay is safe. See the
+[GIANTS FS25 ChatDisplay reference](https://gdn.giants-software.com/documentation_scripting_fs25.php?category=1&class=16&version=script)
+for the UI-side API that was inspected; a live runtime hook is still required
+before enabling either bridge direction.
+
 ## Banking
 
 Wallet changes use immutable `ledger_entries` plus a projected wallet balance.
@@ -34,11 +42,20 @@ Contracts are separate `contracts` documents with participant checks and an
 open/accepted/in-progress/completed/cancelled lifecycle. New contracts use
 structured work type, numeric field list, and fixed/hourly compensation while
 retaining the durable value/rate fields. A creator cannot accept their own
-contract. Invoices are separate `invoices` documents and pay through the
-banking ledger exactly once. Community events are `community_events` documents
-with scheduled/active/completed/cancelled state and participant registration.
-Event input requires an explicit ISO-8601 timezone and is stored in UTC;
-Discord renders it with per-user timestamp markup. Discord selectors use
+contract. When `channels.jobs` is configured, creation posts a persistent
+Accept card; the button calls the same atomic central acceptance path and open
+cards are restored after restart. Without that channel configuration, the
+durable slash commands remain available.
+
+Invoices are separate `invoices` documents and pay through the banking ledger
+exactly once; an issuer cannot invoice the same Discord account. Community
+events are `community_events` documents with scheduled/active/completed/
+cancelled state and participant registration. When `channels.events` is
+configured, creation posts a persistent Join/Leave board card and open cards
+are restored after restart. Event input accepts an ISO-8601 timestamp with an
+offset, or a local `YYYY-MM-DD HH:MM` value interpreted using the configured
+`DISCORD_TIMEZONE` (IANA name, default `UTC`); all values are stored in UTC.
+Discord renders them with per-user timestamp markup. Discord selectors use
 friendly autocomplete labels while durable IDs remain internal.
 
 ## Transfers
@@ -81,9 +98,14 @@ REQUIRED` until a verified GIANTS runtime API and replication path is proven.
   `/event_join`, `/event_leave`, `/event_cancel`, `/event_complete`.
 - Transfers: staff-only `/transfer_request`, `/transfer_list`,
   `/transfer_accept`, `/transfer_dispatch`.
-- Diagnostics: staff-only `/activity_status`; server/runtime diagnostics remain
-  available through the read-only FS25 `sinSelfTest` and `sinPermissions`
-  commands.
+- Diagnostics: `/activity_status` is self-service anywhere in the configured
+  guild; the optional `member` lookup remains staff-only and channel-scoped.
+  Server/runtime diagnostics remain available through the read-only FS25
+  `sinSelfTest` and `sinPermissions` commands.
+
+Bank deposits and withdrawals resolve the invoking registered identity's
+authenticated server/save context and no longer expose a redundant server
+selector. Ambiguous or unavailable identity context fails closed.
 
 Server/save selectors use the central registry and friendly display names;
 internal keys remain the durable scope identifiers.  Operations that touch

@@ -1,5 +1,6 @@
 """Run with python -m fs25_network_core.bot_frontend."""
 import asyncio
+import io
 import json
 import logging
 import os
@@ -20,6 +21,7 @@ from .activity_telemetry import ActivityTelemetryProcessor
 from .business_workflows import (ChatService, ContractService, InvoiceService,
                                   CommunityEventService, TransferService)
 from .farm_lifecycle import FarmLifecycle, SYSTEM_FARM_NAME
+from .map_service import MapService
 
 
 class DiscordSetupError(RuntimeError):
@@ -42,8 +44,64 @@ def discord_timestamp(value):
     return str(value or "time unavailable")
 
 
+class ContractView(discord.ui.View):
+    """Persistent marketplace action backed by the durable contract state."""
+
+    def __init__(self, bot, contract_id):
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.contract_id = str(contract_id)
+        # Persistent views need a distinct routing key per contract card.
+        self.children[0].custom_id = f"sin:contract:accept:{self.contract_id}"
+
+    @discord.ui.button(label="Accept contract", style=discord.ButtonStyle.success,
+                       custom_id="sin:contract:accept")
+    async def accept_contract(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            record = await asyncio.to_thread(self.bot.contracts.accept, self.contract_id,
+                                             str(interaction.user.id))
+        except ValueError as error:
+            await interaction.response.send_message(str(error), ephemeral=True)
+            return
+        button.disabled = True
+        button.label = "Accepted"
+        await interaction.response.edit_message(content=self.bot.contract_card_text(record), view=self)
+
+
+class CommunityEventView(discord.ui.View):
+    """Persistent RSVP controls for a scheduled community event."""
+
+    def __init__(self, bot, event_id):
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.event_id = str(event_id)
+        self.children[0].custom_id = f"sin:event:join:{self.event_id}"
+        self.children[1].custom_id = f"sin:event:leave:{self.event_id}"
+
+    @discord.ui.button(label="Join event", style=discord.ButtonStyle.success, custom_id="sin:event:join")
+    async def join_event(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            record = await asyncio.to_thread(self.bot.community_events.join, self.event_id,
+                                             str(interaction.user.id))
+        except ValueError as error:
+            await interaction.response.send_message(str(error), ephemeral=True)
+            return
+        await interaction.response.edit_message(content=self.bot.event_card_text(record), view=self)
+
+    @discord.ui.button(label="Leave event", style=discord.ButtonStyle.secondary, custom_id="sin:event:leave")
+    async def leave_event(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            record = await asyncio.to_thread(self.bot.community_events.leave, self.event_id,
+                                             str(interaction.user.id))
+        except ValueError as error:
+            await interaction.response.send_message(str(error), ephemeral=True)
+            return
+        await interaction.response.edit_message(content=self.bot.event_card_text(record), view=self)
+
+
 class NetworkBot(discord.Client):
-    def __init__(self, bank, servers, guild_id, operator_role_ids=(), channels=None, authorizations=None, sin_member_role_id=None):
+    def __init__(self, bank, servers, guild_id, operator_role_ids=(), channels=None, authorizations=None,
+                 sin_member_role_id=None, community_timezone="UTC", map_service=None):
         intents = discord.Intents.none()
         intents.guilds = True
         intents.members = True
@@ -51,6 +109,7 @@ class NetworkBot(discord.Client):
         self.bank, self.servers = bank, servers
         self.guild = discord.Object(id=guild_id)
         self.channels = {name: int(value) for name, value in (channels or {}).items()}
+        self.community_timezone = str(community_timezone or "UTC")
         self.tree = app_commands.CommandTree(self)
         self.authorization = AuthorizationManager(bank.database)
         self.authorizations = authorizations or {}
@@ -64,6 +123,10 @@ class NetworkBot(discord.Client):
         self.invoices = InvoiceService(bank.database, bank)
         self.community_events = CommunityEventService(bank.database)
         self.transfers = TransferService(bank.database, self.authorization)
+        # Map rendering is presentation-only.  An empty service is safe until
+        # a validated map exporter registers geometry and an overview image.
+        self.map_service = map_service or MapService()
+        self._contract_views_restored = False
         self.sin_member_role_id = int(sin_member_role_id) if sin_member_role_id else None
         role_override = os.environ.get("DISCORD_OPERATOR_ROLE_IDS")
         self.operator_role_ids = (
@@ -534,36 +597,22 @@ class NetworkBot(discord.Client):
         @self.tree.command(name="deposit", description="Queue a game-to-SiN bank deposit")
         @app_commands.check(channel_check)
         async def deposit(interaction: discord.Interaction,
-                          amount: app_commands.Range[int, 1, 1_000_000_000], server: str = None):
-            if server:
-                config = server_config(interaction, server, "reconcile")
-                save_key = selected_save(config)
-                server_key = server
-            else:
-                context = await asyncio.to_thread(self.resolve_identity_context, str(interaction.user.id), None, "reconcile")
-                server_key, save_key = context["server_key"], context["save_key"]
+                          amount: app_commands.Range[int, 1, 1_000_000_000]):
+            context = await asyncio.to_thread(self.resolve_identity_context, str(interaction.user.id), None, "reconcile")
+            server_key, save_key = context["server_key"], context["save_key"]
             state = await asyncio.to_thread(self.bank.request_deposit, str(interaction.id),
                                             str(interaction.user.id), server_key, save_key, amount)
             await interaction.response.send_message(
                 f"Deposit is {state} for the selected game context. The game-side debit must be confirmed before your balance changes.",
                 ephemeral=True)
 
-        @deposit.autocomplete("server")
-        async def deposit_server_autocomplete(interaction: discord.Interaction, current: str):
-            return await server_choices(interaction, current, "reconcile")
-
         @self.tree.command(name="withdraw", description="Reserve funds for delivery to your approved farm")
         @app_commands.check(channel_check)
         async def withdraw(interaction: discord.Interaction,
-                           amount: app_commands.Range[int, 1, 1_000_000_000], server: str = None):
-            if server:
-                config = server_config(interaction, server)
-                server_key = server
-                save_key = selected_save(config)
-            else:
-                context = await asyncio.to_thread(self.resolve_identity_context, str(interaction.user.id), None, "reconcile")
-                server_key, save_key = context["server_key"], context["save_key"]
-                config = None
+                           amount: app_commands.Range[int, 1, 1_000_000_000]):
+            context = await asyncio.to_thread(self.resolve_identity_context, str(interaction.user.id), None, "reconcile")
+            server_key, save_key = context["server_key"], context["save_key"]
+            config = None
             if not self.withdrawals_enabled(server_key, config):
                 await interaction.response.send_message(
                     "Withdrawals are disabled because no verified FS25 money-delivery adapter is enabled for this server.",
@@ -573,10 +622,6 @@ class NetworkBot(discord.Client):
             state = await asyncio.to_thread(self.bank.request_withdrawal, str(interaction.id),
                                            str(interaction.user.id), server_key, save_key, amount)
             await interaction.followup.send(f"Withdrawal is {state}. Pending funds are reserved until delivery is confirmed.", ephemeral=True)
-
-        @withdraw.autocomplete("server")
-        async def withdraw_server_autocomplete(interaction: discord.Interaction, current: str):
-            return await server_choices(interaction, current, "reconcile")
 
         @self.tree.command(name="chat_send", description="Staff: send a message to an FS25 server chat")
         @app_commands.check(channel_check)
@@ -608,11 +653,25 @@ class NetworkBot(discord.Client):
         async def contract_create(interaction: discord.Interaction, work_type: app_commands.Choice[str], fields: str,
                                   compensation: app_commands.Choice[str], rate: app_commands.Range[int, 1, 1_000_000_000],
                                   description: str = ""):
+            context = {}
+            try:
+                context = await asyncio.to_thread(
+                    self.resolve_identity_context, str(interaction.user.id), None, "reconcile")
+            except Exception as error:
+                # A contract can be created before the member has one
+                # unambiguous connected game context.  Map rendering remains
+                # optional and must never block the durable contract.
+                logging.info("Contract map context unavailable; creating text-only-capable contract: %s", error)
             record = await asyncio.to_thread(self.contracts.create, str(interaction.user.id), "", description,
                                              work_type=work_type.value, fields=fields,
-                                             compensation_type=compensation.value, rate=rate)
+                                             compensation_type=compensation.value, rate=rate,
+                                             server_key=context.get("server_key"), save_key=context.get("save_key"),
+                                             server_name=context.get("server_name"))
+            published = await self.publish_contract_card(record)
             await interaction.response.send_message(
-                f"**{record['title']}** is open. {compensation.name}: {rate:,}.", ephemeral=True)
+                f"**{record['title']}** is open. {compensation.name}: {rate:,}."
+                + (" Posted in the jobs channel." if published else
+                   " The jobs channel is not configured, so use `/contract_list` to find it."), ephemeral=True)
 
         @self.tree.command(name="contract_list", description="List open SiN contracts")
         @app_commands.check(channel_check)
@@ -722,9 +781,13 @@ class NetworkBot(discord.Client):
         async def event_create(interaction: discord.Interaction, name: str, description: str, scheduled_start: str):
             staff_check(interaction)
             record = await asyncio.to_thread(self.community_events.create, str(interaction.user.id), name,
-                                             description, scheduled_start)
+                                             description, scheduled_start,
+                                             default_timezone=self.community_timezone)
+            published = await self.publish_event_card(record)
             await interaction.response.send_message(
-                f"Community event **{record['name']}** scheduled for {discord_timestamp(record['scheduled_start'])}.",
+                f"Community event **{record['name']}** scheduled for {discord_timestamp(record['scheduled_start'])}."
+                + (" Posted in the events channel." if published else
+                   " The events channel is not configured, so use `/event_list` to find it."),
                 ephemeral=True)
 
         @self.tree.command(name="event_list", description="List SiN community events")
@@ -837,10 +900,13 @@ class NetworkBot(discord.Client):
             await interaction.response.send_message(f"Transfer operation `{operation_id}` queued; receipt confirmation is required.", ephemeral=True)
 
         @self.tree.command(name="activity_status", description="View your SiN activity telemetry")
-        @app_commands.check(channel_check)
         async def activity_status(interaction: discord.Interaction, member: discord.Member = None):
+            if interaction.guild_id != self.guild.id:
+                raise ValueError("Use this command in the configured Discord server")
             if member is not None:
                 staff_check(interaction)
+                require_command_channel(interaction.command.name, interaction.guild_id,
+                                        self.guild.id, interaction.channel_id, self.channels)
             target = member or interaction.user
             await interaction.response.defer(ephemeral=True)
             context = await asyncio.to_thread(self.resolve_identity_context, str(target.id), None, "reconcile")
@@ -926,6 +992,105 @@ class NetworkBot(discord.Client):
             return bool(record.get("withdrawals_enabled"))
         return bool((config or self.servers.get(server_key) or {}).get("withdrawals_enabled", False))
 
+    @staticmethod
+    def contract_card_text(record):
+        compensation = record.get("compensation_type", "fixed").title()
+        rate = record.get("rate", record.get("value", 0))
+        fields = record.get("fields") or "unspecified"
+        creator = record.get("creator_discord_id")
+        creator_text = f"<@{creator}>" if creator else "SiN member"
+        status = str(record.get("status", "open")).replace("_", " ").title()
+        server = record.get("server_name") or record.get("server_key")
+        server_line = f"Server: {server}\n" if server else ""
+        return (f"**{record.get('title', 'Farm work')}**\n"
+                f"{record.get('description', '')}\n"
+                f"Work: {str(record.get('work_type', 'general')).title()} | Fields: {fields}\n"
+                f"{server_line}"
+                f"Compensation: {compensation} {rate:,}\n"
+                f"Posted by: {creator_text} | Status: {status}")
+
+    @staticmethod
+    def event_card_text(record):
+        participants = record.get("participants", [])
+        return (f"**{record.get('name', 'SiN event')}**\n{record.get('description', '')}\n"
+                f"When: {discord_timestamp(record.get('scheduled_start'))}\n"
+                f"Status: {str(record.get('status', 'scheduled')).title()} | "
+                f"Participants: {len(participants)}"
+                + (f"/{record['max_participants']}" if record.get("max_participants") else ""))
+
+    async def publish_contract_card(self, record):
+        channel_id = self.channels.get("jobs")
+        if not channel_id:
+            return False
+        channel = self.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.fetch_channel(channel_id)
+            except (discord.DiscordException, discord.HTTPException):
+                logging.warning("Jobs channel is configured but unavailable; contract remains durable")
+                return False
+        try:
+            attachment = None
+            try:
+                image = await asyncio.to_thread(
+                    self.map_service.render_contract_map, record.get("server_key"),
+                    record.get("save_key"), record.get("fields"))
+                attachment = discord.File(io.BytesIO(image), filename="sin-map.png")
+            except Exception as error:
+                logging.info("Contract map rendering unavailable; posting text-only card: %s", error)
+            send_kwargs = {"content": self.contract_card_text(record),
+                           "view": ContractView(self, record["contract_id"])}
+            if attachment is not None:
+                send_kwargs["file"] = attachment
+            message = await channel.send(**send_kwargs)
+        except discord.DiscordException:
+            logging.warning("Jobs channel publish failed; contract remains durable")
+            return False
+        await asyncio.to_thread(self.contracts.set_marketplace_message, record["contract_id"],
+                                channel_id, message.id)
+        return True
+
+    async def publish_event_card(self, record):
+        channel_id = self.channels.get("events")
+        if not channel_id:
+            return False
+        channel = self.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.fetch_channel(channel_id)
+            except discord.DiscordException:
+                logging.warning("Events channel is configured but unavailable; event remains durable")
+                return False
+        try:
+            message = await channel.send(content=self.event_card_text(record),
+                                         view=CommunityEventView(self, record["event_id"]))
+        except discord.DiscordException:
+            logging.warning("Events channel publish failed; event remains durable")
+            return False
+        await asyncio.to_thread(self.community_events.set_board_message, record["event_id"], channel_id, message.id)
+        return True
+
+    async def restore_contract_views(self):
+        if self._contract_views_restored:
+            return
+        self._contract_views_restored = True
+        records = await asyncio.to_thread(self.contracts.open)
+        for record in records:
+            channel_id = record.get("marketplace_channel_id")
+            message_id = record.get("marketplace_message_id")
+            if channel_id and message_id:
+                self.add_view(ContractView(self, record["contract_id"]), message_id=int(message_id))
+
+    async def restore_event_views(self):
+        records = await asyncio.to_thread(self.community_events.list)
+        for record in records:
+            if record.get("status") not in {"scheduled", "active"}:
+                continue
+            channel_id = record.get("board_channel_id")
+            message_id = record.get("board_message_id")
+            if channel_id and message_id:
+                self.add_view(CommunityEventView(self, record["event_id"]), message_id=int(message_id))
+
     async def setup_hook(self):
         self.tree.copy_global_to(guild=self.guild)
         try:
@@ -941,6 +1106,8 @@ class NetworkBot(discord.Client):
                 f"Open this invite in your browser, authorize it for your server, then restart:\n{invite}"
             ) from None
         logging.info("Registered %s commands in Discord server %s", len(commands), self.guild.id)
+        await self.restore_contract_views()
+        await self.restore_event_views()
 
     async def on_ready(self):
         logging.info("Discord bot connected as %s (ID %s)", self.user, self.user.id)
@@ -1002,7 +1169,8 @@ def main():
             logging.info("[SiN DB] environment=%s community=%s authorization=%s banking=%s",
                          server_id, database.name, database.name, database.name)
     try:
-        NetworkBot(BankingEngine(database), servers, int(guild_id), operator_role_ids, channels, authorizations, sin_member_role_id).run(token, log_handler=None)
+        NetworkBot(BankingEngine(database), servers, int(guild_id), operator_role_ids, channels, authorizations,
+                   sin_member_role_id, os.environ.get("DISCORD_TIMEZONE", "UTC")).run(token, log_handler=None)
     except DiscordSetupError as error:
         raise SystemExit(str(error)) from None
 

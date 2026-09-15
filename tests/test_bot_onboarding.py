@@ -4,8 +4,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from discord import app_commands
 
-from fs25_network_core.bot_frontend import NetworkBot, player_choice_label
+from fs25_network_core.bot_frontend import CommunityEventView, ContractView, NetworkBot, player_choice_label
 from fs25_network_core.channel_policy import COMMAND_CHANNELS
+from fs25_network_core.map_service import MapUnavailable
 
 
 class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
@@ -22,7 +23,13 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({command.name for command in commands}, set(COMMAND_CHANNELS))
         self.assertIsNone(self.bot.tree.get_command("link"))
         for command in commands:
-            self.assertTrue(command.checks, command.name)
+            if command.name == "activity_status":
+                # This command has two policies: self-service is allowed in
+                # any channel in the configured guild; staff lookups are
+                # checked inside the callback against farm_approvals.
+                self.assertFalse(command.checks)
+            else:
+                self.assertTrue(command.checks, command.name)
             # Exercise discord.py's option serialization without syncing to Discord.
             self.assertEqual(command.to_dict(self.bot.tree)["name"], command.name)
 
@@ -36,13 +43,54 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([option["name"] for option in options], ["member"])
         self.assertEqual(options[0]["required"], False)
 
-    async def test_bank_commands_make_server_selection_optional(self):
+    async def test_persistent_marketplace_and_event_views_use_unique_routing_keys(self):
+        contract_view = ContractView(self.bot, "contract-1")
+        event_view = CommunityEventView(self.bot, "event-1")
+        self.assertEqual(contract_view.timeout, None)
+        self.assertEqual(event_view.timeout, None)
+        self.assertEqual(contract_view.children[0].custom_id, "sin:contract:accept:contract-1")
+        self.assertEqual(event_view.children[0].custom_id, "sin:event:join:event-1")
+        self.assertEqual(event_view.children[1].custom_id, "sin:event:leave:event-1")
+
+    async def test_bank_commands_resolve_authenticated_context_without_server_selector(self):
         for name in ("deposit", "withdraw"):
             command = self.bot.tree.get_command(name)
             options = command.to_dict(self.bot.tree)["options"]
-            self.assertIn("server", [option["name"] for option in options])
-            server = next(option for option in options if option["name"] == "server")
-            self.assertFalse(server["required"])
+            self.assertEqual([option["name"] for option in options], ["amount"])
+
+    async def test_contract_card_map_failure_falls_back_without_losing_contract(self):
+        channel = MagicMock()
+        channel.send = AsyncMock(return_value=MagicMock(id=99))
+        self.bot.channels["jobs"] = 123
+        self.bot.get_channel = MagicMock(return_value=channel)
+        self.bot.map_service.render_contract_map = MagicMock(
+            side_effect=MapUnavailable("no validated map"))
+        self.bot.contracts.set_marketplace_message = MagicMock()
+        record = {"contract_id": "contract-1", "title": "Baling — Fields 22",
+                  "description": "", "fields": "22", "work_type": "baling",
+                  "compensation_type": "fixed", "rate": 100, "status": "open",
+                  "creator_discord_id": "1", "server_key": "server", "save_key": "save"}
+        self.assertTrue(await self.bot.publish_contract_card(record))
+        kwargs = channel.send.await_args.kwargs
+        self.assertNotIn("file", kwargs)
+        self.assertIn("Fields: 22", kwargs["content"])
+        self.bot.contracts.set_marketplace_message.assert_called_once_with("contract-1", 123, 99)
+
+    async def test_contract_card_attaches_registered_map_without_changing_card_state(self):
+        channel = MagicMock()
+        channel.send = AsyncMock(return_value=MagicMock(id=100))
+        self.bot.channels["jobs"] = 123
+        self.bot.get_channel = MagicMock(return_value=channel)
+        self.bot.map_service.render_contract_map = MagicMock(return_value=b"png-bytes")
+        self.bot.contracts.set_marketplace_message = MagicMock()
+        record = {"contract_id": "contract-2", "title": "Baling — Fields 22",
+                  "description": "", "fields": "22, 24", "work_type": "baling",
+                  "compensation_type": "fixed", "rate": 100, "status": "open",
+                  "creator_discord_id": "1", "server_key": "server", "save_key": "save"}
+        self.assertTrue(await self.bot.publish_contract_card(record))
+        attachment = channel.send.await_args.kwargs["file"]
+        self.assertEqual(attachment.filename, "sin-map.png")
+        self.bot.map_service.render_contract_map.assert_called_once_with("server", "save", "22, 24")
 
     async def test_staff_callbacks_deny_non_operator_before_reading_data(self):
         interaction = MagicMock()

@@ -393,12 +393,22 @@ function FS25SiNServer:findPlayerObject(userId, user)
         end
     end
     if g_currentMission == nil then return nil end
+    if g_currentMission.playerSystem ~= nil then
+        if g_currentMission.playerSystem.getPlayerByUserId ~= nil then
+            local ok, player = pcall(g_currentMission.playerSystem.getPlayerByUserId,
+                g_currentMission.playerSystem, userId)
+            if ok and player ~= nil then return player end
+        end
+        for _, player in pairs(g_currentMission.playerSystem.players or {}) do
+            if player ~= nil and tostring(player.userId) == tostring(userId) then return player end
+        end
+    end
     if g_currentMission.getPlayerByUserId ~= nil then
         local ok, player = pcall(g_currentMission.getPlayerByUserId, g_currentMission, userId)
         if ok and player ~= nil then return player end
     end
     if g_currentMission.players == nil then return nil end
-    for _, player in ipairs(g_currentMission.players) do
+    for _, player in pairs(g_currentMission.players) do
         if player ~= nil and tostring(player.userId) == tostring(userId) then return player end
     end
     return nil
@@ -406,21 +416,55 @@ end
 
 function FS25SiNServer:samplePlayerPosition(userId, user)
     local player = self:findPlayerObject(userId, user)
-    if player == nil or player.rootNode == nil or player.rootNode == 0 or getWorldTranslation == nil then return nil end
-    local ok, x, _, z = pcall(getWorldTranslation, player.rootNode)
-    if not ok or x == nil or z == nil then return nil end
-    return {x=x, z=z}
+    if player == nil then return nil end
+    -- On a dedicated server the player object is authoritative, but its
+    -- rootNode is not guaranteed to be the node representing the controlled
+    -- vehicle.  Prefer the same current-vehicle position used by GIANTS
+    -- player/vehicle code, then fall back to the player position/root node.
+    local vehicle = nil
+    if player.getCurrentVehicle ~= nil then
+        local ok, value = pcall(player.getCurrentVehicle, player)
+        if ok then vehicle = value end
+    end
+    if getWorldTranslation ~= nil and vehicle ~= nil and vehicle.rootNode ~= nil and vehicle.rootNode ~= 0 then
+        local ok, x, _, z = pcall(getWorldTranslation, vehicle.rootNode)
+        if ok and x ~= nil and z ~= nil then return {x=x, z=z}, "vehicle" end
+    end
+    if player.getPosition ~= nil then
+        local ok, x, _, z = pcall(player.getPosition, player)
+        if ok and x ~= nil and z ~= nil then return {x=x, z=z}, "player" end
+    end
+    if player.capsuleController ~= nil and player.capsuleController.getPosition ~= nil then
+        local ok, x, _, z = pcall(player.capsuleController.getPosition, player.capsuleController)
+        if ok and x ~= nil and z ~= nil then return {x=x, z=z}, "capsule" end
+    end
+    if getWorldTranslation ~= nil and player.rootNode ~= nil and player.rootNode ~= 0 then
+        local ok, x, _, z = pcall(getWorldTranslation, player.rootNode)
+        if ok and x ~= nil and z ~= nil then return {x=x, z=z}, "root" end
+    end
+    return nil
 end
 
 function FS25SiNServer:startActivityTracking(uniqueId, record)
+    local existing = self.activityStates[uniqueId]
+    if existing ~= nil then
+        -- Lifecycle callbacks and the heartbeat reconciliation can observe the
+        -- same connection in adjacent update phases.  Never reset a live
+        -- session, baseline, minute sequence, or inactivity streak here.
+        existing.userId = record.user_id
+        existing.user = record.user
+        return false
+    end
     self.activitySessionSequence = self.activitySessionSequence + 1
     local sessionId = tostring(self.session) .. "-" .. tostring(self.activitySessionSequence)
-    local baseline = self:samplePlayerPosition(record.user_id, record.user)
+    local baseline, positionSource = self:samplePlayerPosition(record.user_id, record.user)
     self.activityStates[uniqueId] = {
         sessionId=sessionId, userId=record.user_id, intervalElapsed=0, minuteSequence=0,
-        inactivityMinutes=0, lastPosition=baseline}
-    Logging.info("[SiN Telemetry] tracker created uniqueUserId=%s userId=%s baseline=%s",
-        self:shortIdentity(uniqueId), tostring(record.user_id), tostring(baseline ~= nil))
+        inactivityMinutes=0, lastPosition=baseline, positionSource=positionSource}
+    Logging.info("[SiN Telemetry] tracker created uniqueUserId=%s userId=%s baseline=%s source=%s",
+        self:shortIdentity(uniqueId), tostring(record.user_id), tostring(baseline ~= nil),
+        tostring(positionSource or "unavailable"))
+    return true
 end
 
 function FS25SiNServer:processActivitySamples(dt)
@@ -432,14 +476,15 @@ function FS25SiNServer:processActivitySamples(dt)
             state.userId = record.user_id
             state.user = record.user
             state.intervalElapsed = state.intervalElapsed + dt
-            local position = self:samplePlayerPosition(record.user_id, record.user)
+            local position, positionSource = self:samplePlayerPosition(record.user_id, record.user)
             if state.lastPosition == nil then
                 if position ~= nil then
                     state.lastPosition = position
                     state.intervalElapsed = 0
                     self.activityPositionUnavailableLogged[uniqueId] = nil
-                    Logging.info("[SiN Telemetry] baseline established uniqueUserId=%s userId=%s",
-                        self:shortIdentity(uniqueId), tostring(record.user_id))
+                    state.positionSource = positionSource
+                    Logging.info("[SiN Telemetry] baseline established uniqueUserId=%s userId=%s source=%s",
+                        self:shortIdentity(uniqueId), tostring(record.user_id), tostring(positionSource or "unknown"))
                 elseif not self.activityPositionUnavailableLogged[uniqueId] then
                     self.activityPositionUnavailableLogged[uniqueId] = true
                     Logging.warning("[SiN Telemetry] position unavailable; tracker waiting for observable player uniqueUserId=%s userId=%s",
@@ -459,6 +504,7 @@ function FS25SiNServer:processActivitySamples(dt)
                     local dz = position.z - state.lastPosition.z
                     local moved = (dx * dx + dz * dz) > (self.activityMovementTolerance * self.activityMovementTolerance)
                     state.lastPosition = position
+                    state.positionSource = positionSource
                     state.intervalElapsed = 0
                     local bucket
                     if moved then
@@ -801,6 +847,110 @@ function FS25SiNServer:consoleCommandPermissions()
     return table.concat(lines, "\n")
 end
 
+-- Read-only map probe.  This intentionally reports metadata and geometry
+-- availability, not proprietary map assets.  FieldManager's verified runtime
+-- objects expose field:getId(), field:getAreaHa(),
+-- field:getCenterOfFieldWorldPosition(), field:getPolygonPoints(), and the
+-- field.farmland.id relationship.  Full normalized export remains a separate
+-- future authenticated extraction boundary.
+function FS25SiNServer:reportMapProbe()
+    local mission = g_currentMission
+    if mission == nil then return "mission=unavailable" end
+    local info = mission.missionInfo or {}
+    local function firstValue(names)
+        for _, name in ipairs(names) do
+            local value = info[name]
+            if value ~= nil and tostring(value) ~= "" then return tostring(value), name end
+        end
+        return "unavailable", nil
+    end
+
+    local mapTitle = firstValue({"mapTitle", "mapName"})
+    local mapId = firstValue({"mapId", "mapFilename", "mapXMLFilename"})
+    local terrainSize = mission.terrainSize ~= nil and tostring(mission.terrainSize) or "unavailable"
+    local fieldManager = mission.fieldManager or g_fieldManager
+    local fieldCount = 0
+    local field22 = "absent"
+    if fieldManager ~= nil and fieldManager.getFields ~= nil then
+        local ok, fields = pcall(fieldManager.getFields, fieldManager)
+        if ok and type(fields) == "table" then
+            for _, field in ipairs(fields) do
+                fieldCount = fieldCount + 1
+                local idOk, fieldId = false, nil
+                if field ~= nil and field.getId ~= nil then
+                    idOk, fieldId = pcall(field.getId, field)
+                end
+                if idOk and fieldId == 22 then
+                    local farmlandId = field.farmland ~= nil and field.farmland.id or nil
+                    local areaText = "unavailable"
+                    if field.getAreaHa ~= nil then
+                        local areaOk, area = pcall(field.getAreaHa, field)
+                        if areaOk and area ~= nil then areaText = string.format("%.2f", area) end
+                    end
+                    local centerText = "unavailable"
+                    if field.getCenterOfFieldWorldPosition ~= nil then
+                        local centerOk, centerX, centerZ = pcall(field.getCenterOfFieldWorldPosition, field)
+                        if centerOk and centerX ~= nil and centerZ ~= nil then
+                            centerText = string.format("%.1f,%.1f", centerX, centerZ)
+                        end
+                    end
+                    local polygonText = "unavailable"
+                    local polygonBoundsText = "unavailable"
+                    if field.getPolygonPoints ~= nil then
+                        local polygonOk, points = pcall(field.getPolygonPoints, field)
+                        if polygonOk and type(points) == "table" then
+                            polygonText = tostring(#points)
+                            if getWorldTranslation ~= nil then
+                                local minX, minZ, maxX, maxZ = nil, nil, nil, nil
+                                for _, point in ipairs(points) do
+                                    if point ~= nil then
+                                        local pointOk, pointX, _, pointZ = pcall(getWorldTranslation, point)
+                                        if pointOk and pointX ~= nil and pointZ ~= nil then
+                                            minX = minX == nil and pointX or math.min(minX, pointX)
+                                            minZ = minZ == nil and pointZ or math.min(minZ, pointZ)
+                                            maxX = maxX == nil and pointX or math.max(maxX, pointX)
+                                            maxZ = maxZ == nil and pointZ or math.max(maxZ, pointZ)
+                                        end
+                                    end
+                                end
+                                if minX ~= nil then
+                                    polygonBoundsText = string.format("%.1f,%.1f..%.1f,%.1f",
+                                        minX, minZ, maxX, maxZ)
+                                end
+                            end
+                        end
+                    end
+                    field22 = string.format("found farmland=%s areaHa=%s center=%s polygonPoints=%s polygonBounds=%s",
+                        tostring(farmlandId or "unavailable"), areaText, centerText, polygonText, polygonBoundsText)
+                end
+            end
+        end
+    end
+
+    local farmlandCount = 0
+    if g_farmlandManager ~= nil and g_farmlandManager.getFarmlands ~= nil then
+        local ok, farmlands = pcall(g_farmlandManager.getFarmlands, g_farmlandManager)
+        if ok and type(farmlands) == "table" then
+            for _ in pairs(farmlands) do farmlandCount = farmlandCount + 1 end
+        end
+    end
+    local farmlandMap = "unavailable"
+    if g_farmlandManager ~= nil and g_farmlandManager.localMap ~= nil and getBitVectorMapSize ~= nil then
+        local ok, width, height = pcall(getBitVectorMapSize, g_farmlandManager.localMap)
+        if ok and width ~= nil and height ~= nil then
+            farmlandMap = tostring(width) .. "x" .. tostring(height)
+        end
+    end
+    local assetFields = {}
+    for _, name in ipairs({"mapFilename", "mapXMLFilename", "overviewFilename", "imageFilename"}) do
+        if info[name] ~= nil and tostring(info[name]) ~= "" then table.insert(assetFields, name .. "=present") end
+    end
+    table.sort(assetFields)
+    return string.format("mapTitle=%s mapId=%s terrainSize=%s fields=%d field22=%s farmlands=%d farmlandMap=%s assetRefs=%s",
+        mapTitle, mapId, terrainSize, fieldCount, field22, farmlandCount, farmlandMap,
+        #assetFields > 0 and table.concat(assetFields, ",") or "unavailable")
+end
+
 function FS25SiNServer:consoleCommandSelfTest()
     local lines = {"SiN Integration Self-Test"}
     local function tableCount(value)
@@ -845,11 +995,26 @@ function FS25SiNServer:consoleCommandSelfTest()
         "manager-authority.xml")
     local executionSide = self:getDiagnosticExecutionSide()
     if executionSide == "server" or executionSide == "listen-server" then
+        local baselineCount = 0
+        local sourceCounts = {}
+        for _, state in pairs(self.activityStates or {}) do
+            if state.lastPosition ~= nil then baselineCount = baselineCount + 1 end
+            local source = tostring(state.positionSource or "unavailable")
+            sourceCounts[source] = (sourceCounts[source] or 0) + 1
+        end
+        local sourceSummary = {}
+        for source, count in pairs(sourceCounts) do
+            table.insert(sourceSummary, source .. "=" .. tostring(count))
+        end
+        table.sort(sourceSummary)
         result("Telemetry tracker", self.activityStates ~= nil and "PASS" or "FAIL",
-            "server-authoritative tracked=" .. tostring(tableCount(self.activityStates)))
+            "server-authoritative tracked=" .. tostring(tableCount(self.activityStates)) ..
+            " baselines=" .. tostring(baselineCount) .. " sources=" .. table.concat(sourceSummary, ","))
     else
         result("Telemetry tracker", "UNAVAILABLE", "server-authoritative")
     end
+    local mapOk, mapProbe = pcall(self.reportMapProbe, self)
+    result("Map probe", mapOk and "PASS" or "WARN", mapOk and mapProbe or tostring(mapProbe))
     result("Connected tracking", self.connectedPlayers ~= nil and "PASS" or "FAIL", nil)
     result("Deferred sync", self.deferredManagerSyncs ~= nil and "PASS" or "WARN",
         "queued=" .. tostring(tableCount(self.deferredManagerSyncs)))

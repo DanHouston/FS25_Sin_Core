@@ -55,6 +55,14 @@ class BusinessWorkflowTests(unittest.TestCase):
         self.assertEqual(record["compensation_type"], "hourly")
         self.assertEqual(record["rate"], 250)
 
+    def test_marketplace_message_metadata_does_not_change_contract_state(self):
+        service = ContractService(self.database)
+        service.set_marketplace_message("contract-1", 123, 456)
+        update = self.db.contracts.update_one.call_args.args[1]
+        self.assertEqual(update["$set"]["marketplace_channel_id"], "123")
+        self.assertEqual(update["$set"]["marketplace_message_id"], "456")
+        self.assertNotIn("status", update["$set"])
+
     def test_invoice_payment_calls_idempotent_wallet_transfer(self):
         banking = MagicMock()
         banking.database = self.database
@@ -69,6 +77,12 @@ class BusinessWorkflowTests(unittest.TestCase):
         banking.transfer_wallet.assert_called_once_with(
             "invoice:invoice-1", "buyer", "seller", 25, "invoice payment", session="session")
 
+    def test_invoice_cannot_be_issued_to_the_issuer(self):
+        service = InvoiceService(self.database, MagicMock())
+        with self.assertRaisesRegex(ValueError, "yourself"):
+            service.create("same-user", "same-user", 10, "self charge")
+        self.db.invoices.insert_one.assert_not_called()
+
     def test_event_join_is_idempotent_and_capacity_is_checked(self):
         service = CommunityEventService(self.database)
         event = {"event_id": "event-1", "name": "Convoy", "status": "scheduled",
@@ -81,11 +95,21 @@ class BusinessWorkflowTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             service.join("event-1", "third")
 
+    def test_event_board_metadata_does_not_change_participants(self):
+        service = CommunityEventService(self.database)
+        service.set_board_message("event-1", 123, 456)
+        update = self.db.community_events.update_one.call_args.args[1]
+        self.assertEqual(update["$set"]["board_channel_id"], "123")
+        self.assertEqual(update["$set"]["board_message_id"], "456")
+        self.assertNotIn("participants", update["$set"])
+
     def test_event_time_requires_timezone_and_normalizes_to_utc(self):
         with self.assertRaisesRegex(ValueError, "timezone"):
             parse_scheduled_start("2026-09-15T20:00")
         normalized = parse_scheduled_start("2026-09-15T20:00-04:00")
         self.assertEqual(normalized.isoformat(), "2026-09-16T00:00:00+00:00")
+        configured = parse_scheduled_start("2026-09-15 20:00", "America/New_York")
+        self.assertEqual(configured.isoformat(), "2026-09-16T00:00:00+00:00")
 
     def test_transfer_requires_source_manager_authority(self):
         service = TransferService(self.database, MagicMock())

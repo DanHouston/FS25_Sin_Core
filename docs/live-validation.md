@@ -42,6 +42,16 @@ unavailable; run it on the dedicated server for the tracker count. Normal
 Discord usage is `/activity_status`. Staff may use
 `/activity_status member:@Player` without copying a raw FS25 identity.
 
+### Map discovery probe
+
+On the dedicated server console, run `sinSelfTest` once after the server has
+loaded the save. Retain the `Map probe` result with the server log. It is a
+read-only diagnostic: it reports map identity, terrain size, field/farmland
+counts, the Field 22 relationship and available geometry metrics without
+printing filesystem paths or copying proprietary assets. Do not treat the
+probe as a registered central map until a normalized payload has been
+validated and explicitly registered by an operator.
+
 ### Chat boundary
 
 The central chat message/event schema and authenticated transport are locally
@@ -64,6 +74,7 @@ Capture:
 
 - server and client ZIP SHA256 values
 - `sinSelfTest` and `sinPermissions` output for the farm-switch sequence
+- the `sinSelfTest` `Map probe` line and the active map/PDA visual comparison
 - the corresponding server authorization/direct-connection log lines
 - `/activity_status` output after disconnect/reconnect
 - any chat or transfer operation IDs only if a verified runtime adapter is
@@ -86,6 +97,10 @@ server/save automatically. Withdrawals remain disabled unless a server
 explicitly enables a verified FS25 money-delivery adapter.
 
 `/contract_create` uses work type, comma-separated numeric fields, and fixed or
-hourly compensation. Event creation requires a timezone-bearing ISO-8601 value
-such as `2026-09-15T20:00-04:00`; Discord list/view output uses localized
-timestamp markup.
+hourly compensation. If `channels.jobs` is configured, verify that a new
+contract card appears and that Accept remains safe after a bot restart. Event
+creation accepts a timezone-bearing ISO-8601 value such as
+`2026-09-15T20:00-04:00`, or local `2026-09-15 20:00` using the configured
+`DISCORD_TIMEZONE`; Discord list/view output uses localized timestamp markup.
+If `channels.events` is configured, verify the Join/Leave board card and its
+participant count.

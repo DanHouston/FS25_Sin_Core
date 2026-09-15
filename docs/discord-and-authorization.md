@@ -83,7 +83,10 @@ The bot responds privately to commands. Staff inspects the request queue with
 
 The existing #link-account and #bank channels can keep their names for
 organization, but member self-service commands are no longer restricted to
-them. Role and channel IDs live in `discord.json`.
+them. Role and channel IDs live in `discord.json`. Optional `channels.jobs` and
+`channels.events` values enable persistent contract and community-event cards;
+the bot does not guess or create those channels. Set `DISCORD_TIMEZONE` to an
+IANA timezone name when event creators should be able to enter local times.
 
 ## Authorization boundaries
 

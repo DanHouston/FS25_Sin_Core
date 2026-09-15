@@ -348,6 +348,22 @@ class RegistrationTests(unittest.TestCase):
         for mutation in ("promoteUser", "demoteUser", "setUserPermission", "sendEvent", "emitServerEvent"):
             self.assertNotIn(mutation, command)
 
+    def test_read_only_map_probe_uses_verified_runtime_field_sources(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8")
+        self.assertIn("function FS25SiNServer:reportMapProbe()", source)
+        for runtime_source in ("getFields", "getId", "getAreaHa", "getCenterOfFieldWorldPosition",
+                               "getPolygonPoints", "getWorldTranslation", "polygonBounds",
+                               "field.farmland", "getFarmlands", "terrainSize"):
+            self.assertIn(runtime_source, source)
+        self.assertIn('result("Map probe"', source)
+        start = source.index("function FS25SiNServer:reportMapProbe()")
+        end = source.index("function FS25SiNServer:consoleCommandSelfTest()", start)
+        probe = source[start:end]
+        for mutation in ("setTimeScale", "setLandOwnership", "promoteUser", "demoteUser",
+                         "setUserPermission", "sendEvent", "emitServerEvent"):
+            self.assertNotIn(mutation, probe)
+
     def test_chat_operation_has_safe_runtime_boundary_and_event_schema(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
             encoding="utf-8")
@@ -380,9 +396,23 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("tracker recovered during reconciliation", source)
         self.assertIn("baseline established", source)
         self.assertIn("user.getPlayer", source)
+        self.assertIn("playerSystem.getPlayerByUserId", source)
+        self.assertIn("player.getCurrentVehicle", source)
+        self.assertIn("player.getPosition", source)
         self.assertIn("g_currentMission.getPlayerByUserId", source)
         self.assertIn("self:samplePlayerPosition(record.user_id, record.user)", source)
         self.assertIn("minute completed", source)
+
+    def test_server_runtime_telemetry_tracker_creation_is_idempotent(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8")
+        start = source.index("function FS25SiNServer:startActivityTracking")
+        end = source.index("function FS25SiNServer:processActivitySamples", start)
+        helper = source[start:end]
+        self.assertIn("local existing = self.activityStates[uniqueId]", helper)
+        self.assertIn("Never reset a live", helper)
+        self.assertIn("return false", helper)
+        self.assertIn("return true", helper)
 
     def test_server_self_test_does_not_claim_client_telemetry_tracker_pass(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(

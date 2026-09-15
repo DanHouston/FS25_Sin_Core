@@ -1,5 +1,6 @@
 """Mongo-free per-server Agent for authenticated mailbox transport."""
 import argparse
+import errno
 import json
 import logging
 import os
@@ -17,8 +18,15 @@ class MailboxWriteError(OSError):
     """A central request succeeded but its local mailbox publication failed."""
 
 
-def _atomic_replace(temporary, destination, attempts=5, initial_backoff=0.05):
-    """Atomically publish a mailbox file, tolerating a short Windows lock race."""
+def _is_transient_windows_replace_denied(error):
+    """Return true only for the Windows file-lock/access-denied race."""
+    if getattr(error, "winerror", None) == 5:
+        return True
+    return os.name == "nt" and getattr(error, "errno", None) in {errno.EACCES, errno.EPERM}
+
+
+def _atomic_replace(temporary, destination, attempts=8, initial_backoff=0.05, max_backoff=0.5):
+    """Atomically publish a mailbox file through a bounded Windows lock retry."""
     delay = initial_backoff
     try:
         for attempt in range(attempts):
@@ -29,12 +37,12 @@ def _atomic_replace(temporary, destination, attempts=5, initial_backoff=0.05):
                 # FS25 can briefly hold a mailbox file while enumerating or
                 # opening it.  Retry only the Windows-style access-denied
                 # replacement case; all other failures remain immediate.
-                if not (os.name == "nt" or getattr(error, "winerror", None) == 5):
+                if not _is_transient_windows_replace_denied(error):
                     raise
                 if attempt == attempts - 1:
                     raise
                 time.sleep(delay)
-                delay *= 2
+                delay = min(delay * 2, max_backoff)
     except Exception:
         try:
             temporary.unlink()
@@ -222,7 +230,14 @@ class PairingAgent:
             ElementTree.SubElement(manifest, "command", operationId=operation_id)
         temporary = self.commands / "manifest.tmp"
         ElementTree.ElementTree(manifest).write(temporary, encoding="utf-8", xml_declaration=True)
-        _atomic_replace(temporary, self.commands / "manifest.xml")
+        try:
+            _atomic_replace(temporary, self.commands / "manifest.xml")
+        except OSError:
+            # The command XMLs remain durable and will be included again on
+            # the next pass.  Make the failure explicit without mislabeling
+            # it as a pairing/API failure.
+            LOG.warning("permission-command manifest write failed; retaining commands for retry")
+            raise
         return delivered
 
     def process_receipts_once(self):
