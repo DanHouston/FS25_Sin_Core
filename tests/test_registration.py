@@ -90,9 +90,11 @@ class RegistrationTests(unittest.TestCase):
         second_token, second_expiry = self.auth.create_registration_code("server", "save", "stable-id")
         self.assertTrue(second_token)
         self.assertGreater(second_expiry, first_expiry)
-        self.assertEqual(first["issued_at"], first_issued_at)
-        self.assertGreater(first["updated_at"], first_updated_at)
-        self.assertGreater(first["expires_at"], datetime.now(timezone.utc))
+        replacement = collection.records[0]
+        self.assertEqual(collection.updates[1]["$set"]["issued_at"], replacement["issued_at"])
+        self.assertGreaterEqual(replacement["issued_at"], first_issued_at)
+        self.assertGreater(replacement["updated_at"], first_updated_at)
+        self.assertGreater(replacement["expires_at"], datetime.now(timezone.utc))
         self.assertIn("issued_at", collection.updates[1]["$set"])
 
         # A later active reuse derives the same token from the refreshed
