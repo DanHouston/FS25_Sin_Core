@@ -30,6 +30,20 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         command = self.bot.tree.get_command("register")
         self.assertEqual([option["name"] for option in command.to_dict(self.bot.tree)["options"]], ["code"])
 
+    async def test_activity_status_uses_identity_context_and_optional_staff_member(self):
+        command = self.bot.tree.get_command("activity_status")
+        options = command.to_dict(self.bot.tree)["options"]
+        self.assertEqual([option["name"] for option in options], ["member"])
+        self.assertEqual(options[0]["required"], False)
+
+    async def test_bank_commands_make_server_selection_optional(self):
+        for name in ("deposit", "withdraw"):
+            command = self.bot.tree.get_command(name)
+            options = command.to_dict(self.bot.tree)["options"]
+            self.assertIn("server", [option["name"] for option in options])
+            server = next(option for option in options if option["name"] == "server")
+            self.assertFalse(server["required"])
+
     async def test_staff_callbacks_deny_non_operator_before_reading_data(self):
         interaction = MagicMock()
         interaction.guild_id = 1

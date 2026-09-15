@@ -12,11 +12,13 @@ message ID. FS25-originated messages enter through the existing authenticated
 messages become durable `farm_operations` entries with
 `operation_type=chat_message`.
 
-The current mod writes a `pending_validation` receipt for an outbound chat
-operation because no documented GIANTS server-side chat injection method has
-been verified in the target runtime. That receipt is deliberately not a
-successful delivery. Do not claim Discord-to-FS25 chat is live until a runtime
-adapter is proven.
+The current generic mod has no verified GIANTS chat-capture hook, so ordinary
+FS25 chat is not yet emitted to Discord. Discord-to-FS25 injection is also
+capability-gated: no message is queued from the normal command while the
+server-side adapter is unverified. Existing durable `pending_validation`
+operations remain auditable for controlled adapter work, but are never treated
+as delivery. Do not claim either direction is live until its runtime adapter is
+proven independently.
 
 ## Banking
 
@@ -29,11 +31,15 @@ claimed complete by queueing an operation.
 ## Contracts, invoices, and events
 
 Contracts are separate `contracts` documents with participant checks and an
-open/accepted/in-progress/completed/cancelled lifecycle. Invoices are separate
-`invoices` documents and pay through the banking ledger exactly once. Community
-events are `community_events` documents with scheduled/active/completed/
-cancelled state and participant registration. Discord handlers are thin and
-use the service-layer actor checks.
+open/accepted/in-progress/completed/cancelled lifecycle. New contracts use
+structured work type, numeric field list, and fixed/hourly compensation while
+retaining the durable value/rate fields. A creator cannot accept their own
+contract. Invoices are separate `invoices` documents and pay through the
+banking ledger exactly once. Community events are `community_events` documents
+with scheduled/active/completed/cancelled state and participant registration.
+Event input requires an explicit ISO-8601 timezone and is stored in UTC;
+Discord renders it with per-user timestamp markup. Discord selectors use
+friendly autocomplete labels while durable IDs remain internal.
 
 ## Transfers
 

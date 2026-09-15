@@ -42,11 +42,35 @@ def _amount(value):
     return value
 
 
+def parse_scheduled_start(value):
+    """Parse an explicit ISO-8601 timestamp and normalize it to UTC.
+
+    A timezone is required so a community event cannot silently move based on
+    the machine timezone of the bot process.
+    """
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = _text(value, "Scheduled start", 80)
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError("Scheduled start must be ISO-8601, for example 2026-09-15T20:00-04:00") from None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("Scheduled start must include a timezone offset, for example -04:00 or Z")
+    return parsed.astimezone(timezone.utc)
+
+
 class ChatService:
     """Idempotent chat message persistence and outbound operation creation."""
 
     def __init__(self, database):
         self.database, self.db = database, database.db
+
+    @staticmethod
+    def fs25_injection_supported():
+        """The target GIANTS runtime adapter is not source-verified yet."""
+        return False
 
     @staticmethod
     def sanitize(message):
@@ -115,12 +139,45 @@ class ChatService:
 
 class ContractService:
     STATUSES = {"open", "accepted", "in_progress", "completed", "cancelled"}
+    WORK_TYPES = {
+        "harvesting", "planting", "cultivating", "plowing", "fertilizing",
+        "spraying", "liming", "rolling", "mowing", "baling", "transport", "forestry",
+    }
+    COMPENSATION_TYPES = {"fixed", "hourly"}
 
     def __init__(self, database):
         self.db = database.db
 
-    def create(self, creator_id, title, description, value=0, server_key=None, save_key=None, due_at=None):
-        title = _text(title, "Contract title", 120)
+    def create(self, creator_id, title, description, value=0, server_key=None, save_key=None, due_at=None,
+               work_type=None, fields=None, compensation_type="fixed", rate=None):
+        if work_type is not None:
+            work_type = str(work_type).strip().lower()
+            if work_type not in self.WORK_TYPES:
+                raise ValueError("Unsupported farm-work type")
+        else:
+            work_type = "general"
+        compensation_type = str(compensation_type or "fixed").strip().lower()
+        if compensation_type not in self.COMPENSATION_TYPES:
+            raise ValueError("Compensation must be fixed or hourly")
+        if rate is not None:
+            value = rate
+        if fields is not None:
+            normalized_fields = []
+            for item in str(fields).split(","):
+                item = item.strip()
+                if not item:
+                    continue
+                try:
+                    field_id = int(item)
+                except ValueError:
+                    raise ValueError("Fields must be comma-separated positive numbers") from None
+                if field_id <= 0:
+                    raise ValueError("Fields must be comma-separated positive numbers")
+                normalized_fields.append(str(field_id))
+            if not normalized_fields:
+                raise ValueError("At least one field is required")
+            fields = ", ".join(dict.fromkeys(normalized_fields))
+        title = _text(title or f"{work_type.title()} — Fields {fields or 'unspecified'}", "Contract title", 120)
         description = _text(description, "Contract description", MAX_TEXT)
         if type(value) is not int or value < 0 or value > 1_000_000_000:
             raise ValueError("Contract value must be a whole currency unit between 0 and 1,000,000,000")
@@ -128,7 +185,9 @@ class ContractService:
         record = {"contract_id": contract_id, "creator_discord_id": str(creator_id),
                   "acceptor_discord_id": None, "creator_farm_id": None, "acceptor_farm_id": None,
                   "server_key": server_key, "save_key": save_key, "title": title,
-                  "description": description, "value": value, "status": "open",
+                  "description": description, "value": value, "work_type": work_type,
+                  "fields": fields, "compensation_type": compensation_type, "rate": value,
+                  "status": "open",
                   "created_at": _now(), "due_at": due_at, "accepted_at": None,
                   "completed_at": None, "cancellation_reason": None, "completion_note": None}
         self.db.contracts.insert_one(record)
@@ -144,6 +203,9 @@ class ContractService:
         return list(self.db.contracts.find(query).sort("created_at", 1).limit(50))
 
     def accept(self, contract_id, actor_id, farm_id=None):
+        existing = self.get(contract_id)
+        if existing and existing.get("creator_discord_id") == str(actor_id):
+            raise ValueError("You can't accept a contract posted by your own farm")
         result = self.db.contracts.update_one(
             {"contract_id": str(contract_id), "status": "open",
              "creator_discord_id": {"$ne": str(actor_id)}},
@@ -252,6 +314,7 @@ class CommunityEventService:
     def create(self, organizer_id, name, description, scheduled_start, server_key=None, save_key=None, max_participants=None):
         name = _text(name, "Event name", 120)
         description = _text(description, "Event description", MAX_TEXT)
+        scheduled_start = parse_scheduled_start(scheduled_start)
         if max_participants is not None and (type(max_participants) is not int or not 1 <= max_participants <= 500):
             raise ValueError("Maximum participants must be between 1 and 500")
         event_id = str(uuid.uuid4())

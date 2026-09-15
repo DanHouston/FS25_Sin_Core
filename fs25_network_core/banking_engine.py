@@ -22,6 +22,19 @@ class BankingEngine:
         wallet = self.db.wallets.find_one({"_id": str(discord_id)}) or {}
         return wallet.get("balance", 0)
 
+    def account_summary(self, discord_id):
+        """Return central wallet state without pretending it is game money."""
+        user_id = str(discord_id)
+        wallet = self.db.wallets.find_one({"_id": user_id}) or {}
+        deposits = list(self.db.deposit_requests.find({"discord_id": user_id, "state": "pending"}))
+        withdrawals = list(self.db.withdrawals.find({"discord_id": user_id, "state": "pending"}))
+        return {
+            "available_balance": int(wallet.get("balance", 0) or 0),
+            "pending_deposits": sum(int(row.get("amount", 0) or 0) for row in deposits),
+            "pending_withdrawals": sum(int(row.get("amount", 0) or 0) for row in withdrawals),
+            "game_balance": None,
+        }
+
     @staticmethod
     def transaction_id(*parts):
         return hashlib.sha256("|".join(str(part) for part in parts).encode("utf-8")).hexdigest()

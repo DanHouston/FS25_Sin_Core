@@ -56,6 +56,7 @@ function FS25SiNServer:loadMap()
     self.clockMode = "synced"
     self.clockPolicyGeneratedAt = nil
     self.clockHardFallbackLogged = false
+    self.activityPositionUnavailableLogged = {}
     self.invalidFarmVisualStateLogged = {}
     self:installLifecycleHooks()
     addConsoleCommand("sinPermissions", "Report local FS25 farm permission state", "consoleCommandPermissions", self)
@@ -383,16 +384,28 @@ function FS25SiNServer:enforceAuthorizedManagerState(user, farm, authorized, syn
     return afterManager == (authorized == true)
 end
 
-function FS25SiNServer:findPlayerObject(userId)
-    if g_currentMission == nil or g_currentMission.players == nil then return nil end
+function FS25SiNServer:findPlayerObject(userId, user)
+    if user ~= nil then
+        if user.player ~= nil then return user.player end
+        if user.getPlayer ~= nil then
+            local ok, player = pcall(user.getPlayer, user)
+            if ok and player ~= nil then return player end
+        end
+    end
+    if g_currentMission == nil then return nil end
+    if g_currentMission.getPlayerByUserId ~= nil then
+        local ok, player = pcall(g_currentMission.getPlayerByUserId, g_currentMission, userId)
+        if ok and player ~= nil then return player end
+    end
+    if g_currentMission.players == nil then return nil end
     for _, player in ipairs(g_currentMission.players) do
         if player ~= nil and tostring(player.userId) == tostring(userId) then return player end
     end
     return nil
 end
 
-function FS25SiNServer:samplePlayerPosition(userId)
-    local player = self:findPlayerObject(userId)
+function FS25SiNServer:samplePlayerPosition(userId, user)
+    local player = self:findPlayerObject(userId, user)
     if player == nil or player.rootNode == nil or player.rootNode == 0 or getWorldTranslation == nil then return nil end
     local ok, x, _, z = pcall(getWorldTranslation, player.rootNode)
     if not ok or x == nil or z == nil then return nil end
@@ -402,9 +415,12 @@ end
 function FS25SiNServer:startActivityTracking(uniqueId, record)
     self.activitySessionSequence = self.activitySessionSequence + 1
     local sessionId = tostring(self.session) .. "-" .. tostring(self.activitySessionSequence)
+    local baseline = self:samplePlayerPosition(record.user_id, record.user)
     self.activityStates[uniqueId] = {
         sessionId=sessionId, userId=record.user_id, intervalElapsed=0, minuteSequence=0,
-        inactivityMinutes=0, lastPosition=self:samplePlayerPosition(record.user_id)}
+        inactivityMinutes=0, lastPosition=baseline}
+    Logging.info("[SiN Telemetry] tracker created uniqueUserId=%s userId=%s baseline=%s",
+        self:shortIdentity(uniqueId), tostring(record.user_id), tostring(baseline ~= nil))
 end
 
 function FS25SiNServer:processActivitySamples(dt)
@@ -414,17 +430,30 @@ function FS25SiNServer:processActivitySamples(dt)
             self.activityStates[uniqueId] = nil
         else
             state.userId = record.user_id
+            state.user = record.user
             state.intervalElapsed = state.intervalElapsed + dt
-            if state.intervalElapsed >= 60000 then
-                local position = self:samplePlayerPosition(record.user_id)
+            local position = self:samplePlayerPosition(record.user_id, record.user)
+            if state.lastPosition == nil then
+                if position ~= nil then
+                    state.lastPosition = position
+                    state.intervalElapsed = 0
+                    self.activityPositionUnavailableLogged[uniqueId] = nil
+                    Logging.info("[SiN Telemetry] baseline established uniqueUserId=%s userId=%s",
+                        self:shortIdentity(uniqueId), tostring(record.user_id))
+                elseif not self.activityPositionUnavailableLogged[uniqueId] then
+                    self.activityPositionUnavailableLogged[uniqueId] = true
+                    Logging.warning("[SiN Telemetry] position unavailable; tracker waiting for observable player uniqueUserId=%s userId=%s",
+                        self:shortIdentity(uniqueId), tostring(record.user_id))
+                end
+            elseif state.intervalElapsed >= 60000 then
                 -- A missing position is an unobserved interval, not an idle
                 -- minute. Restart the baseline when the player is observable.
                 if position == nil then
                     state.lastPosition = nil
                     state.intervalElapsed = 0
-                elseif state.lastPosition == nil then
-                    state.lastPosition = position
-                    state.intervalElapsed = 0
+                    self.activityPositionUnavailableLogged[uniqueId] = true
+                    Logging.warning("[SiN Telemetry] completed interval unobservable; baseline reset uniqueUserId=%s userId=%s",
+                        self:shortIdentity(uniqueId), tostring(record.user_id))
                 else
                     local dx = position.x - state.lastPosition.x
                     local dz = position.z - state.lastPosition.z
@@ -442,11 +471,13 @@ function FS25SiNServer:processActivitySamples(dt)
                     state.minuteSequence = state.minuteSequence + 1
                     local eventId = string.gsub(self.serverKey .. "-activity-" .. state.sessionId .. "-" ..
                         uniqueId .. "-" .. tostring(state.minuteSequence), "[^%w_-]", "_")
-                    self:emitServerEvent("player_activity_minute", {
+                    local emitted = self:emitServerEvent("player_activity_minute", {
                         unique_user_id=uniqueId, user_id=record.user_id, farm_id=record.farm_id,
                         display_name=record.name, session_id=state.sessionId,
                         minute_sequence=state.minuteSequence, activity_bucket=bucket,
                         inactive_minutes=state.inactivityMinutes, duration_seconds=60}, eventId)
+                    Logging.info("[SiN Telemetry] minute completed uniqueUserId=%s userId=%s bucket=%s emitted=%s",
+                        self:shortIdentity(uniqueId), tostring(record.user_id), bucket, tostring(emitted == true))
                 end
             end
         end
@@ -558,6 +589,7 @@ function FS25SiNServer:onPlayerDisconnected(userId)
     self.previousPlayers[uniqueId] = nil
     local activityState = self.activityStates[uniqueId]
     self.activityStates[uniqueId] = nil
+    self.activityPositionUnavailableLogged[uniqueId] = nil
     self.registrationPromptAt[uniqueId] = nil
     Logging.info("[SiN Player] disconnected uniqueUserId=%s userId=%s", self:shortIdentity(uniqueId), matchId)
     self:emitServerEvent("player_disconnected", {unique_user_id=uniqueId, user_id=record.user_id,
@@ -811,8 +843,13 @@ function FS25SiNServer:consoleCommandSelfTest()
     end
     result("Authority snapshot", fileExists(self.directory .. "manager-authority.xml") and "PASS" or "WARN",
         "manager-authority.xml")
-    result("Telemetry session", self.activityStates ~= nil and "PASS" or "FAIL",
-        "tracked=" .. tostring(tableCount(self.activityStates)))
+    local executionSide = self:getDiagnosticExecutionSide()
+    if executionSide == "server" or executionSide == "listen-server" then
+        result("Telemetry tracker", self.activityStates ~= nil and "PASS" or "FAIL",
+            "server-authoritative tracked=" .. tostring(tableCount(self.activityStates)))
+    else
+        result("Telemetry tracker", "UNAVAILABLE", "server-authoritative")
+    end
     result("Connected tracking", self.connectedPlayers ~= nil and "PASS" or "FAIL", nil)
     result("Deferred sync", self.deferredManagerSyncs ~= nil and "PASS" or "WARN",
         "queued=" .. tostring(tableCount(self.deferredManagerSyncs)))
@@ -883,17 +920,17 @@ function FS25SiNServer:update(dt)
 end
 
 function FS25SiNServer:emitServerEvent(eventType, values, requestedEventId)
-    if self.serverKey == nil or self.serverCredential == nil or self.eventDirectory == nil then return end
+    if self.serverKey == nil or self.serverCredential == nil or self.eventDirectory == nil then return false end
     local eventId = requestedEventId
     if eventId == nil then
         self.eventSequence = self.eventSequence + 1
         eventId = self.serverKey .. "-" .. tostring(self.session) .. "-" .. tostring(self.eventSequence) .. "-" .. eventType
     end
-    if self.eventSeen[eventId] then return end
+    if self.eventSeen[eventId] then return true end
     local path = self.eventDirectory .. eventId .. ".xml"
-    if fileExists(path) then self.eventSeen[eventId] = true; return end
+    if fileExists(path) then self.eventSeen[eventId] = true; return true end
     local xml = XMLFile.create("networkLocalServerEvent", path, "serverEvent")
-    if xml == nil then return end
+    if xml == nil then return false end
     xml:setString("serverEvent#event_id", eventId)
     xml:setString("serverEvent#event_type", eventType)
     xml:setString("serverEvent#server_key", self.serverKey)
@@ -905,6 +942,7 @@ function FS25SiNServer:emitServerEvent(eventType, values, requestedEventId)
     if eventType ~= "player_activity_minute" then
         Logging.info("[SiN Events] queued type=%s eventId=%s", tostring(eventType), tostring(eventId))
     end
+    return true
 end
 
 function FS25SiNServer:processPlayerTransitions(currentPlayers)
@@ -914,6 +952,8 @@ function FS25SiNServer:processPlayerTransitions(currentPlayers)
             self.connectedPlayers[identity].name = player.name
             self.connectedPlayers[identity].user_id = player.user_id
             self.connectedPlayers[identity].farm_id = player.farm_id
+            self.connectedPlayers[identity].user = player.user
+            if player.connection ~= nil then self.connectedPlayers[identity].connection = player.connection end
         end
         if previousPlayers[identity] == nil then
             local user = g_currentMission.userManager:getUserByUserId(player.user_id)
@@ -943,8 +983,13 @@ function FS25SiNServer:reconcileConnectedPlayers()
             local uniqueId = tostring(user:getUniqueUserId() or "")
             if uniqueId ~= "" then
                 local record = {name=user:getNickname() or "", user_id=user:getId(),
-                    farm_id=farm ~= nil and farm.farmId or 0}
+                    farm_id=farm ~= nil and farm.farmId or 0, connection=user.connection, user=user}
                 currentPlayers[uniqueId] = record
+                if self.activityStates[uniqueId] == nil then
+                    self:startActivityTracking(uniqueId, record)
+                    Logging.info("[SiN Telemetry] tracker recovered during reconciliation uniqueUserId=%s userId=%s",
+                        self:shortIdentity(uniqueId), tostring(user:getId()))
+                end
                 local state = self.registrationState[uniqueId]
                 if state == nil then
                     self:queueRegistrationRequest(user, farm, false)

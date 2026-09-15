@@ -372,6 +372,22 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("self.activityStates[uniqueId] = nil", source)
         self.assertIn("self:isDedicatedServerUser(user, farm)", source)
 
+    def test_server_runtime_telemetry_recovers_staged_or_missed_player_tracking(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8")
+        self.assertIn("tracker recovered during reconciliation", source)
+        self.assertIn("baseline established", source)
+        self.assertIn("user.getPlayer", source)
+        self.assertIn("g_currentMission.getPlayerByUserId", source)
+        self.assertIn("self:samplePlayerPosition(record.user_id, record.user)", source)
+        self.assertIn("minute completed", source)
+
+    def test_server_self_test_does_not_claim_client_telemetry_tracker_pass(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8")
+        self.assertIn('result("Telemetry tracker", "UNAVAILABLE", "server-authoritative")', source)
+        self.assertIn('executionSide == "server" or executionSide == "listen-server"', source)
+
     def test_activity_event_uses_existing_mailbox_descriptor(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
             encoding="utf-8")

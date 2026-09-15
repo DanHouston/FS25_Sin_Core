@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 from fs25_network_core.banking_engine import BankingEngine
 from fs25_network_core.business_workflows import (
     ChatService, CommunityEventService, ContractService, InvoiceService, TransferService,
+    parse_scheduled_start,
 )
 
 
@@ -15,6 +16,7 @@ class BusinessWorkflowTests(unittest.TestCase):
 
     def test_chat_is_sanitized_and_queued_as_idempotent_game_operation(self):
         service = ChatService(self.database)
+        self.assertFalse(service.fs25_injection_supported())
         operation_id = service.queue_to_fs25("server", "save", "discord", "Hello")
         self.assertTrue(operation_id)
         operation = self.db.farm_operations.update_one.call_args.args[1]
@@ -26,7 +28,7 @@ class BusinessWorkflowTests(unittest.TestCase):
         service = ContractService(self.database)
         record = service.create("creator", "Haul", "Move grain", 100)
         self.assertEqual(record["status"], "open")
-        self.db.contracts.find_one.side_effect = [dict(record, status="accepted", acceptor_discord_id="acceptor")]
+        self.db.contracts.find_one.side_effect = [record, dict(record, status="accepted", acceptor_discord_id="acceptor")]
         self.db.contracts.update_one.return_value.modified_count = 1
         accepted = service.accept(record["contract_id"], "acceptor")
         self.assertEqual(accepted["acceptor_discord_id"], "acceptor")
@@ -34,6 +36,24 @@ class BusinessWorkflowTests(unittest.TestCase):
         self.db.contracts.find_one.return_value = accepted
         with self.assertRaises(ValueError):
             service.complete(record["contract_id"], "unrelated")
+
+    def test_contract_creator_gets_explicit_self_acceptance_error(self):
+        service = ContractService(self.database)
+        self.db.contracts.find_one.return_value = {
+            "contract_id": "contract-1", "creator_discord_id": "creator", "status": "open"}
+        with self.assertRaisesRegex(ValueError, "own farm"):
+            service.accept("contract-1", "creator")
+        self.db.contracts.update_one.assert_not_called()
+
+    def test_contract_create_records_structured_farm_work(self):
+        service = ContractService(self.database)
+        record = service.create("creator", "", "Harvest instructions", 250,
+                                work_type="harvesting", fields="22, 24,22",
+                                compensation_type="hourly", rate=250)
+        self.assertEqual(record["title"], "Harvesting — Fields 22, 24")
+        self.assertEqual(record["fields"], "22, 24")
+        self.assertEqual(record["compensation_type"], "hourly")
+        self.assertEqual(record["rate"], 250)
 
     def test_invoice_payment_calls_idempotent_wallet_transfer(self):
         banking = MagicMock()
@@ -60,6 +80,12 @@ class BusinessWorkflowTests(unittest.TestCase):
         self.assertIn("new", result["participants"])
         with self.assertRaises(ValueError):
             service.join("event-1", "third")
+
+    def test_event_time_requires_timezone_and_normalizes_to_utc(self):
+        with self.assertRaisesRegex(ValueError, "timezone"):
+            parse_scheduled_start("2026-09-15T20:00")
+        normalized = parse_scheduled_start("2026-09-15T20:00-04:00")
+        self.assertEqual(normalized.isoformat(), "2026-09-16T00:00:00+00:00")
 
     def test_transfer_requires_source_manager_authority(self):
         service = TransferService(self.database, MagicMock())

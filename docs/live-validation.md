@@ -35,6 +35,13 @@ reconnect. A staff operator can inspect the resulting aggregate and recent
 sessions with `/activity_status`. Partial minutes and disconnected time must
 not be counted.
 
+The producer recovers tracking during the existing heartbeat reconciliation
+when the initial connection hook or staged farm/registration state was missed.
+On a remote client, `sinSelfTest` reports server-authoritative telemetry as
+unavailable; run it on the dedicated server for the tracker count. Normal
+Discord usage is `/activity_status`. Staff may use
+`/activity_status member:@Player` without copying a raw FS25 identity.
+
 ### Chat boundary
 
 The central chat message/event schema and authenticated transport are locally
@@ -64,3 +71,21 @@ Capture:
 
 Do not include server credentials, binding XML contents, pairing codes, or
 MongoDB connection strings in the evidence.
+
+## Community workflow notes
+
+The two chat directions are tested independently. The current build reports
+Discord-to-FS25 injection as unavailable because no verified GIANTS adapter is
+enabled; a queued operation must never be described as displayed. FS25-to-
+Discord capture is also deferred until a source-backed runtime hook is proven.
+
+`/balance` reports the central SiN wallet and pending operation amounts. The
+game balance is explicitly unavailable until the snapshot contains a verified
+farm-money field. `/deposit amount` resolves an unambiguous registered
+server/save automatically. Withdrawals remain disabled unless a server
+explicitly enables a verified FS25 money-delivery adapter.
+
+`/contract_create` uses work type, comma-separated numeric fields, and fixed or
+hourly compensation. Event creation requires a timezone-bearing ISO-8601 value
+such as `2026-09-15T20:00-04:00`; Discord list/view output uses localized
+timestamp markup.
