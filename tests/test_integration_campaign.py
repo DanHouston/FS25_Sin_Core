@@ -25,6 +25,14 @@ class IntegrationCampaignTests(unittest.TestCase):
             "mailbox_xml", "central_http", "central_processor", "memory_persistence",
             "map_service", "networkbot_presentation"])
 
+    def test_live_validation_manifest_keeps_map_runtime_gates_explicit(self):
+        manifest = json.loads((Path(__file__).parents[1] / "docs" /
+                               "live-validation-manifest.json").read_text(encoding="utf-8"))
+        checks = {item["id"] for item in manifest["live_validation_required"]}
+        self.assertTrue({"giants-field-extraction", "giants-farmland-layer",
+                         "pda-orientation", "map-change-refresh",
+                         "discord-map-presentation", "fs25-mailbox-lifecycle"}.issubset(checks))
+
     def test_each_named_scenario_returns_structured_pass_report(self):
         for name in SCENARIOS.names():
             report = run_named_scenario(name)
@@ -102,12 +110,15 @@ class IntegrationCampaignTests(unittest.TestCase):
         self.assertEqual(evidence["agent"]["forwarded_save_id"], "1")
         self.assertTrue(evidence["agent"]["replay_is_idempotent"])
         self.assertEqual(evidence["central"]["fields"], ["22", "47"])
+        self.assertEqual(evidence["central"]["farmland_ids"], [22, 47])
+        self.assertEqual(evidence["central"]["farmland_geometry"], ["22", "47"])
         self.assertEqual(evidence["downstream_load"]["source"], "persisted_sin_maps")
         self.assertTrue(evidence["downstream_load"]["stable_refresh_avoided"])
         self.assertTrue(evidence["downstream_load"]["changed_refresh_performed"])
         self.assertEqual(evidence["contract"]["requested_field"], "22")
         self.assertTrue(evidence["contract"]["persisted"])
         self.assertEqual(evidence["render"]["highlighted_field"], [22])
+        self.assertTrue(evidence["render"]["farmland_overlay_rendered"])
         self.assertTrue(evidence["render"]["irregular_field_47_not_highlighted"])
         self.assertTrue(evidence["presentation"]["path"].endswith("publish_contract_card"))
         self.assertEqual(evidence["presentation"]["attachment_filename"], "sin-map.png")
@@ -120,6 +131,10 @@ class IntegrationCampaignTests(unittest.TestCase):
         self.assertTrue(evidence["invalid_geometry"]["presentation_unchanged"])
         self.assertTrue(evidence["filesystem_safety"]["unsafe_identity_rejected"])
         self.assertTrue(evidence["filesystem_safety"]["arbitrary_path_lookup_rejected"])
+        self.assertTrue(evidence["multi_server"]["independent_persisted"])
+        self.assertTrue(evidence["multi_server"]["independent_load"])
+        self.assertTrue(evidence["multi_server"]["independent_render"])
+        self.assertTrue(evidence["multi_server"]["no_cross_server_geometry_leak"])
 
     def test_contract_scope_report_proves_context_selection_persistence_and_fallback(self):
         evidence = run_named_scenario("contract_scope")["contract_scope"]

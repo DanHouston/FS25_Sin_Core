@@ -369,7 +369,9 @@ class RegistrationTests(unittest.TestCase):
             encoding="utf-8")
         self.assertIn("function FS25SiNServer:processMapGeometryExport()", source)
         for runtime_source in ("getPolygonPoints", "getWorldTranslation", "field.farmland.id",
-                               'event_type", "map_geometry"', "serverEvent.fields.field", "overview_asset_identity"):
+                               'event_type", "map_geometry"', "serverEvent.fields.field", "overview_asset_identity",
+                               "getFarmlands", "farmlandIds", "serverEvent.farmlands", "coordinate_system",
+                               "source_generation"):
             self.assertIn(runtime_source, source)
         self.assertIn("self.mapGeometryExported", source)
 

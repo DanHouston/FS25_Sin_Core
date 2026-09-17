@@ -503,6 +503,26 @@ class AgentTests(unittest.TestCase):
             parsed = PairingAgent._parse_event_file(event)
             self.assertEqual(parsed["payload"]["map"]["fields"]["22"]["rings"][0][1], ["10", "-10"])
 
+    def test_map_geometry_event_preserves_farmland_identity_and_optional_geometry(self):
+        with tempfile.TemporaryDirectory() as folder:
+            event = Path(folder) / "map.xml"
+            event.write_text(
+                '<serverEvent event_id="map-1" event_type="map_geometry" server_key="server" '
+                'server_credential="secret" save_id="1" schema_version="1" source_generation="4" '
+                'map_id="map" map_title="Map" world_width="100" world_depth="100" image_width="32" '
+                'image_height="32" overview_asset_identity="runtime-generated:map" version="1" '
+                'image_y_inverted="true" coordinate_system="giants-centered-xz"><fields/>'
+                '<farmlands><farmland farmland_id="22"><points><point x="-10" z="-10"/>'
+                '<point x="10" z="-10"/><point x="10" z="10"/></points></farmland>'
+                '<farmland farmland_id="47"/></farmlands></serverEvent>',
+                encoding="utf-8")
+            parsed = PairingAgent._parse_event_file(event)
+            payload = parsed["payload"]
+            self.assertEqual(payload["source_generation"], "4")
+            self.assertEqual(payload["map"]["farmland_ids"], ["22", "47"])
+            self.assertEqual(payload["map"]["farmlands"]["22"]["rings"][0][0], ["-10", "-10"])
+            self.assertNotIn("47", payload["map"]["farmlands"])
+
     def test_watch_services_control_plane_before_each_bounded_event_batch(self):
         with tempfile.TemporaryDirectory() as folder:
             agent = PairingAgent(folder, "https://central", event_batch_size=7)

@@ -1240,6 +1240,29 @@ function FS25SiNServer:processMapGeometryExport()
     xml:setString("serverEvent#overview_asset_identity", "runtime-generated:" .. safeMapId)
     xml:setInt("serverEvent#version", 1)
     xml:setBool("serverEvent#image_y_inverted", true)
+    xml:setString("serverEvent#coordinate_system", "giants-centered-xz")
+    xml:setInt("serverEvent#source_generation", self.runtimeGeneration or 1)
+    local farmlandIds = {}
+    local seenFarmlandIds = {}
+    local function rememberFarmlandId(value)
+        local farmlandId = tonumber(value)
+        if farmlandId ~= nil and farmlandId > 0 and not seenFarmlandIds[farmlandId] then
+            seenFarmlandIds[farmlandId] = true
+            table.insert(farmlandIds, farmlandId)
+        end
+    end
+    if g_farmlandManager ~= nil and g_farmlandManager.getFarmlands ~= nil then
+        local farmlandOk, farmlands = pcall(g_farmlandManager.getFarmlands, g_farmlandManager)
+        if farmlandOk and type(farmlands) == "table" then
+            for farmlandId in pairs(farmlands) do rememberFarmlandId(farmlandId) end
+        end
+    end
+    for _, record in ipairs(records) do rememberFarmlandId(record.farmland) end
+    table.sort(farmlandIds)
+    for farmlandIndex, farmlandId in ipairs(farmlandIds) do
+        local farmlandKey = string.format("serverEvent.farmlands.farmland(%d)", farmlandIndex - 1)
+        xml:setInt(farmlandKey .. "#farmland_id", farmlandId)
+    end
     for index, record in ipairs(records) do
         local fieldKey = string.format("serverEvent.fields.field(%d)", index - 1)
         xml:setInt(fieldKey .. "#field_id", record.id)

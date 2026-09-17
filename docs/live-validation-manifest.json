@@ -33,8 +33,52 @@
     {"id": "farm-manager-sync", "scenario": "authority_regression", "evidence": "sinPermissions farm-switch output"},
     {"id": "activity-watermark", "scenario": "activity_disconnect", "evidence": "activity_status after disconnect/reconnect"},
     {"id": "player-registration", "scenario": "registration", "evidence": "registration prompt and response log"},
-    {"id": "map-geometry", "scenario": "map_contract", "evidence": "Map probe and PDA comparison"},
+    {"id": "map-geometry", "scenario": "map_contract", "evidence": "Map probe, sanitized geometry metadata, and PDA comparison"},
     {"id": "full-operator-pass", "scenario": "control_plane_backlog", "evidence": "secret-free campaign report"}
+  ],
+  "live_validation_required": [
+    {
+      "id": "giants-field-extraction",
+      "what": "Actual FieldManager polygon and field-to-farmland extraction",
+      "procedure": "Load the target save, run sinSelfTest, and retain the map probe and startup map_geometry evidence.",
+      "success": "Expected field IDs, world polygon points, dimensions, and field.farmland.id are present and valid.",
+      "failure": "Adapt the runtime exporter to the target FS25 build or leave the map unavailable."
+    },
+    {
+      "id": "giants-farmland-layer",
+      "what": "FarmlandManager IDs, density-map relationship, and snapshot ownership",
+      "procedure": "Compare probe IDs and authenticated snapshot ownership with the in-game farmland layer; request a parcel overlay only where trusted polygon geometry exists.",
+      "success": "IDs/ownership agree and no field polygon is presented as a farmland boundary.",
+      "failure": "Treat parcel geometry or ownership as unavailable/stale; do not claim a successful overlay."
+    },
+    {
+      "id": "pda-orientation",
+      "what": "World-to-PDA orientation and polygon alignment",
+      "procedure": "Render Field 22 and an irregular field, then compare the attachment with the in-game PDA at corners and interior landmarks.",
+      "success": "Highlights align in position and orientation.",
+      "failure": "Adjust explicit orientation metadata or retain geometry-only output pending verification."
+    },
+    {
+      "id": "map-change-refresh",
+      "what": "Runtime map/save change detection and refresh",
+      "procedure": "In a disposable test context, load a different map/save, emit a new runtime generation, and verify central reload/revision behavior.",
+      "success": "The new server/save projection is selected, delayed older data is rejected, and prior geometry does not leak across contexts.",
+      "failure": "Improve runtime generation or map identity detection before relying on automatic refresh."
+    },
+    {
+      "id": "discord-map-presentation",
+      "what": "Real Discord attachment delivery and visual readability",
+      "procedure": "Publish a contract/farmland card through the configured Jobs channel using the generic release artifact.",
+      "success": "The PNG is attached/readable and the requested selection is visible; text fallback remains usable when rendering is unavailable.",
+      "failure": "Investigate Discord permissions, raster scaling, or alignment without weakening durable workflow state."
+    },
+    {
+      "id": "fs25-mailbox-lifecycle",
+      "what": "FS25/Agent restart and interrupted geometry event behavior",
+      "procedure": "Restart the dedicated server and Agent around one geometry export and retry one interrupted/malformed mailbox event.",
+      "success": "The valid event is delivered once, malformed data is quarantined, and no proprietary map path/asset is copied.",
+      "failure": "Fix mailbox timing or runtime lifecycle handling before production use."
+    }
   ],
   "excluded_from_live": ["credentials", "pairing_codes", "connection_strings"]
 }

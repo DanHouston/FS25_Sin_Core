@@ -3,7 +3,9 @@
 The map service is a central-side, filesystem-free rendering boundary. It
 accepts normalized map metadata and an already-loaded overview image, then
 produces bounded deterministic PNGs for Discord presentation. It does not
-change farm ownership, field availability, contracts, or authorization.
+change farm ownership, field availability, contracts, or authorization. The
+same service can render field, farmland, ownership, and future arbitrary
+geographic overlays without knowing anything about the consumer.
 
 ## What is established from FS25 sources
 
@@ -75,15 +77,37 @@ attachment delivery still require live validation.
 runtime geometry export may also call `register_payload(...)` without a raster;
 that path uses a deterministic neutral canvas and never interprets a Discord
 input as a filesystem path. The service does not read arbitrary Agent or
-game-server files.
+game-server files. `MapStore` is the single `sin_maps` persistence boundary:
+it validates a stored payload on reload, scopes every record by server/save,
+and replaces the map projection with one Mongo update. `MapService.load_persisted`
+uses the same payload validation path that trusted ingestion uses, so a process
+restart cannot expose malformed or partially loaded geometry.
+
+The model records every observed farmland ID separately from farmland geometry.
+FS25's authoritative farmland layer is a density map and the documented
+`FarmlandManager` API exposes IDs, ownership, and world-position lookup, but
+not a farmland polygon method. The runtime therefore exports all farmland IDs
+and field polygons plus their `field.farmland.id` relationship. A farmland
+polygon is accepted only when a trusted exporter supplies one; rendering a
+farmland with no polygon fails safely as unavailable rather than displaying a
+field polygon as a false parcel boundary.
+
+Runtime exports include a monotonic mailbox `source_generation`. Central keeps
+the newest generation and ignores delayed older exports. Equal-content
+retransmission remains safe and consumers reload only when the normalized
+`map_revision` changes. A changed map is persisted atomically before a
+consumer can load it; an invalid incoming payload leaves the prior valid
+projection in place through the Agent quarantine path.
 
 The current FS25_SiN_Server runtime emits one authenticated `map_geometry`
 event per loaded server session after binding. It contains map identity,
-terrain dimensions, field-to-farmland relationships, acreage where available,
-and actual world-coordinate polygon points. The Agent forwards it through the
-existing `/api/server/events` transport. Central validates and persists the
-normalized payload in `sin_maps`; JiN lazily loads that record into MapService
-when publishing a contract card. It is not a continuous telemetry stream.
+terrain dimensions, the supported centered-XZ coordinate-system declaration,
+all known farmland IDs, field-to-farmland relationships, acreage where
+available, and actual world-coordinate field polygon points. The Agent forwards
+it through the existing `/api/server/events` transport. Central validates and
+persists the normalized payload in `sin_maps`; JiN lazily loads that record
+into MapService when publishing a contract card. It is not a continuous
+telemetry stream.
 
 ## Contract cards
 
@@ -113,6 +137,13 @@ identity, requested overlays, labels, and an ownership revision/value. A map
 registration or explicit ownership revision invalidates the relevant render
 cache; there is no unbounded PNG directory.
 
+Server/save scope is part of both the persistence key and every render-cache
+key. Two servers may use the same field or farmland number without sharing a
+model, revision, or rendered image. Farmland selection is available through
+`render_map(..., highlight_farmlands=[...])` when validated parcel geometry is
+present; this is the same consumer-neutral API a future farm-request flow can
+use, independent of ContractService.
+
 As a local synthetic reference, rendering a 512x512 RGBA fixture with one
 irregular field overlay completed in roughly 76 ms on the development host;
 this is a smoke measurement, not a production performance guarantee.
@@ -128,15 +159,18 @@ filesystem paths or cause arbitrary files to be opened.
 
 ## Live extraction plan
 
-The server-side exporter now performs the first four steps at runtime:
+The server-side exporter now performs the following steps at runtime:
 
 1. identify the active map title/ID and terrain dimensions;
 2. enumerate `g_currentMission.fieldManager:getFields()`, capturing each field's
    stable ID, `field.farmland.id`, acreage where available, and exact world
    polygon points;
-3. emit one versioned normalized `map_geometry` event through the existing
+3. enumerate `g_farmlandManager:getFarmlands()` for the separate farmland-ID
+   layer. No vector parcel is fabricated because the supported FS25 API exposes
+   the farmland density map rather than polygon points;
+4. emit one versioned normalized `map_geometry` event through the existing
    authenticated mailbox transport;
-4. validate and persist it in Central before JiN renders a contract card.
+5. validate and persist it in Central before JiN renders a contract card.
 
 The exporter deliberately does not copy a PDA asset or expose a filesystem
 path. When no trusted raster is registered, MapService draws the real runtime
@@ -156,6 +190,27 @@ present. It is read-only and deliberately reports asset-reference presence
 rather than exposing filesystem paths or copying proprietary assets. Normal
 startup separately queues the authenticated geometry export; the probe itself
 does not upload anything.
+
+## LIVE-VALIDATION-REQUIRED
+
+The local scenarios prove normalized parsing, authenticated ingestion, durable
+reload, revision ordering, server/save isolation, coordinate math, farmland
+overlay selection, and Discord-facing PNG/text fallback. The following checks
+still require a real FS25 build and a human-observable test environment:
+
+| Check | Procedure | Success evidence | Failure meaning |
+| --- | --- | --- | --- |
+| GIANTS field extraction | Load the target save, run `sinSelfTest`, and retain the map probe plus the emitted `map_geometry` event after startup. | Active map identity/dimensions and expected field IDs, polygon points, and `field.farmland.id` are present. | The exporter must be adapted to that map/runtime API or the map remains unavailable. |
+| Farmland layer and ownership | Compare the probe's farmland count/IDs with the in-game farmland layer and the authenticated snapshot; request a known parcel overlay only when trusted parcel geometry exists. | IDs and ownership agree; no field polygon is presented as a farmland boundary. | The density-map source or ownership snapshot is incomplete/stale; do not claim parcel geometry. |
+| PDA orientation/alignment | Render Field 22 and an irregular field, then compare the attachment with the in-game PDA/overview image. | Highlights line up in position and orientation at the same map corners/interior landmarks. | Adjust the map's explicit orientation metadata or keep the output marked geometry-only. |
+| Map-change refresh | Change the loaded save/map in a disposable test context, emit a new generation, and verify the central record/reload selects only the new server/save projection. | New revision is visible, older delayed data is rejected, and no prior server/map geometry leaks into the new context. | Runtime generation/map identity detection is insufficient for that change path. |
+| Discord attachment/readability | Publish a contract/farmland card through the configured Jobs channel using the exact generic mod export. | The PNG is attached, readable, and the requested selection is visibly distinguishable; text fallback remains usable when unavailable. | Discord permissions, raster scaling, or map alignment require operational adjustment. |
+| FS25 file lifecycle | Restart the dedicated server and Agent around the mailbox export, including one interrupted/retried event. | The event is delivered once, malformed data is quarantined, and no proprietary map path or asset is copied into the release. | Mailbox timing or runtime file lifecycle needs a targeted fix. |
+
+These are evidence gates, not assumptions made by the local test suite. Record
+the server/client build, ZIP hashes, probe output, sanitized event metadata,
+rendered image, and Discord result. Never include binding contents,
+credentials, connection strings, or raw player identifiers.
 
 ## Tomorrow's validation checklist
 

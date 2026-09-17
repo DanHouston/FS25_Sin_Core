@@ -8,6 +8,7 @@ from fs25_network_core.map_service import (
     MapModel,
     MapRenderer,
     MapService,
+    MapStore,
     MapTransform,
     MapUnavailable,
     MapValidationError,
@@ -32,6 +33,31 @@ def rgba_base(width, height, color=(30, 40, 50, 255)):
     return bytes(color) * (width * height)
 
 
+class _MapCollection:
+    def __init__(self):
+        self.rows = []
+
+    def find_one(self, query):
+        return next((dict(row) for row in self.rows
+                     if all(row.get(key) == value for key, value in query.items())), None)
+
+    def update_one(self, query, update, upsert=False):
+        row = next((row for row in self.rows
+                    if all(row.get(key) == value for key, value in query.items())), None)
+        if row is None:
+            if not upsert:
+                return
+            row = {key: value for key, value in query.items()}
+            self.rows.append(row)
+            row.update(update.get("$setOnInsert", {}))
+        row.update(update.get("$set", {}))
+
+
+class _MapDatabase:
+    def __init__(self):
+        self.db = type("Collections", (), {"sin_maps": _MapCollection()})()
+
+
 class MapServiceTests(unittest.TestCase):
     def test_normalized_model_preserves_field_farmland_distinction_and_geometry(self):
         model = synthetic_model()
@@ -42,6 +68,66 @@ class MapServiceTests(unittest.TestCase):
         self.assertLess(field.bounds[0], field.bounds[2])
         round_trip = MapModel.from_dict(model.to_dict())
         self.assertEqual(round_trip.to_dict(), model.to_dict())
+        self.assertEqual(model.farmland_ids, (1,))
+        self.assertEqual(model.world_bounds, (-50.0, -50.0, 50.0, 50.0))
+
+    def test_map_store_persists_reload_and_rejects_older_runtime_generation(self):
+        database = _MapDatabase()
+        store = MapStore(database)
+        model = synthetic_model()
+        inserted = store.persist("server-a", "save-a", model, source_generation=2)
+        self.assertEqual(inserted["status"], "inserted")
+        restored = MapService()
+        self.assertTrue(restored.load_persisted(store, "server-a", "save-a"))
+        self.assertEqual(restored.model("server-a", "save-a").to_dict(), model.to_dict())
+
+        changed = MapModel.from_dict({**model.to_dict(), "map_title": "New revision"})
+        stale = store.persist("server-a", "save-a", changed, source_generation=1)
+        self.assertEqual(stale["status"], "stale")
+        self.assertEqual(store.load_model("server-a", "save-a").revision, model.revision)
+
+        newer = store.persist("server-a", "save-a", changed, source_generation=3)
+        self.assertEqual(newer["status"], "updated")
+        self.assertTrue(restored.load_persisted(store, "server-a", "save-a"))
+        self.assertEqual(restored.model("server-a", "save-a").map_title, "New revision")
+
+    def test_map_service_scopes_overlapping_ids_by_server_and_renders_farmland(self):
+        service = MapService()
+        first = synthetic_model()
+        second = MapModel.from_dict({**first.to_dict(), "map_title": "Other map",
+                                     "fields": {"22": {**first.fields[22].to_dict(),
+                                                         "rings": [[[-20, -20], [30, -20], [30, 30]]]}}})
+        service.register_map("server-a", "save", first, base_rgba=rgba_base(32, 32))
+        service.register_map("server-b", "save", second, base_rgba=rgba_base(32, 32))
+        first_image = service.render_map("server-a", "save", highlight_farmlands=[1])
+        second_image = service.render_map("server-b", "save", highlight_fields=[22])
+        self.assertTrue(first_image.startswith(b"\x89PNG"))
+        self.assertTrue(second_image.startswith(b"\x89PNG"))
+        self.assertNotEqual(first_image, second_image)
+        self.assertEqual(service.model("server-a", "save").map_title, "Synthetic Map")
+        self.assertEqual(service.model("server-b", "save").map_title, "Other map")
+
+    def test_invalid_persisted_revision_fails_closed(self):
+        database = _MapDatabase()
+        store = MapStore(database)
+        model = synthetic_model()
+        store.persist("server", "save", model)
+        database.db.sin_maps.rows[0]["map_revision"] = "wrong"
+        with self.assertRaises(MapValidationError):
+            store.load_model("server", "save")
+
+    def test_unsupported_coordinate_system_is_rejected(self):
+        payload = synthetic_model().to_dict()
+        payload["coordinate_system"] = "arbitrary"
+        with self.assertRaises(MapValidationError):
+            MapModel.from_dict(payload)
+
+    def test_legacy_payload_without_coordinate_metadata_uses_centered_xz_default(self):
+        payload = synthetic_model().to_dict()
+        payload.pop("coordinate_system")
+        self.assertEqual(MapModel.from_dict(payload).coordinate_system, "giants-centered-xz")
+        payload["coordinate_system"] = None
+        self.assertEqual(MapModel.from_dict(payload).coordinate_system, "giants-centered-xz")
 
     def test_malformed_geometry_and_unsafe_identity_are_rejected(self):
         with self.assertRaises(MapValidationError):

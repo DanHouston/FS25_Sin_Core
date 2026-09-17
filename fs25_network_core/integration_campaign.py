@@ -233,16 +233,18 @@ class BoundaryCentral(OfflineCentral):
     requests without ever exposing the credential in a report.
     """
 
-    def __init__(self, registration=False):
+    def __init__(self, registration=False, credentials=None):
         super().__init__()
         self.registration = registration
         self.registrations = []
         self.calls = []
+        self.credentials = dict(credentials or {"sin-campaign": "campaign-secret"})
 
     def __call__(self, request, timeout=10):
         path = urlsplit(request.full_url).path
         if not path.endswith("/api/server/pair"):
-            if request.headers.get("X-sin-server-key") != "sin-campaign" or request.headers.get("Authorization") != "Bearer campaign-secret":
+            server_key = request.headers.get("X-sin-server-key")
+            if self.credentials.get(server_key) != request.headers.get("Authorization", "").removeprefix("Bearer "):
                 raise AssertionError("boundary request was not authenticated")
             payload = json.loads(request.data.decode("utf-8")) if request.data else {}
             self.calls.append({"path": path, "payload": payload})
@@ -282,10 +284,12 @@ class ProcessorCentral(BoundaryCentral):
     def __call__(self, request, timeout=10):
         path = urlsplit(request.full_url).path
         if path.endswith("/api/server/events"):
-            if request.headers.get("X-sin-server-key") != "sin-campaign" or request.headers.get("Authorization") != "Bearer campaign-secret":
+            server_key = request.headers.get("X-sin-server-key")
+            credential = self.credentials.get(server_key)
+            if credential is None or request.headers.get("Authorization") != "Bearer " + credential:
                 raise AssertionError("central event boundary received an unauthenticated request")
             event = json.loads(request.data.decode("utf-8"))
-            event["server_credential"] = "campaign-secret"
+            event["server_credential"] = credential
             self.calls.append({"path": path, "payload": event})
             self.events.append(event)
             try:
@@ -340,8 +344,8 @@ class MailboxBoundaryAdapter:
     def __init__(self, root: Path):
         self.root = Path(root)
 
-    def bind(self):
-        _write_binding_and_snapshot(self.root)
+    def bind(self, server_key="sin-campaign", credential="campaign-secret", save_id="1"):
+        _write_binding_and_snapshot(self.root, server_key, credential, save_id)
 
     def registration_request(self):
         directory = self.root / "registration-requests"
@@ -351,12 +355,12 @@ class MailboxBoundaryAdapter:
             'fs25_unique_user_id="stable-player" observed_name="Campaign Player" '
             'transient_user_id="7"/>', encoding="utf-8")
 
-    def map_event(self):
+    def map_event(self, server_key="sin-campaign", credential="campaign-secret", save_id="1"):
         directory = self.root / "events"
         directory.mkdir(parents=True, exist_ok=True)
         (directory / "map.xml").write_text(
             '<serverEvent event_id="map-1" event_type="map_geometry" '
-            'server_key="sin-campaign" server_credential="campaign-secret" save_id="1" '
+            f'server_key="{server_key}" server_credential="{credential}" save_id="{save_id}" '
             'map_id="campaign-map" map_title="Campaign Map" world_width="2048" '
             'world_depth="2048" image_width="256" image_height="256" '
             'overview_asset_identity="campaign-overview" version="1" '
@@ -365,7 +369,8 @@ class MailboxBoundaryAdapter:
             '<point x="10" z="10"/></points></field></fields></serverEvent>',
             encoding="utf-8")
 
-    def map_contract_event(self, event_id="map-contract-1", changed=False, invalid=False):
+    def map_contract_event(self, event_id="map-contract-1", changed=False, invalid=False,
+                           server_key="sin-campaign", credential="campaign-secret", save_id="1"):
         """Write a NetworkLocal-compatible two-field geometry fixture.
 
         Field 22 is deliberately simple enough to make the requested-field
@@ -382,6 +387,11 @@ class MailboxBoundaryAdapter:
         field_47 = [("250", "-650"), ("620", "-650"), ("760", "-470"),
                     ("610", "-240"), ("430", "-320"), ("300", "-180"),
                     ("180", "-420")]
+        if server_key != "sin-campaign":
+            # Keep IDs overlapping while making the independent server
+            # projection observably different.
+            field_22 = [(str(int(x) + 100), z) for x, z in field_22]
+            field_47 = [(str(int(x) + 100), z) for x, z in field_47]
         if changed:
             field_47[-2] = ("300", "-130")
         field_22_points = "".join(f'<point x="{x}" z="{z}"/>' for x, z in field_22)
@@ -389,16 +399,27 @@ class MailboxBoundaryAdapter:
         if invalid:
             field_47_points = '<point x="250" z="-650"/><point x="620" z="-650"/>'
         path = directory / f"{event_id}.xml"
+        farmland_22 = '<farmland farmland_id="22" area_ha="40"><points>' \
+                      '<point x="-800" z="-750"/><point x="-300" z="-750"/>' \
+                      '<point x="-300" z="-200"/><point x="-800" z="-200"/>' \
+                      '</points></farmland>'
+        farmland_47 = '<farmland farmland_id="47" area_ha="55"><points>' \
+                      '<point x="100" z="-750"/><point x="850" z="-750"/>' \
+                      '<point x="850" z="-100"/><point x="100" z="-100"/>' \
+                      '</points></farmland>'
+        farmland_xml = farmland_22 + farmland_47
+        source_generation = 2 if changed else 1
         path.write_text(
             f'<serverEvent event_id="{event_id}" event_type="map_geometry" '
-            'server_key="sin-campaign" server_credential="campaign-secret" save_id="1" '
+            f'server_key="{server_key}" server_credential="{credential}" save_id="{save_id}" '
+            f'source_generation="{source_generation}" '
             'map_id="campaign-map" map_title="Campaign Map" world_width="2048" '
             'world_depth="2048" image_width="128" image_height="128" '
             'overview_asset_identity="campaign-overview" version="1" '
-            'image_y_inverted="true"><fields>'
+            'image_y_inverted="true" coordinate_system="giants-centered-xz"><fields>'
             f'<field field_id="22" farmland_id="22" area_ha="12.5"><points>{field_22_points}</points></field>'
             f'<field field_id="47" farmland_id="47" area_ha="18.0"><points>{field_47_points}</points></field>'
-            '</fields></serverEvent>', encoding="utf-8")
+            f'</fields><farmlands>{farmland_xml}</farmlands></serverEvent>', encoding="utf-8")
         return path
 
     def activity_connect(self, event_id="connect-1"):
@@ -554,13 +575,15 @@ class _MemoryDatabaseCollections:
         return self._collections.setdefault(name, _MemoryCollection())
 
 
-def _write_binding_and_snapshot(root: Path) -> None:
+def _write_binding_and_snapshot(root: Path, server_key="sin-campaign",
+                                credential="campaign-secret", save_id="1") -> None:
+    root.mkdir(parents=True, exist_ok=True)
     (root / "serverBinding.xml").write_text(
-        '<serverBinding serverKey="sin-campaign" credential="campaign-secret"/>',
+        f'<serverBinding serverKey="{server_key}" credential="{credential}"/>',
         encoding="utf-8")
     (root / "snapshot.xml").write_text(
-        '<networkLocal source="game" session="campaign-session" sequence="1" '
-        'savegameIndex="1"><farms><farm farmId="2" name="Campaign Farm"/>'
+        f'<networkLocal source="game" session="campaign-session" sequence="1" '
+        f'savegameIndex="{save_id}"><farms><farm farmId="2" name="Campaign Farm"/>'
         '</farms><players><player uniqueId="stable-player" userId="7" '
         'name="Campaign Player" farmId="2" connected="true"/></players></networkLocal>',
         encoding="utf-8")
@@ -950,10 +973,18 @@ def _authoritative_map_contract(root: Path) -> Mapping[str, object]:
     mailbox.map_contract_event()
     database = _MemoryDatabase()
     processor = CentralEventProcessor(database)
-    processor.registry.authenticate = lambda server_key, credential: {
-        "server_key": "sin-campaign", "display_name": "Campaign", "online": True}
-    processor.registry.resolve_save = lambda server_key, save_id: "campaign-save"
+    credentials = {"sin-campaign": "campaign-secret", "sin-other": "other-secret"}
+    saves = {"sin-campaign": "campaign-save", "sin-other": "other-save"}
+
+    def authenticate(server_key, credential):
+        if credentials.get(server_key) != credential:
+            raise ValueError("invalid campaign credential")
+        return {"server_key": server_key, "display_name": server_key, "online": True}
+
+    processor.registry.authenticate = authenticate
+    processor.registry.resolve_save = lambda server_key, save_id: saves[server_key]
     central = ProcessorCentral(processor)
+    central.credentials = credentials
     agent = PairingAgent(root, "http://offline", central)
     processed_initial = agent.process_events_once()
     persisted_initial = database.db.sin_maps.find_one({
@@ -967,8 +998,24 @@ def _authoritative_map_contract(root: Path) -> Mapping[str, object]:
     geometry_initial = persisted_initial.get("map_payload", {})
     fields_initial = geometry_initial.get("fields", {})
     if (set(fields_initial) != {"22", "47"} or fields_initial["22"].get("farmland_id") != 22
-            or len(fields_initial["47"].get("rings", [[]])[0]) != 7):
+            or len(fields_initial["47"].get("rings", [[]])[0]) != 7
+            or geometry_initial.get("farmland_ids") != [22, 47]
+            or set(geometry_initial.get("farmlands", {})) != {"22", "47"}):
         raise AssertionError("persisted map did not retain both required geometries")
+
+    # A second authenticated Agent/mailbox proves that the same field and
+    # farmland IDs are scoped by server/save rather than accidentally shared.
+    other_root = root.parent / "map-server-other"
+    other_mailbox = MailboxBoundaryAdapter(other_root)
+    other_mailbox.bind("sin-other", "other-secret", "1")
+    other_mailbox.map_contract_event("map-other", server_key="sin-other",
+                                     credential="other-secret", save_id="1")
+    other_agent = PairingAgent(other_root, "http://offline", central)
+    other_processed = other_agent.process_events_once()
+    other_record = database.db.sin_maps.find_one({
+        "server_key": "sin-other", "save_key": "other-save"})
+    if not other_record or other_processed != ["map-other.xml"]:
+        raise AssertionError("second server map was not independently persisted")
 
     map_service = _CountingMapService()
     bot = NetworkBot(_CaptureBank(database), {}, 1, channels={"jobs": 999}, map_service=map_service)
@@ -986,6 +1033,13 @@ def _authoritative_map_contract(root: Path) -> Mapping[str, object]:
             initial_published = await bot.publish_contract_card(persisted_contract)
             initial_loads = map_service.payload_loads
             initial_render = dict(map_service.render_requests[-1]) if map_service.render_requests else None
+            farmland_loaded = bot.ensure_registered_map("sin-campaign", "campaign-save")
+            farmland_rendered = map_service.render_map(
+                "sin-campaign", "campaign-save", highlight_farmlands=[22],
+                ownership={22: {"farm_id": 2, "farm_name": "Campaign Farm"}})
+            other_loaded = bot.ensure_registered_map("sin-other", "other-save")
+            other_rendered = map_service.render_map("sin-other", "other-save",
+                                                    highlight_fields=[22])
 
             # A second event with equivalent content must not cause JiN's
             # persisted-map loader to rebuild its MapService projection.
@@ -1008,6 +1062,12 @@ def _authoritative_map_contract(root: Path) -> Mapping[str, object]:
             changed_after = map_service.payload_loads
             changed_rendered = map_service.render_contract_map("sin-campaign", "campaign-save", "22")
 
+            # A delayed event from the previous runtime must not roll back a
+            # newer source generation, even though it has a distinct event ID.
+            mailbox.map_contract_event("map-contract-stale")
+            stale_processed = agent.process_events_once()
+            stale_result = central.results[-1] if central.results else {}
+
             # Keep the real presentation fallback covered without replacing
             # the successful attachment path above.
             fallback_contract = contracts.create(
@@ -1019,6 +1079,10 @@ def _authoritative_map_contract(root: Path) -> Mapping[str, object]:
                 "initial_published": initial_published,
                 "initial_loads": initial_loads,
                 "initial_render": initial_render,
+                "farmland_loaded": farmland_loaded,
+                "farmland_rendered": farmland_rendered,
+                "other_loaded": other_loaded,
+                "other_rendered": other_rendered,
                 "stable_processed": stable_processed,
                 "stable_record": stable_record,
                 "stable_loaded": stable_loaded,
@@ -1030,6 +1094,8 @@ def _authoritative_map_contract(root: Path) -> Mapping[str, object]:
                 "changed_loads_before": changed_before,
                 "changed_loads_after": changed_after,
                 "changed_rendered": changed_rendered,
+                "stale_processed": stale_processed,
+                "stale_result": stale_result,
                 "fallback_published": fallback_published,
             }
         finally:
@@ -1045,6 +1111,8 @@ def _authoritative_map_contract(root: Path) -> Mapping[str, object]:
     png_evidence = _inspect_png(attachment_bytes)
     png_signature = bool(png_evidence)
     png_dimensions = png_evidence.get("dimensions") if png_evidence else None
+    farmland_png = _inspect_png(presentation["farmland_rendered"])
+    other_png = _inspect_png(presentation["other_rendered"])
     final_record = database.db.sin_maps.find_one({
         "server_key": "sin-campaign", "save_key": "campaign-save"})
     final_model = map_service.model("sin-campaign", "campaign-save")
@@ -1066,6 +1134,11 @@ def _authoritative_map_contract(root: Path) -> Mapping[str, object]:
             and presentation["changed_loaded"] and presentation["changed_loads_after"] == presentation["changed_loads_before"] + 1
             and presentation["initial_render"] and presentation["initial_render"]["highlight_fields"] == [22]
             and final_model.fields.keys() == {22, 47}
+            and presentation["farmland_loaded"] and farmland_png and farmland_png["valid"]
+            and presentation["other_loaded"] and other_png and other_png["valid"]
+            and other_record["map_payload"]["fields"]["22"] != final_record["map_payload"]["fields"]["22"]
+            and presentation["stale_processed"] == ["map-contract-stale.xml"]
+            and presentation["stale_result"].get("map_persistence") == "stale"
             and invalid_processed == [] and invalid_quarantine.exists()
             and final_record.get("map_revision") == presentation["changed_record"].get("map_revision")):
         # The explicit checks below keep the failure messages local and avoid
@@ -1105,7 +1178,9 @@ def _authoritative_map_contract(root: Path) -> Mapping[str, object]:
                 "forwarded_revision": central.results[0].get("map_revision")},
                 "central": {"persisted": True, "map_id": persisted_initial["map_payload"]["map_id"],
                             "save_key": persisted_initial["save_key"], "revision": persisted_initial["map_revision"],
-                            "fields": sorted(persisted_initial["map_payload"]["fields"])},
+                            "fields": sorted(persisted_initial["map_payload"]["fields"]),
+                            "farmland_ids": persisted_initial["map_payload"]["farmland_ids"],
+                            "farmland_geometry": sorted(persisted_initial["map_payload"]["farmlands"])},
                 "central_result": central.results[0],
                 "downstream_load": {"source": "persisted_sin_maps", "initial_payload_loads": presentation["initial_loads"],
                                     "stable_revision_unchanged": presentation["stable_record"]["map_revision"] == persisted_initial["map_revision"],
@@ -1118,6 +1193,8 @@ def _authoritative_map_contract(root: Path) -> Mapping[str, object]:
                              "save_key": persisted_contract["save_key"], "requested_field": "22"},
                 "render": {"requested_field": 22, "highlighted_field": highlighted["highlight_fields"],
                            "available_fields": sorted(final_model.fields), "farmland_id": final_field.farmland_id,
+                           "farmland_ids": list(final_model.farmland_ids),
+                           "farmland_overlay_rendered": bool(farmland_png and farmland_png["valid"]),
                            "irregular_field_47_present": 47 in final_model.fields,
                            "irregular_field_47_not_highlighted": 47 not in highlighted["highlight_fields"],
                            "png_generated": png_signature, "png_valid": bool(png_evidence and png_evidence["valid"]),
@@ -1130,6 +1207,8 @@ def _authoritative_map_contract(root: Path) -> Mapping[str, object]:
                                  "text_only_fallback": "file" not in channel.deliveries[1]},
                 "revision": {"stable_processed": presentation["stable_processed"],
                              "changed_processed": presentation["changed_processed"],
+                             "stale_processed": presentation["stale_processed"],
+                             "stale_rejected": presentation["stale_result"].get("map_persistence") == "stale",
                              "initial_revision": persisted_initial["map_revision"],
                              "changed_revision": presentation["changed_record"]["map_revision"],
                              "payload_loads": map_service.payload_loads},
@@ -1140,6 +1219,12 @@ def _authoritative_map_contract(root: Path) -> Mapping[str, object]:
                 "filesystem_safety": {"unsafe_identity_rejected": unsafe_identity_rejected,
                                       "arbitrary_path_lookup_rejected": not arbitrary_path_lookup,
                                       "path_input_to_renderer": False},
+                "multi_server": {"other_server": "sin-other", "other_save": "other-save",
+                                 "overlapping_field_ids": sorted(other_record["map_payload"]["fields"]),
+                                 "independent_persisted": bool(other_record),
+                                 "independent_load": presentation["other_loaded"],
+                                 "independent_render": bool(other_png and other_png["valid"]),
+                                 "no_cross_server_geometry_leak": other_record["map_payload"]["fields"]["22"] != final_record["map_payload"]["fields"]["22"]},
                 "replay_is_idempotent": bool(replay_result.get("duplicate")),
                 "central_results": central.results,
                 "authenticated_requests": len(central.calls)}}

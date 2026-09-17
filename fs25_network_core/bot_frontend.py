@@ -21,7 +21,7 @@ from .activity_telemetry import ActivityTelemetryProcessor
 from .business_workflows import (ChatService, ContractService, InvoiceService,
                                   CommunityEventService, TransferService)
 from .farm_lifecycle import FarmLifecycle, SYSTEM_FARM_NAME
-from .map_service import MapService, MapValidationError
+from .map_service import MapService, MapStore, MapValidationError
 
 
 class DiscordSetupError(RuntimeError):
@@ -1041,19 +1041,8 @@ class NetworkBot(discord.Client):
         """
         if not server_key or not save_key:
             return False
-        document = self.bank.database.db.sin_maps.find_one({
-            "server_key": str(server_key), "save_key": str(save_key)})
-        if not isinstance(document, dict):
-            return False
-        revision = document.get("map_revision")
-        if revision and revision == self.map_service.revision(server_key, save_key):
-            return True
-        payload = document.get("map_payload") if isinstance(document, dict) else None
-        if not isinstance(payload, dict):
-            return False
         try:
-            self.map_service.register_payload(server_key, save_key, payload)
-            return True
+            return self.map_service.load_persisted(MapStore(self.bank.database), server_key, save_key)
         except (MapValidationError, ValueError):
             logging.warning("Stored runtime map geometry is invalid; using text-only contract card")
             return False

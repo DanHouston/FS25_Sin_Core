@@ -28,6 +28,7 @@ MAX_RING_POINTS = 10_000
 MAX_TOTAL_POINTS = 100_000
 MAX_OVERLAYS = 100
 MAP_SCHEMA_VERSION = 1
+MAP_COORDINATE_SYSTEM = "giants-centered-xz"
 
 
 def generated_background(width, height):
@@ -264,6 +265,8 @@ class MapModel:
     farmlands: Mapping[int, FarmlandGeometry]
     version: int = MAP_SCHEMA_VERSION
     image_y_inverted: bool = True
+    coordinate_system: str = MAP_COORDINATE_SYSTEM
+    farmland_ids: tuple = ()
 
     def __post_init__(self):
         map_id = _identity(self.map_id, "map_id")
@@ -287,13 +290,25 @@ class MapModel:
             raise MapValidationError("map version must be a positive integer")
         if not isinstance(self.image_y_inverted, bool):
             raise MapValidationError("image_y_inverted must be boolean")
+        coordinate_system = _identity(self.coordinate_system, "coordinate_system")
+        if coordinate_system != MAP_COORDINATE_SYSTEM:
+            raise MapValidationError("unsupported coordinate system")
         fields = {int(key): value for key, value in dict(self.fields or {}).items()}
         farmlands = {int(key): value for key, value in dict(self.farmlands or {}).items()}
+        try:
+            farmland_ids = {int(value) for value in (self.farmland_ids or ())}
+        except (TypeError, ValueError):
+            raise MapValidationError("farmland_ids must be positive integers") from None
         if any(key <= 0 or not isinstance(value, FieldGeometry) or key != value.field_id for key, value in fields.items()):
             raise MapValidationError("fields must be keyed by their positive field_id")
         if any(key <= 0 or not isinstance(value, FarmlandGeometry) or key != value.farmland_id
                for key, value in farmlands.items()):
             raise MapValidationError("farmlands must be keyed by their positive farmland_id")
+        farmland_ids.update(farmlands)
+        farmland_ids.update(value.farmland_id for value in fields.values()
+                             if value.farmland_id is not None)
+        if any(value <= 0 for value in farmland_ids):
+            raise MapValidationError("farmland_ids must be positive integers")
         if len(fields) > MAX_OVERLAYS * 10 or len(farmlands) > MAX_OVERLAYS * 10:
             raise MapValidationError("map contains too many geometry records")
         object.__setattr__(self, "map_id", map_id)
@@ -306,6 +321,8 @@ class MapModel:
         object.__setattr__(self, "version", version)
         object.__setattr__(self, "fields", fields)
         object.__setattr__(self, "farmlands", farmlands)
+        object.__setattr__(self, "coordinate_system", coordinate_system)
+        object.__setattr__(self, "farmland_ids", tuple(sorted(farmland_ids)))
 
     def to_dict(self):
         return {"schema_version": MAP_SCHEMA_VERSION, "map_id": self.map_id,
@@ -314,8 +331,16 @@ class MapModel:
                 "image_height": self.image_height,
                 "overview_asset_identity": self.overview_asset_identity,
                 "version": self.version, "image_y_inverted": self.image_y_inverted,
+                "coordinate_system": self.coordinate_system,
+                "farmland_ids": list(self.farmland_ids),
                 "fields": {str(key): value.to_dict() for key, value in self.fields.items()},
                 "farmlands": {str(key): value.to_dict() for key, value in self.farmlands.items()}}
+
+    @property
+    def world_bounds(self):
+        """The centered FS25 world bounds represented by this map."""
+        return (-self.world_width / 2.0, -self.world_depth / 2.0,
+                self.world_width / 2.0, self.world_depth / 2.0)
 
     @property
     def revision(self):
@@ -342,7 +367,9 @@ class MapModel:
         return cls(value.get("map_id"), value.get("map_title"), value.get("world_width"),
                    value.get("world_depth"), value.get("image_width"), value.get("image_height"),
                    value.get("overview_asset_identity"), fields, farmlands,
-                   value.get("version", MAP_SCHEMA_VERSION), value.get("image_y_inverted", True))
+                   value.get("version", MAP_SCHEMA_VERSION), value.get("image_y_inverted", True),
+                   value.get("coordinate_system") or MAP_COORDINATE_SYSTEM,
+                   value.get("farmland_ids", ()))
 
 
 @dataclass(frozen=True)
@@ -361,6 +388,7 @@ class MapTransform:
     image_width: int
     image_height: int
     image_y_inverted: bool = True
+    coordinate_system: str = MAP_COORDINATE_SYSTEM
 
     def __post_init__(self):
         object.__setattr__(self, "world_width", _finite_number(self.world_width, "world_width"))
@@ -369,6 +397,10 @@ class MapTransform:
             raise MapValidationError("transform world dimensions must be positive")
         object.__setattr__(self, "image_width", _positive_dimension(self.image_width, "image_width"))
         object.__setattr__(self, "image_height", _positive_dimension(self.image_height, "image_height"))
+        coordinate_system = _identity(self.coordinate_system, "coordinate_system")
+        if coordinate_system != MAP_COORDINATE_SYSTEM:
+            raise MapValidationError("unsupported coordinate system")
+        object.__setattr__(self, "coordinate_system", coordinate_system)
 
     @staticmethod
     def _axis(value, size, label):
@@ -418,7 +450,8 @@ class MapRenderer:
         ownership = ownership or {}
         pixels = bytearray(base_rgba)
         transform = MapTransform(model.world_width, model.world_depth, model.image_width,
-                                 model.image_height, model.image_y_inverted)
+                                 model.image_height, model.image_y_inverted,
+                                 model.coordinate_system)
         for field_id in fields:
             geometry = model.fields[field_id]
             rings = self._pixel_rings(geometry.rings, transform)
@@ -664,6 +697,88 @@ class _BoundedCache:
         return len(self._items)
 
 
+class MapStore:
+    """Validated durable ``sin_maps`` persistence for the reusable map model.
+
+    The event processor owns authentication and event idempotency; this class
+    owns only the map document boundary.  A single document is replaced by
+    one Mongo update, so consumers never observe a half-written geometry
+    payload.  ``source_generation`` is an optional monotonic runtime
+    generation emitted by the FS25 mailbox and prevents an older runtime from
+    replacing a newer map after a delayed delivery.
+    """
+
+    def __init__(self, database):
+        self.collection = database.db.sin_maps
+
+    @staticmethod
+    def key(server_key, save_key):
+        return hashlib.sha256((str(server_key) + "|" + str(save_key)).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _generation(value):
+        if value is None or value == "":
+            return None
+        try:
+            generation = int(value)
+        except (TypeError, ValueError):
+            raise MapValidationError("source_generation must be an integer") from None
+        if generation < 1:
+            raise MapValidationError("source_generation must be positive")
+        return generation
+
+    def record(self, server_key, save_key):
+        document = self.collection.find_one({
+            "_id": self.key(server_key, save_key),
+            "server_key": str(server_key), "save_key": str(save_key)})
+        return document if isinstance(document, Mapping) else None
+
+    def load_model(self, server_key, save_key):
+        document = self.record(server_key, save_key)
+        if document is None:
+            return None
+        payload = document.get("map_payload")
+        if not isinstance(payload, Mapping):
+            raise MapValidationError("stored map payload is missing")
+        model = MapModel.from_dict(payload)
+        stored_revision = document.get("map_revision")
+        if stored_revision and stored_revision != model.revision:
+            raise MapValidationError("stored map revision does not match its payload")
+        return model
+
+    def persist(self, server_key, save_key, model: MapModel, *, now=None, source_generation=None):
+        if not isinstance(model, MapModel):
+            raise MapValidationError("model must be a MapModel")
+        source_generation = self._generation(source_generation)
+        key = self.key(server_key, save_key)
+        existing = self.record(server_key, save_key)
+        existing_generation = self._generation(existing.get("source_generation")) if existing else None
+        if (existing_generation is not None and source_generation is not None
+                and source_generation < existing_generation):
+            return {"status": "stale", "map_revision": existing.get("map_revision"),
+                    "source_generation": existing_generation}
+        timestamp = now
+        if timestamp is None:
+            from datetime import datetime, timezone
+            timestamp = datetime.now(timezone.utc)
+        values = {
+            "map_id": model.map_id, "map_version": model.version,
+            "map_revision": model.revision, "map_payload": model.to_dict(),
+            "updated_at": timestamp,
+        }
+        if source_generation is not None:
+            values["source_generation"] = source_generation
+        update = {"$set": values}
+        if existing is None:
+            update["$setOnInsert"] = {"_id": key, "server_key": str(server_key),
+                                       "save_key": str(save_key), "created_at": timestamp}
+            self.collection.update_one({"_id": key}, update, upsert=True)
+        else:
+            self.collection.update_one({"_id": key}, update, upsert=False)
+        return {"status": "updated" if existing else "inserted",
+                "map_revision": model.revision, "source_generation": source_generation}
+
+
 class MapService:
     """Central map registry and renderer with bounded static/render caches."""
 
@@ -709,6 +824,25 @@ class MapService:
             base_rgba = generated_background(model.image_width, model.image_height)
         self.register_map(server_key, save_key, model, base_rgba=base_rgba, overview_dds=overview_dds)
         return model
+
+    def load_persisted(self, store: MapStore, server_key, save_key):
+        """Load one validated map projection without exposing storage to callers.
+
+        The store is deliberately supplied by the central process.  This
+        keeps MapService reusable in tests and presentation code while making
+        the durable/reload boundary explicit and server/save scoped.
+        """
+        model = store.load_model(server_key, save_key)
+        if model is None:
+            return False
+        if model.revision == self.revision(server_key, save_key):
+            return True
+        # Keep the public payload ingestion boundary in the load path as well;
+        # presentation adapters can observe one projection load without
+        # gaining access to storage or bypassing model validation.
+        self.register_payload(server_key, save_key, model.to_dict(),
+                              base_rgba=generated_background(model.image_width, model.image_height))
+        return True
 
     def unregister_map(self, server_key, save_key):
         self._maps.pop((str(server_key), str(save_key)), None)

@@ -12,7 +12,7 @@ from .activity_telemetry import (ACTIVITY_EVENT_TYPE, ActivityTelemetryError,
 from .business_workflows import ChatService
 from .business_workflows import TransferService
 from .banking_engine import BankingEngine
-from .map_service import MapModel, MapValidationError
+from .map_service import MapModel, MapStore, MapValidationError
 from pymongo.errors import DuplicateKeyError
 
 LOG = logging.getLogger(__name__)
@@ -99,15 +99,11 @@ class CentralEventProcessor:
                 model = MapModel.from_dict(raw_payload["map"])
             except MapValidationError as error:
                 raise EventValidationError(str(error)) from None
-            map_key = hashlib.sha256((record["server_key"] + "|" + save_key).encode("utf-8")).hexdigest()
-            self.db.sin_maps.update_one(
-                {"_id": map_key},
-                {"$setOnInsert": {"_id": map_key, "server_key": record["server_key"],
-                                   "save_key": save_key, "created_at": now},
-                 "$set": {"map_id": model.map_id, "map_version": model.version,
-                           "map_revision": model.revision, "map_payload": model.to_dict(), "updated_at": now}},
-                upsert=True)
-            result = {"status": "accepted", "map_id": model.map_id,
+            map_result = MapStore(self.database).persist(
+                record["server_key"], save_key, model, now=now,
+                source_generation=raw_payload.get("source_generation"))
+            result = {"status": "accepted", "map_persistence": map_result["status"],
+                      "map_id": model.map_id,
                       "map_version": model.version, "map_revision": model.revision, "save_key": save_key}
         elif event_type == CHAT_EVENT_TYPE:
             raw_payload = event.get("payload") or {}

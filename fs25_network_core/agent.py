@@ -487,14 +487,35 @@ class PairingAgent:
                 "area_ha": field.get("area_ha"),
                 "rings": [points],
             }
+        farmlands = {}
+        farmland_ids = []
+        for farmland in root.findall("./farmlands/farmland"):
+            farmland_id = farmland.get("farmland_id")
+            if farmland_id is None:
+                raise ValueError("map farmland ID is required")
+            farmland_ids.append(farmland_id)
+            points = [[point.get("x"), point.get("z")]
+                      for point in farmland.findall("./points/point")]
+            # FS25 exposes farmland ownership through its density map, not a
+            # vector polygon API.  Preserve a polygon only when a trusted
+            # exporter provides one; otherwise retain the farmland identity
+            # and let consumers report geometry as unavailable.
+            if len(points) >= 3:
+                farmlands[str(farmland_id)] = {
+                    "farmland_id": farmland_id,
+                    "area_ha": farmland.get("area_ha"),
+                    "rings": [points],
+                }
         payload = {key: root.get(key) for key in (
             "map_id", "map_title", "world_width", "world_depth", "image_width",
-            "image_height", "overview_asset_identity", "version", "image_y_inverted")}
+            "image_height", "overview_asset_identity", "version", "image_y_inverted",
+            "coordinate_system")}
         payload["schema_version"] = root.get("schema_version", "1")
         payload["image_y_inverted"] = str(payload.get("image_y_inverted", "true")).lower() == "true"
+        payload["farmland_ids"] = farmland_ids
         payload["fields"] = fields
-        payload["farmlands"] = {}
-        return {"map": payload}
+        payload["farmlands"] = farmlands
+        return {"map": payload, "source_generation": root.get("source_generation")}
 
     def process_events_once(self, max_events=None):
         events = self.directory / "events"

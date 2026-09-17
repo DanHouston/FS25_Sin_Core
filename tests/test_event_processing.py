@@ -170,6 +170,7 @@ class EventProcessingTests(unittest.TestCase):
         }}
         result = self.processor.process(event)
         self.assertEqual(result["map_id"], "synthetic")
+        self.assertEqual(result["map_persistence"], "inserted")
         update = self.database.db.sin_maps.update_one.call_args.args[1]
         self.assertEqual(update["$set"]["map_payload"]["map_id"], "synthetic")
         self.assertTrue(set(update["$setOnInsert"]).isdisjoint(update["$set"]))
