@@ -29,6 +29,7 @@ hosted/GPORTAL test is still required to confirm profile persistence there.
 ```powershell
 python -m fs25_network_core.local_test simulate
 python -m fs25_network_core.local_test build-mod
+python scripts/run_integration_campaign.py
 ```
 
 The simulator creates `local-test/simulated-snapshot.xml` exclusively; for another
@@ -38,6 +39,42 @@ No credentials, Python dependencies, or private configuration enter the ZIP.
 Whenever `mods/FS25_SiN_Server/` changes, rebuild this ZIP before deployment
 with `python -m fs25_network_core.local_test build-mod`; FS25 should receive the
 ZIP from `dist`, not the source directory.
+
+The offline integration campaign writes `local-test/integration-campaign.json`.
+It builds the mod, validates a simulated snapshot, delivers a representative
+central operation through the Agent mailbox, consumes it with the protocol
+harness, acknowledges its receipt, and verifies that activity minutes are
+forwarded before a watermarked disconnect. The report contains no credentials.
+
+### Named integration scenarios
+
+The campaign is backed by the reusable `ScenarioRegistry` in
+`fs25_network_core.integration_campaign`. Built-in scenarios are deterministic,
+offline, and safe to run in CI:
+
+```powershell
+python scripts/run_integration_campaign.py --list-scenarios
+python scripts/run_integration_campaign.py --scenario artifact-and-snapshot --output local-test/artifact.json
+python scripts/run_integration_campaign.py --scenario mailbox-roundtrip --output local-test/mailbox.json
+python scripts/run_integration_campaign.py --scenario event-ordering --output local-test/events.json
+```
+
+The six authoritative scenario names are `registration`,
+`control_plane_backlog`, `activity_disconnect`, `map_contract`,
+`contract_scope`, and `authority_regression`. They are the acceptance names;
+the semantic and boundary names remain available for focused diagnostics.
+
+`control_plane_backlog` creates and drains a measured 10,000-entry mailbox
+through the real Agent control plane and reports `backlog_size`,
+`processed_events`, `batches`, and `elapsed_ms`. `activity_disconnect` routes
+the ordered events through `CentralEventProcessor`; `map_contract` continues
+through central map validation and deterministic rendering.
+
+`offline-full` is the default and produces the complete campaign report. A
+consumer can register a `NamedScenario(name, description, execute)` with the
+registry and use `run_named_scenario` without duplicating temporary-directory,
+report-writing, or secret-handling code. Scenario reports include the selected
+scenario name, a passed status, and only stable identifiers and hashes.
 
 ## In FS25
 

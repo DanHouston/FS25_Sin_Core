@@ -4,6 +4,13 @@ The first central-only foundations for community features live in
 `fs25_network_core/business_workflows.py`. They are intentionally separate
 from farm membership and manager authority.
 
+`/contract_create` has an optional eligible server selector with autocomplete.
+A caller with exactly one eligible identity context is scoped automatically;
+multiple contexts require an explicit server, whose configured save must also
+be unambiguous. The explicit `network_wide` option creates a network-wide
+contract; an omitted server selector no longer silently falls back to that
+scope when identity resolution fails.
+
 ## Chat
 
 `chat_messages` stores sanitized, source-tagged messages with an idempotent
@@ -47,6 +54,14 @@ Accept card; the button calls the same atomic central acceptance path and open
 cards are restored after restart. Without that channel configuration, the
 durable slash commands remain available.
 
+The jobs channel is guild-level deployment configuration, not a server or
+business-logic constant. The checked-in `discord.json` carries the current
+deployment value; an operator may instead supply `DISCORD_JOBS_CHANNEL_ID` in
+the bot environment. The bot never guesses or creates a channel. A contract
+creator with exactly one eligible registered server/save is scoped there
+automatically; multiple eligible identity contexts fail closed rather than
+silently selecting a server.
+
 Invoices are separate `invoices` documents and pay through the banking ledger
 exactly once; an issuer cannot invoice the same Discord account. Community
 events are `community_events` documents with scheduled/active/completed/
@@ -67,6 +82,12 @@ unverified vehicle or storage mutation call: unsupported operations are not
 reported as applied and remain a reconciliation concern.
 
 ## Durable operation rules
+
+Permission-command XML is consumed only after the mod has produced its receipt;
+the runtime now removes the exact command file and manifest with GIANTS'
+`deleteFile` API. A `.failed` receipt remains auditable and is not deleted by
+cleanup. This prevents old command XML from being rediscovered while keeping
+failed central acknowledgments durable for retry/reconciliation.
 
 Game-facing value operations remain receipt-gated.  A queued operation is not
 completion: the Agent writes it to the FS25 mailbox, the mod returns a durable

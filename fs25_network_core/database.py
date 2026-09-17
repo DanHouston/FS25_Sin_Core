@@ -71,6 +71,7 @@ class Database:
         self.db.sin_servers.create_index("server_key", unique=True)
         self.db.sin_saves.create_index([("server_key", 1), ("fs25_save_id", 1)], unique=True)
         self.db.sin_saves.create_index([("server_key", 1), ("save_key", 1)], unique=True)
+        self.db.sin_maps.create_index([("server_key", 1), ("save_key", 1)], unique=True)
         self.db.processed_server_events.create_index("processed_at", expireAfterSeconds=604800)
         self.db.activity_outbox.create_index([("status", 1), ("created_at", 1)])
         self._replace_legacy_unique_index(

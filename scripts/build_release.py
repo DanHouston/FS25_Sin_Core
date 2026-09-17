@@ -10,6 +10,11 @@ from pathlib import Path
 from zipfile import ZipFile, ZIP_DEFLATED, ZipInfo
 
 ROOT = Path(__file__).resolve().parents[1]
+import sys
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from fs25_network_core.integration_campaign import authoritative_manifest, run_campaign
 AGENT_FILES = ("fs25_network_core/__init__.py", "fs25_network_core/agent.py")
 MOD_ASSET = "FS25_SiN_Server.zip"
 CLIENT_UPDATER_ASSET = "Update-SiN-Client.ps1"
@@ -91,6 +96,12 @@ def build(version, output):
     shutil.copy2(ROOT / "scripts" / "Update-SiN.ps1", updater)
     client_updater = output / CLIENT_UPDATER_ASSET
     shutil.copy2(ROOT / "scripts" / CLIENT_UPDATER_ASSET, client_updater)
+    # Ship reproducible validation evidence beside the runtime assets.  The
+    # evidence is never included in either runtime ZIP.
+    campaign_report = output / "integration-campaign.json"
+    run_campaign(campaign_report)
+    live_manifest = output / "live-validation-manifest.json"
+    shutil.copy2(ROOT / "docs" / "live-validation-manifest.json", live_manifest)
     manifest = {
         "version": version,
         "git_commit": commit,
@@ -100,6 +111,10 @@ def build(version, output):
         "server_sha256": sha256(mod),
         "updater_sha256": sha256(updater),
         "client_updater_sha256": sha256(client_updater),
+        "campaign_report_sha256": sha256(campaign_report),
+        "live_validation_manifest_sha256": sha256(live_manifest),
+        "required_scenarios": json.loads(live_manifest.read_text(encoding="utf-8"))["required_scenarios"],
+        "authoritative_adapters": [adapter["id"] for adapter in authoritative_manifest()["adapters"]],
         "agent_entrypoint": "python -m fs25_network_core.agent --watch",
         "minimum_python": "3.11",
         "release_format_version": 1,
@@ -108,7 +123,7 @@ def build(version, output):
         "github_run_id": os.environ.get("GITHUB_RUN_ID"),
     }
     (output / "build-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    checksummed = (agent, mod, updater, client_updater)
+    checksummed = (agent, mod, updater, client_updater, campaign_report, live_manifest)
     (output / "SHA256SUMS.txt").write_text(
         "".join(f"{sha256(path)}  {path.name}\n" for path in checksummed), encoding="utf-8")
     return output

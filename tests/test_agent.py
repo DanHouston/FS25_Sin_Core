@@ -138,6 +138,118 @@ class AgentTests(unittest.TestCase):
             PairingAgent(folder, "http://central", opener).process_events_once()
             self.assertTrue(event.exists())
 
+    def test_bounded_batch_uses_session_order_across_lexically_split_mailbox(self):
+        opener = MagicMock(return_value=Response())
+        with tempfile.TemporaryDirectory() as folder:
+            events = Path(folder) / "events"
+            events.mkdir()
+            common = ('server_key="server" server_credential="secret" save_id="1" '
+                      'unique_user_id="u" display_name="Player" session_id="sess" ')
+            files = {
+                "s-100-1-player_connected.xml": '<serverEvent event_id="connect" event_type="player_connected" ' + common + '/>',
+                "s-100-2-player_disconnected.xml": '<serverEvent event_id="disconnect" event_type="player_disconnected" ' + common + 'final_minute_sequence="2"/>',
+                "s-activity-sess-u-1.xml": '<serverEvent event_id="minute-1" event_type="player_activity_minute" ' + common + 'minute_sequence="1" activity_bucket="active" inactive_minutes="0"/>',
+                "s-activity-sess-u-2.xml": '<serverEvent event_id="minute-2" event_type="player_activity_minute" ' + common + 'minute_sequence="2" activity_bucket="idle" inactive_minutes="1"/>',
+            }
+            for name, content in files.items():
+                (events / name).write_text(content, encoding="utf-8")
+            agent = PairingAgent(folder, "http://central", opener)
+            first = agent.process_events_once(max_events=2)
+            self.assertNotIn("s-100-2-player_disconnected.xml", first)
+            self.assertTrue((events / "s-100-2-player_disconnected.xml").exists())
+            second = agent.process_events_once(max_events=2)
+            self.assertIn("s-activity-sess-u-2.xml", second)
+            self.assertIn("s-100-2-player_disconnected.xml", second)
+
+    def test_restart_does_not_require_removed_earlier_minutes(self):
+        opener = MagicMock(return_value=Response())
+        with tempfile.TemporaryDirectory() as folder:
+            events = Path(folder) / "events"
+            events.mkdir()
+            common = ('server_key="server" server_credential="secret" save_id="1" '
+                      'unique_user_id="u" display_name="Player" session_id="runtime-session" ')
+            (events / "minute-2.xml").write_text(
+                '<serverEvent event_id="minute-2" event_type="player_activity_minute" ' + common +
+                'minute_sequence="2" activity_bucket="idle" inactive_minutes="1"/>', encoding="utf-8")
+            (events / "disconnect.xml").write_text(
+                '<serverEvent event_id="disconnect" event_type="player_disconnected" ' + common +
+                'final_minute_sequence="2"/>', encoding="utf-8")
+            processed = PairingAgent(folder, "http://central", opener).process_events_once()
+            self.assertEqual(processed, ["minute-2.xml", "disconnect.xml"])
+            self.assertEqual([json.loads(call.args[0].data)["event_id"] for call in opener.call_args_list],
+                             ["minute-2", "disconnect"])
+
+    def test_malformed_lookahead_minute_does_not_abort_event_scheduler(self):
+        opener = MagicMock(return_value=Response())
+        with tempfile.TemporaryDirectory() as folder:
+            events = Path(folder) / "events"
+            events.mkdir()
+            common = ('server_key="server" server_credential="secret" save_id="1" '
+                      'unique_user_id="u" session_id="s" ')
+            (events / "00-disconnect.xml").write_text(
+                '<serverEvent event_id="disconnect" event_type="player_disconnected" ' + common +
+                'final_minute_sequence="2"/>', encoding="utf-8")
+            (events / "01-invalid-minute.xml").write_text(
+                '<serverEvent event_id="invalid" event_type="player_activity_minute" ' + common +
+                'minute_sequence="not-a-number"/>', encoding="utf-8")
+            (events / "02-minute.xml").write_text(
+                '<serverEvent event_id="minute-2" event_type="player_activity_minute" ' + common +
+                'minute_sequence="2"/>', encoding="utf-8")
+            agent = PairingAgent(folder, "http://central", opener)
+            processed = agent.process_events_once(max_events=1)
+            self.assertEqual(processed, ["02-minute.xml"])
+            self.assertTrue((events / "01-invalid-minute.xml").exists())
+            self.assertTrue((events / "00-disconnect.xml").exists())
+
+    def test_retryable_failure_blocks_only_its_scoped_session(self):
+        def response(request, timeout=10):
+            if json.loads(request.data)["event_id"] == "blocked":
+                raise TimeoutError()
+            return Response()
+        opener = MagicMock(side_effect=response)
+        with tempfile.TemporaryDirectory() as folder:
+            events = Path(folder) / "events"
+            events.mkdir()
+            for name, event_id, user, session in (
+                    ("a.xml", "blocked", "u1", "s1"), ("b.xml", "blocked-next", "u1", "s1"),
+                    ("c.xml", "other", "u2", "s2")):
+                (events / name).write_text(
+                    f'<serverEvent event_id="{event_id}" event_type="heartbeat" server_key="server" '
+                    f'server_credential="secret" save_id="1" unique_user_id="{user}" session_id="{session}"/>',
+                    encoding="utf-8")
+            self.assertEqual(PairingAgent(folder, "http://central", opener).process_events_once(max_events=3),
+                             ["c.xml"])
+            self.assertEqual(opener.call_count, 2)
+
+    def test_max_events_bounds_success_and_permanent_rejection_attempts(self):
+        rejected = HTTPError("http://central", 422, "bad", {}, None)
+        opener = MagicMock(side_effect=[rejected, Response(), Response()])
+        with tempfile.TemporaryDirectory() as folder:
+            events = Path(folder) / "events"
+            events.mkdir()
+            for index in range(3):
+                (events / f"{index}.xml").write_text(
+                    f'<serverEvent event_id="event-{index}" event_type="heartbeat" server_key="server" '
+                    'server_credential="secret" save_id="1"/>', encoding="utf-8")
+            PairingAgent(folder, "http://central", opener).process_events_once(max_events=2)
+            self.assertEqual(opener.call_count, 2)
+
+    def test_watch_polls_receipts_before_operations(self):
+        agent = PairingAgent("C:/mailbox", "http://central")
+        calls = []
+        agent.process_once = lambda: calls.append("pair")
+        agent.process_registration_once = lambda: calls.append("registration")
+        agent.process_receipts_once = lambda: calls.append("receipts")
+        agent.process_operations_once = lambda: calls.append("operations")
+        agent.process_manager_authority_once = lambda: calls.append("authority")
+        agent.process_snapshot_once = lambda: calls.append("snapshot")
+        agent.process_clock_once = lambda: 60
+        agent.process_events_once = lambda limit: calls.append("events")
+        with patch.object(agent_module.time, "sleep", side_effect=lambda _: (_ for _ in ()).throw(StopIteration)):
+            with self.assertRaises(StopIteration):
+                agent.watch(stop=lambda: False)
+        self.assertLess(calls.index("receipts"), calls.index("operations"))
+
     def test_chat_event_uses_authenticated_event_transport(self):
         opener = MagicMock(return_value=Response())
         with tempfile.TemporaryDirectory() as folder:
@@ -220,6 +332,27 @@ class AgentTests(unittest.TestCase):
             self.assertIn('operation_type="ensure_farm"', command.read_text(encoding="utf-8"))
             self.assertIn('canonical_name="SiN Harvest"', command.read_text(encoding="utf-8"))
             self.assertNotIn("pymongo", "".join(path.read_text(encoding="utf-8") for path in [Path(agent_module.__file__)]))
+
+    def test_durable_local_receipt_suppresses_operation_recreation(self):
+        class OperationResponse:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self):
+                return json.dumps({"operations": [{"operation_id": "already-acked",
+                    "operation_type": "ensure_farm", "save_key": "main",
+                    "payload": {"canonical_name": "SiN Harvest"}}]}).encode()
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "serverBinding.xml").write_text('<serverBinding serverKey="server" credential="secret"/>', encoding="utf-8")
+            (root / "snapshot.xml").write_text('<networkLocal source="game" savegameIndex="1"/>', encoding="utf-8")
+            receipt_dir = root / "permission-receipts"
+            receipt_dir.mkdir()
+            (receipt_dir / "already-acked.xml").write_text(
+                '<networkLocalReceipt operation_id="already-acked" status="applied"/>', encoding="utf-8")
+            agent = PairingAgent(root, "https://central", MagicMock(return_value=OperationResponse()))
+            self.assertEqual(agent.process_operations_once(), [])
+            self.assertFalse((root / "permission-commands/already-acked.xml").exists())
 
     def test_permission_manifest_replace_retries_transient_windows_access_denied(self):
         class OperationResponse:
@@ -333,3 +466,55 @@ class AgentTests(unittest.TestCase):
             failure.close()
             self.assertEqual(agent.process_receipts_once(), [receipt.name])
             self.assertFalse(receipt.exists())
+
+    def test_event_processing_is_bounded_for_a_large_durable_backlog(self):
+        opener = MagicMock(return_value=Response())
+        with tempfile.TemporaryDirectory() as folder:
+            events = Path(folder) / "events"
+            events.mkdir()
+            xml = ('<serverEvent event_id="event-{0:05d}" event_type="player_activity_minute" '
+                   'server_key="server" server_credential="secret" save_id="1" '
+                   'unique_user_id="stable" session_id="session" minute_sequence="{0}" '
+                   'activity_bucket="idle" inactive_minutes="1"/>')
+            for number in range(1, 10_001):
+                (events / f"event-{number:05d}.xml").write_text(xml.format(number), encoding="utf-8")
+            agent = PairingAgent(folder, "https://central", opener)
+            self.assertEqual(len(agent.process_events_once(max_events=50)), 50)
+            self.assertEqual(len(list(events.glob("*.xml"))), 9_950)
+            # A later bounded call continues making progress without asking
+            # the control-plane loop to drain the historical queue first.
+            self.assertEqual(len(agent.process_events_once(max_events=50)), 50)
+            self.assertEqual(len(list(events.glob("*.xml"))), 9_900)
+
+    def test_map_geometry_event_preserves_nested_field_points(self):
+        with tempfile.TemporaryDirectory() as folder:
+            events = Path(folder) / "events"
+            events.mkdir()
+            event = events / "map.xml"
+            event.write_text(
+                '<serverEvent event_id="map-1" event_type="map_geometry" server_key="server" '
+                'server_credential="secret" save_id="1" schema_version="1" map_id="map" '
+                'map_title="Map" world_width="100" world_depth="100" image_width="32" '
+                'image_height="32" overview_asset_identity="runtime-generated:map" version="1" '
+                'image_y_inverted="true"><fields><field field_id="22" farmland_id="22" '
+                'area_ha="1"><points><point x="-10" z="-10"/><point x="10" z="-10"/>'
+                '<point x="0" z="10"/></points></field></fields></serverEvent>',
+                encoding="utf-8")
+            parsed = PairingAgent._parse_event_file(event)
+            self.assertEqual(parsed["payload"]["map"]["fields"]["22"]["rings"][0][1], ["10", "-10"])
+
+    def test_watch_services_control_plane_before_each_bounded_event_batch(self):
+        with tempfile.TemporaryDirectory() as folder:
+            agent = PairingAgent(folder, "https://central", event_batch_size=7)
+            calls = []
+            for name in ("process_once", "process_registration_once", "process_operations_once",
+                         "process_receipts_once", "process_manager_authority_once",
+                         "process_snapshot_once", "process_clock_once"):
+                method = MagicMock(side_effect=lambda name=name: calls.append(name) or 60)
+                setattr(agent, name, method)
+            agent.process_events_once = MagicMock(side_effect=lambda size: calls.append(("events", size)) or [])
+            stop = MagicMock(side_effect=[False, True])
+            with patch.object(agent_module.time, "monotonic", return_value=100), \
+                    patch.object(agent_module.time, "sleep"):
+                agent.watch(interval=0, stop=stop)
+            self.assertLess(calls.index("process_registration_once"), calls.index(("events", 7)))

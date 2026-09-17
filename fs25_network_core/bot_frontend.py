@@ -21,7 +21,7 @@ from .activity_telemetry import ActivityTelemetryProcessor
 from .business_workflows import (ChatService, ContractService, InvoiceService,
                                   CommunityEventService, TransferService)
 from .farm_lifecycle import FarmLifecycle, SYSTEM_FARM_NAME
-from .map_service import MapService
+from .map_service import MapService, MapValidationError
 
 
 class DiscordSetupError(RuntimeError):
@@ -652,16 +652,23 @@ class NetworkBot(discord.Client):
         )
         async def contract_create(interaction: discord.Interaction, work_type: app_commands.Choice[str], fields: str,
                                   compensation: app_commands.Choice[str], rate: app_commands.Range[int, 1, 1_000_000_000],
-                                  description: str = ""):
+                                  network_wide: bool = False, description: str = "", server: str = ""):
             context = {}
-            try:
-                context = await asyncio.to_thread(
-                    self.resolve_identity_context, str(interaction.user.id), None, "reconcile")
-            except Exception as error:
-                # A contract can be created before the member has one
-                # unambiguous connected game context.  Map rendering remains
-                # optional and must never block the durable contract.
-                logging.info("Contract map context unavailable; creating text-only-capable contract: %s", error)
+            if network_wide:
+                if server:
+                    raise ValueError("Choose either a server or a network-wide contract, not both")
+            else:
+                try:
+                    # Explicit selection must still be resolved through the
+                    # caller's durable identity contexts.  Registry
+                    # eligibility alone is not authorization to create a
+                    # contract for an unrelated server/save.
+                    context = await asyncio.to_thread(
+                        self.resolve_identity_context, str(interaction.user.id), server or None, "reconcile")
+                except ValueError as error:
+                    if "multiple game contexts" in str(error).lower():
+                        raise ValueError("Select an eligible server with the server option; no server was chosen") from None
+                    raise
             record = await asyncio.to_thread(self.contracts.create, str(interaction.user.id), "", description,
                                              work_type=work_type.value, fields=fields,
                                              compensation_type=compensation.value, rate=rate,
@@ -672,6 +679,10 @@ class NetworkBot(discord.Client):
                 f"**{record['title']}** is open. {compensation.name}: {rate:,}."
                 + (" Posted in the jobs channel." if published else
                    " The jobs channel is not configured, so use `/contract_list` to find it."), ephemeral=True)
+
+        @contract_create.autocomplete("server")
+        async def contract_create_server_autocomplete(interaction: discord.Interaction, current: str):
+            return await server_choices(interaction, current, "reconcile")
 
         @self.tree.command(name="contract_list", description="List open SiN contracts")
         @app_commands.check(channel_check)
@@ -1002,6 +1013,8 @@ class NetworkBot(discord.Client):
         status = str(record.get("status", "open")).replace("_", " ").title()
         server = record.get("server_name") or record.get("server_key")
         server_line = f"Server: {server}\n" if server else ""
+        if not server_line and record.get("scope") == "network":
+            server_line = "Scope: Network-wide\n"
         return (f"**{record.get('title', 'Farm work')}**\n"
                 f"{record.get('description', '')}\n"
                 f"Work: {str(record.get('work_type', 'general')).title()} | Fields: {fields}\n"
@@ -1018,6 +1031,33 @@ class NetworkBot(discord.Client):
                 f"Participants: {len(participants)}"
                 + (f"/{record['max_participants']}" if record.get("max_participants") else ""))
 
+    def ensure_registered_map(self, server_key, save_key):
+        """Load a validated runtime map projection before rendering a card.
+
+        The Agent posts geometry to the server API process, while JiN runs in
+        a separate central process.  Mongo is therefore the small durable
+        handoff between those processes; no Discord request can provide a
+        filesystem path or unvalidated map bytes.
+        """
+        if not server_key or not save_key:
+            return False
+        document = self.bank.database.db.sin_maps.find_one({
+            "server_key": str(server_key), "save_key": str(save_key)})
+        if not isinstance(document, dict):
+            return False
+        revision = document.get("map_revision")
+        if revision and revision == self.map_service.revision(server_key, save_key):
+            return True
+        payload = document.get("map_payload") if isinstance(document, dict) else None
+        if not isinstance(payload, dict):
+            return False
+        try:
+            self.map_service.register_payload(server_key, save_key, payload)
+            return True
+        except (MapValidationError, ValueError):
+            logging.warning("Stored runtime map geometry is invalid; using text-only contract card")
+            return False
+
     async def publish_contract_card(self, record):
         channel_id = self.channels.get("jobs")
         if not channel_id:
@@ -1032,6 +1072,8 @@ class NetworkBot(discord.Client):
         try:
             attachment = None
             try:
+                await asyncio.to_thread(self.ensure_registered_map, record.get("server_key"),
+                                        record.get("save_key"))
                 image = await asyncio.to_thread(
                     self.map_service.render_contract_map, record.get("server_key"),
                     record.get("save_key"), record.get("fields"))
@@ -1132,6 +1174,15 @@ def main():
     # Do not reuse another guild's operator configuration when overriding guild ID.
     operator_role_ids = discord_config.get("operator_role_ids", []) if str(guild_id) == str(discord_config["guild_id"]) else []
     channels = discord_config.get("channels", {}) if str(guild_id) == str(discord_config["guild_id"]) else {}
+    channels = dict(channels)
+    # Deployment may keep channel IDs outside the repository config.  These
+    # explicit overrides are non-secret and avoid embedding a live guild ID in
+    # business logic; discord.json remains the normal source of truth.
+    for env_name, channel_name in (("DISCORD_JOBS_CHANNEL_ID", "jobs"),
+                                   ("DISCORD_EVENTS_CHANNEL_ID", "events")):
+        configured = os.environ.get(env_name)
+        if configured:
+            channels[channel_name] = configured
     try:
         sin_member_role_id = int(discord_config.get("roles", {}).get("sin_member", ""))
         for name in ("sin_apply", "sin_applications"):

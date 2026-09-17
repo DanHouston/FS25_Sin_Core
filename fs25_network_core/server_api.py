@@ -14,7 +14,8 @@ from urllib.parse import parse_qs, urlsplit
 from .config import load_local_environment
 from .database import Database
 from .server_registry import ServerRegistry
-from .event_processing import CentralEventProcessor, EventAuthenticationError, EventScopeError, EventValidationError
+from .event_processing import (CentralEventProcessor, EventAuthenticationError,
+                                EventRetryableError, EventScopeError, EventValidationError)
 from .clock_policy import target_game_minutes
 from .farm_lifecycle import FarmLifecycle
 
@@ -321,6 +322,9 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
             return
         except EventScopeError:
             _json_response(self, 404, {"error": "unknown_or_unconfigured_save"})
+            return
+        except EventRetryableError:
+            _json_response(self, 409, {"error": "event_waiting_for_prior_activity"})
             return
         except EventValidationError:
             _json_response(self, 400, {"error": "invalid_event"})

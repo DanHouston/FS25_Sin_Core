@@ -253,6 +253,19 @@ class ActivitySessionProcessor:
         if values is None:
             return {"status": "accepted", "ignored": True, "duplicate": False, "save_key": save_key}
         unique_id, session_id = values
+        watermark_value = payload.get("final_minute_sequence")
+        if watermark_value is not None and str(watermark_value).strip() != "":
+            try:
+                watermark = int(watermark_value)
+            except (TypeError, ValueError):
+                raise ActivityTelemetryError("disconnect minute watermark is invalid") from None
+            if watermark < 0:
+                raise ActivityTelemetryError("disconnect minute watermark is invalid")
+        else:
+            # Backward-compatible policy for legacy mods: a disconnect without
+            # a watermark closes the session using the minutes already
+            # committed. New runtimes always send the durable watermark.
+            watermark = None
         now = datetime.now(timezone.utc)
         session_key = _key(server_key, save_key, unique_id, session_id)
         existing = self.db.player_activity_sessions.find_one({"_id": session_key})
@@ -260,7 +273,20 @@ class ActivitySessionProcessor:
             LOG.info("[SiN Telemetry] duplicate session completion ignored serverKey=%s saveKey=%s player=%s session=%s",
                      server_key, save_key, unique_id, session_id)
             return {"status": "accepted", "duplicate": True, "save_key": save_key,
-                    "session_id": session_id}
+                    "session_id": session_id, "summary": self._summary(existing)}
+        if watermark is not None:
+            committed = list(self.db.player_activity_minutes.find({
+                "server_key": server_key, "save_key": save_key,
+                "fs25_unique_user_id": unique_id, "session_id": session_id,
+                "minute_sequence": {"$gte": 1, "$lte": watermark}}))
+            sequences = {int(row.get("minute_sequence")) for row in committed
+                         if row.get("minute_sequence") is not None}
+            missing = [sequence for sequence in range(1, watermark + 1)
+                       if sequence not in sequences]
+            if missing:
+                from .event_processing import EventRetryableError
+                raise EventRetryableError(
+                    f"disconnect waits for committed activity minutes: {missing[:5]}")
         self.db.player_activity_sessions.update_one(
             {"_id": session_key},
             {"$setOnInsert": {"_id": session_key, "server_key": server_key,
@@ -269,7 +295,15 @@ class ActivitySessionProcessor:
                                "created_at": now},
              "$set": {"state": "completed", "disconnected_at": now,
                        "last_seen_at": now, "updated_at": now}}, upsert=True)
+        completed = self.db.player_activity_sessions.find_one({"_id": session_key}) or {}
         LOG.info("[SiN Telemetry] session completed serverKey=%s saveKey=%s player=%s session=%s",
                  server_key, save_key, unique_id, session_id)
         return {"status": "accepted", "duplicate": False, "save_key": save_key,
-                "session_id": session_id}
+                "session_id": session_id, "summary": self._summary(completed)}
+
+    @staticmethod
+    def _summary(session):
+        """Return only cumulative session counters for the disconnect card."""
+        session = session if isinstance(session, dict) else {}
+        return {key: int(session.get(key, 0) or 0) for key in (
+            "total_counted_minutes", "active_minutes", "idle_minutes", "afk_minutes")}

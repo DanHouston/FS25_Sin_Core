@@ -4,6 +4,27 @@ This document lists only checks that require a real FS25 server/client. The
 central services, Agent mailbox transport, persistence, idempotency, and
 authorization rules are covered by the local test suite.
 
+The automated suite also covers disconnect watermark ordering, durable receipt
+reconciliation, contract scope selection, and runtime map persistence/rendering.
+It does not replace live validation of GIANTS runtime geometry extraction,
+registration warnings, command execution, Discord permissions, or attachment
+delivery.
+
+The machine-readable checklist is [live-validation-manifest.json](live-validation-manifest.json).
+It names the six authoritative scenarios that must pass before collecting the
+corresponding live evidence: `registration`, `control_plane_backlog`,
+`activity_disconnect`, `map_contract`, `contract_scope`, and
+`authority_regression`. The manifest also records the semantic and lower-level boundary
+scenarios used to implement them. Release builds copy both that manifest and the
+secret-free `integration-campaign.json` into the release directory.
+
+New mod runtimes put the final emitted minute sequence on disconnect. Central
+returns a retryable response until all minutes through that watermark are
+committed, then emits one durable summary containing duration, active, idle,
+and AFK totals. Legacy disconnects without a watermark retain the compatible
+policy of closing from minutes already committed; they should be upgraded when
+ordering guarantees are required.
+
 ## One deployment/restart group
 
 Deploy the same `FS25_SiN_Server.zip` to the dedicated server and client. Keep
@@ -97,8 +118,12 @@ server/save automatically. Withdrawals remain disabled unless a server
 explicitly enables a verified FS25 money-delivery adapter.
 
 `/contract_create` uses work type, comma-separated numeric fields, and fixed or
-hourly compensation. If `channels.jobs` is configured, verify that a new
-contract card appears and that Accept remains safe after a bot restart. Event
+hourly compensation. Its optional server selector must match the creator's
+registered identity context; one eligible context is selected automatically,
+while multiple contexts require an explicit server. Use the explicit
+`network_wide` option for a network-wide contract. If `channels.jobs` is
+configured, verify that a new contract card appears and that Accept remains
+safe after a bot restart. Event
 creation accepts a timezone-bearing ISO-8601 value such as
 `2026-09-15T20:00-04:00`, or local `2026-09-15 20:00` using the configured
 `DISCORD_TIMEZONE`; Discord list/view output uses localized timestamp markup.

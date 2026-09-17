@@ -364,6 +364,22 @@ class RegistrationTests(unittest.TestCase):
                          "setUserPermission", "sendEvent", "emitServerEvent"):
             self.assertNotIn(mutation, probe)
 
+    def test_runtime_map_geometry_export_uses_real_polygons_and_authenticated_event(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8")
+        self.assertIn("function FS25SiNServer:processMapGeometryExport()", source)
+        for runtime_source in ("getPolygonPoints", "getWorldTranslation", "field.farmland.id",
+                               'event_type", "map_geometry"', "serverEvent.fields.field", "overview_asset_identity"):
+            self.assertIn(runtime_source, source)
+        self.assertIn("self.mapGeometryExported", source)
+
+    def test_permission_mailbox_consumption_removes_exact_command_and_manifest_files(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8")
+        self.assertIn("function FS25SiNServer:consumeCommandFile(operationId)", source)
+        self.assertIn("deleteFile(self.commandDirectory", source)
+        self.assertIn("deleteFile(manifestPath)", source)
+
     def test_chat_operation_has_safe_runtime_boundary_and_event_schema(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
             encoding="utf-8")

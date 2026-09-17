@@ -46,6 +46,17 @@ The repository intentionally does not copy proprietary scripts or map images.
 
 ## Current implementation
 
+Each authenticated runtime geometry export receives a deterministic
+`map_revision` from its normalized payload. Its event ID is stable for retries
+within one FS25 runtime and includes a runtime nonce, so a later runtime can
+refresh changed geometry. JiN compares the persisted revision with its
+in-memory map before re-registering; opening another contract does not
+invalidate or regenerate an unchanged map.
+
+Automated tests cover nested XML parsing, authenticated Central validation and
+persistence, JiN loading, and PNG rendering. FS25 extraction and final Discord
+attachment delivery still require live validation.
+
 `fs25_network_core.map_service` provides:
 
 - versioned `MapModel`, `FieldGeometry`, and `FarmlandGeometry` records;
@@ -60,16 +71,19 @@ The repository intentionally does not copy proprietary scripts or map images.
 - `MapModel.to_dict()`/`from_dict()` as the versioned transport boundary.
 
 `MapService.register_map(server_key, save_key, model, base_rgba=...)` or
-`overview_dds=...` is deliberately an explicit ingestion boundary. No Discord
-input is interpreted as a path, and the service does not read arbitrary Agent
-or game-server files. A future validated extractor/API can register data at
-this boundary after it has resolved the active map, map XML, dimensions, field
-geometry, farmland geometry, and overview asset itself.
+`overview_dds=...` is deliberately an explicit ingestion boundary. A trusted
+runtime geometry export may also call `register_payload(...)` without a raster;
+that path uses a deterministic neutral canvas and never interprets a Discord
+input as a filesystem path. The service does not read arbitrary Agent or
+game-server files.
 
-The current game snapshot only exports farms, players, and live farmland
-ownership. It does not contain exact field polygons, map identity, or overview
-bytes. Consequently the service is not yet populated for the production save,
-and no `/map` command is exposed that could return a misleading image.
+The current FS25_SiN_Server runtime emits one authenticated `map_geometry`
+event per loaded server session after binding. It contains map identity,
+terrain dimensions, field-to-farmland relationships, acreage where available,
+and actual world-coordinate polygon points. The Agent forwards it through the
+existing `/api/server/events` transport. Central validates and persists the
+normalized payload in `sin_maps`; JiN lazily loads that record into MapService
+when publishing a contract card. It is not a continuous telemetry stream.
 
 ## Contract cards
 
@@ -114,26 +128,21 @@ filesystem paths or cause arbitrary files to be opened.
 
 ## Live extraction plan
 
-Before enabling production maps, a server-side extractor must be validated in a
-real FS25 runtime:
+The server-side exporter now performs the first four steps at runtime:
 
-1. identify the active map title, map directory, terrain dimensions, and map
-   XML's overview reference;
-2. enumerate `g_currentMission.fieldManager:getFields()`, capture each field's
-   stable ID, `field.farmland.id`, acreage/center where available, and exact
-   rings only if the runtime exposes them or they are safely polygonized from
-   an authoritative layer;
-3. enumerate farmland geometry separately and pair it with the runtime
-   ownership snapshot;
-4. export a versioned normalized payload and a validated overview asset
-   through a narrow authenticated API/mailbox contract;
-5. compare Field 22 and several irregular fields against the in-game PDA before
-   enabling Discord map attachments.
+1. identify the active map title/ID and terrain dimensions;
+2. enumerate `g_currentMission.fieldManager:getFields()`, capturing each field's
+   stable ID, `field.farmland.id`, acreage where available, and exact world
+   polygon points;
+3. emit one versioned normalized `map_geometry` event through the existing
+   authenticated mailbox transport;
+4. validate and persist it in Central before JiN renders a contract card.
 
-The current NetworkLocal/Agent protocol has no verified map-extraction payload,
-so this work does not guess at Lua field APIs or add a new live mailbox schema.
-That is the remaining runtime-dependent step, not a limitation hidden behind
-rectangular approximations.
+The exporter deliberately does not copy a PDA asset or expose a filesystem
+path. When no trusted raster is registered, MapService draws the real runtime
+polygons on a deterministic neutral canvas. Compare Field 22 and several
+irregular fields against the in-game PDA before treating orientation as
+production-verified.
 
 ## Runtime probe
 
@@ -144,9 +153,9 @@ field-to-farmland relationship and available geometry metrics, polygon-point
 count and world-coordinate bounds when exposed, farmland count,
 farmland-map dimensions when exposed, and whether map asset references are
 present. It is read-only and deliberately reports asset-reference presence
-rather than exposing filesystem paths or copying proprietary assets. A probe
-result is source/runtime evidence for extraction work; it does not by itself
-register a map with the central renderer.
+rather than exposing filesystem paths or copying proprietary assets. Normal
+startup separately queues the authenticated geometry export; the probe itself
+does not upload anything.
 
 ## Tomorrow's validation checklist
 

@@ -58,6 +58,27 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
             options = command.to_dict(self.bot.tree)["options"]
             self.assertEqual([option["name"] for option in options], ["amount"])
 
+    async def test_contract_identity_context_auto_selects_one_server_and_fails_closed_for_multiple(self):
+        database = self.bot.bank.database.db
+        database.game_identities.find.return_value.limit.return_value = [{
+            "server_id": "server-a", "save_id": "save-a", "fs25_unique_user_id": "stable"}]
+        self.bot.server_registry.eligible_server = MagicMock(return_value={
+            "server_key": "server-a", "display_name": "Server A",
+            "saves": [{"save_key": "save-a", "fs25_save_id": "1"}],
+        })
+        context = self.bot.resolve_identity_context("member")
+        self.assertEqual(context["server_key"], "server-a")
+
+        database.game_identities.find.return_value.limit.return_value = [
+            {"server_id": "server-a", "save_id": "save-a", "fs25_unique_user_id": "stable-a"},
+            {"server_id": "server-b", "save_id": "save-b", "fs25_unique_user_id": "stable-b"},
+        ]
+        self.bot.server_registry.eligible_server.side_effect = lambda key, purpose: {
+            "server_key": key, "display_name": key, "saves": [{"save_key": key.replace("server", "save"),
+                                                                    "fs25_save_id": "1"}]}
+        with self.assertRaisesRegex(ValueError, "multiple game contexts"):
+            self.bot.resolve_identity_context("member")
+
     async def test_contract_card_map_failure_falls_back_without_losing_contract(self):
         channel = MagicMock()
         channel.send = AsyncMock(return_value=MagicMock(id=99))

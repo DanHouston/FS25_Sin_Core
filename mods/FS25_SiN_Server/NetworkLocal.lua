@@ -2,6 +2,46 @@
 FS25SiNServer = {}
 local SERVER_MAILBOX_NAME = "FS25_SiN_Server"
 
+-- A wall-clock second is not a runtime identity.  Persist a mailbox
+-- generation before emitting anything so a rapid FS25 reload cannot reuse
+-- event, session, minute, registration, or map IDs.
+function FS25SiNServer:initializeRuntimeGeneration()
+    local path = self.directory .. "runtime-generation.xml"
+    local generation = 0
+    local alreadyExists = fileExists(path)
+    if alreadyExists and XMLFile ~= nil and XMLFile.load ~= nil then
+        local loaded = XMLFile.load("networkLocalRuntimeGeneration", path)
+        if loaded == nil then self.runtimeIdentityReady = false; return false end
+        generation = tonumber(loaded:getInt("runtimeGeneration#value")) or 0
+        loaded:delete()
+        if generation < 1 then self.runtimeIdentityReady = false; return false end
+    elseif alreadyExists then
+        self.runtimeIdentityReady = false
+        return false
+    end
+    generation = generation + 1
+    if XMLFile == nil or XMLFile.create == nil then
+        self.runtimeIdentityReady = false
+        return false
+    end
+    local xml = XMLFile.create("networkLocalRuntimeGeneration", path, "runtimeGeneration")
+    if xml == nil then
+        self.runtimeIdentityReady = false
+        return false
+    end
+    xml:setInt("runtimeGeneration#value", generation)
+    local saved = xml:save()
+    xml:delete()
+    if saved ~= true then
+        self.runtimeIdentityReady = false
+        return false
+    end
+    self.runtimeGeneration = generation
+    self.runtimeNonce = "g" .. tostring(generation)
+    self.runtimeIdentityReady = true
+    return true
+end
+
 function FS25SiNServer:shortIdentity(value)
     local text = tostring(value or "")
     return string.len(text) > 8 and string.sub(text, 1, 8) .. "..." or text
@@ -26,11 +66,15 @@ function FS25SiNServer:loadMap()
     createFolder(self.eventDirectory)
     createFolder(self.registrationRequestDirectory)
     createFolder(self.registrationResponseDirectory)
+    self:initializeRuntimeGeneration()
     self.bindingPath = self.directory .. "serverBinding.xml"
     self:loadServerBinding()
     self.systemFarmName = nil
     self.identitySeen = {}
     self.eventSeen = {}
+    self.mapGeometryExported = false
+    self.mapGeometryExportElapsed = 5000
+    self.mapGeometryExportUnavailableLogged = false
     self.previousPlayers = {}
     self.connectedPlayers = {}
     self.identityNames = {}
@@ -456,7 +500,8 @@ function FS25SiNServer:startActivityTracking(uniqueId, record)
         return false
     end
     self.activitySessionSequence = self.activitySessionSequence + 1
-    local sessionId = tostring(self.session) .. "-" .. tostring(self.activitySessionSequence)
+    if self.runtimeIdentityReady ~= true then return nil end
+    local sessionId = tostring(self.runtimeNonce) .. "-" .. tostring(self.session) .. "-" .. tostring(self.activitySessionSequence)
     local baseline, positionSource = self:samplePlayerPosition(record.user_id, record.user)
     self.activityStates[uniqueId] = {
         sessionId=sessionId, userId=record.user_id, intervalElapsed=0, minuteSequence=0,
@@ -514,14 +559,15 @@ function FS25SiNServer:processActivitySamples(dt)
                         state.inactivityMinutes = state.inactivityMinutes + 1
                         bucket = state.inactivityMinutes <= 10 and "idle" or "afk"
                     end
-                    state.minuteSequence = state.minuteSequence + 1
+                    local nextMinuteSequence = state.minuteSequence + 1
                     local eventId = string.gsub(self.serverKey .. "-activity-" .. state.sessionId .. "-" ..
-                        uniqueId .. "-" .. tostring(state.minuteSequence), "[^%w_-]", "_")
+                        uniqueId .. "-" .. tostring(nextMinuteSequence), "[^%w_-]", "_")
                     local emitted = self:emitServerEvent("player_activity_minute", {
                         unique_user_id=uniqueId, user_id=record.user_id, farm_id=record.farm_id,
                         display_name=record.name, session_id=state.sessionId,
-                        minute_sequence=state.minuteSequence, activity_bucket=bucket,
+                        minute_sequence=nextMinuteSequence, activity_bucket=bucket,
                         inactive_minutes=state.inactivityMinutes, duration_seconds=60}, eventId)
+                    if emitted then state.minuteSequence = nextMinuteSequence end
                     Logging.info("[SiN Telemetry] minute completed uniqueUserId=%s userId=%s bucket=%s emitted=%s",
                         self:shortIdentity(uniqueId), tostring(record.user_id), bucket, tostring(emitted == true))
                 end
@@ -557,7 +603,8 @@ function FS25SiNServer:queueRegistrationRequest(user, farm, refreshRequired)
         end
         self.registrationState[uniqueId] = nil
     end
-    local requestId = self.serverKey .. "-" .. tostring(self.session) .. "-" .. uniqueId
+    if self.runtimeIdentityReady ~= true then return end
+    local requestId = self.serverKey .. "-" .. tostring(self.runtimeNonce) .. "-" .. tostring(self.session) .. "-" .. uniqueId
     requestId = string.gsub(requestId, "[^%w_-]", "_")
     local path = self.registrationRequestDirectory .. requestId .. ".xml"
     if fileExists(path) then
@@ -640,7 +687,8 @@ function FS25SiNServer:onPlayerDisconnected(userId)
     Logging.info("[SiN Player] disconnected uniqueUserId=%s userId=%s", self:shortIdentity(uniqueId), matchId)
     self:emitServerEvent("player_disconnected", {unique_user_id=uniqueId, user_id=record.user_id,
         farm_id=record.farm_id, display_name=record.name,
-        session_id=activityState ~= nil and activityState.sessionId or ""})
+        session_id=activityState ~= nil and activityState.sessionId or "",
+        final_minute_sequence=activityState ~= nil and activityState.minuteSequence or 0})
 end
 
 function FS25SiNServer:setClientRegistrationWarning(required, code)
@@ -1036,6 +1084,7 @@ function FS25SiNServer:update(dt)
     self.clockElapsed = self.clockElapsed + dt
     self.clockTargetAge = self.clockTargetAge + dt
     self.registrationClock = self.registrationClock + dt
+    self.mapGeometryExportElapsed = self.mapGeometryExportElapsed + dt
     self:processDeferredManagerSyncs()
     local clockInterval = 60000
     if self.clockMode == "fast_catchup" then
@@ -1050,6 +1099,14 @@ function FS25SiNServer:update(dt)
         self:processClockPolicy()
     end
     if self.serverBindingState == "bound_pending_auth" or self.serverBindingState == "bound" then
+        if not self.mapGeometryExported and self.mapGeometryExportElapsed >= 5000 then
+            self.mapGeometryExportElapsed = 0
+            local mapOk, mapError = pcall(self.processMapGeometryExport, self)
+            if not mapOk and not self.mapGeometryExportUnavailableLogged then
+                self.mapGeometryExportUnavailableLogged = true
+                Logging.warning("[SiN Map] runtime geometry export unavailable: %s", tostring(mapError))
+            end
+        end
         self.activitySampleElapsed = self.activitySampleElapsed + dt
         if self.activitySampleElapsed >= 1000 then
             local sampleDt = self.activitySampleElapsed
@@ -1085,11 +1142,13 @@ function FS25SiNServer:update(dt)
 end
 
 function FS25SiNServer:emitServerEvent(eventType, values, requestedEventId)
-    if self.serverKey == nil or self.serverCredential == nil or self.eventDirectory == nil then return false end
+    if self.serverKey == nil or self.serverCredential == nil or self.eventDirectory == nil
+        or self.runtimeIdentityReady ~= true then return false end
     local eventId = requestedEventId
     if eventId == nil then
         self.eventSequence = self.eventSequence + 1
-        eventId = self.serverKey .. "-" .. tostring(self.session) .. "-" .. tostring(self.eventSequence) .. "-" .. eventType
+        eventId = self.serverKey .. "-" .. tostring(self.runtimeNonce) .. "-" .. tostring(self.session)
+            .. "-" .. tostring(self.eventSequence) .. "-" .. eventType
     end
     if self.eventSeen[eventId] then return true end
     local path = self.eventDirectory .. eventId .. ".xml"
@@ -1107,6 +1166,95 @@ function FS25SiNServer:emitServerEvent(eventType, values, requestedEventId)
     if eventType ~= "player_activity_minute" then
         Logging.info("[SiN Events] queued type=%s eventId=%s", tostring(eventType), tostring(eventId))
     end
+    return true
+end
+
+-- Export field geometry once per FS25 runtime session.  This is a bounded,
+-- authenticated mailbox event: Central receives coordinates, never a map
+-- filesystem path or raster asset.  A deterministic event ID lets Central's
+-- existing processed-event key make restarts/retries idempotent.
+function FS25SiNServer:processMapGeometryExport()
+    if self.serverKey == nil or self.serverCredential == nil or self.eventDirectory == nil
+        or g_currentMission == nil or not g_currentMission:getIsServer() then return false end
+    local mission = g_currentMission
+    local info = mission.missionInfo or {}
+    local mapId = tostring(info.mapId or info.mapFilename or info.mapXMLFilename or "")
+    local mapTitle = tostring(info.mapTitle or info.mapName or mapId)
+    local terrainSize = tonumber(mission.terrainSize)
+    local fieldManager = mission.fieldManager or g_fieldManager
+    if mapId == "" or terrainSize == nil or terrainSize <= 0 or fieldManager == nil
+        or fieldManager.getFields == nil or getWorldTranslation == nil then return false end
+    local ok, fields = pcall(fieldManager.getFields, fieldManager)
+    if not ok or type(fields) ~= "table" then return false end
+    local records = {}
+    for _, field in ipairs(fields) do
+        local idOk, fieldId = false, nil
+        if field ~= nil and field.getId ~= nil then idOk, fieldId = pcall(field.getId, field) end
+        local numericFieldId = tonumber(fieldId)
+        if idOk and numericFieldId ~= nil and numericFieldId > 0 and field.getPolygonPoints ~= nil then
+            local pointsOk, nodes = pcall(field.getPolygonPoints, field)
+            if pointsOk and type(nodes) == "table" then
+                local points = {}
+                for _, node in ipairs(nodes) do
+                    local pointOk, x, _, z = pcall(getWorldTranslation, node)
+                    if pointOk and x ~= nil and z ~= nil then table.insert(points, {x=x, z=z}) end
+                end
+                if #points >= 3 then
+                    local area = nil
+                    if field.getAreaHa ~= nil then
+                        local areaOk, value = pcall(field.getAreaHa, field)
+                        if areaOk then area = value end
+                    end
+                    table.insert(records, {id=numericFieldId, farmland=field.farmland ~= nil and field.farmland.id or nil,
+                        area=area, points=points})
+                end
+            end
+        end
+    end
+    if #records == 0 then return false end
+    table.sort(records, function(left, right) return left.id < right.id end)
+    local safeMapId = string.gsub(mapId, "[^%w_-]", "_")
+    local safeSaveId = string.gsub(tostring(mission.missionInfo.savegameIndex or 0), "[^%w_-]", "_")
+    if self.runtimeIdentityReady ~= true then return false end
+    local eventId = string.gsub(self.serverKey .. "-map-" .. safeMapId .. "-" .. safeSaveId .. "-" .. self.runtimeNonce, "[^%w_-]", "_")
+    if self.eventSeen[eventId] or fileExists(self.eventDirectory .. eventId .. ".xml") then
+        self.eventSeen[eventId] = true
+        self.mapGeometryExported = true
+        return true
+    end
+    local path = self.eventDirectory .. eventId .. ".xml"
+    local xml = XMLFile.create("networkLocalMapGeometry", path, "serverEvent")
+    if xml == nil then return false end
+    xml:setString("serverEvent#event_id", eventId)
+    xml:setString("serverEvent#event_type", "map_geometry")
+    xml:setString("serverEvent#server_key", self.serverKey)
+    xml:setString("serverEvent#server_credential", self.serverCredential)
+    xml:setString("serverEvent#save_id", tostring(mission.missionInfo.savegameIndex or 0))
+    xml:setInt("serverEvent#schema_version", 1)
+    xml:setString("serverEvent#map_id", mapId)
+    xml:setString("serverEvent#map_title", mapTitle)
+    xml:setString("serverEvent#world_width", tostring(terrainSize))
+    xml:setString("serverEvent#world_depth", tostring(terrainSize))
+    xml:setInt("serverEvent#image_width", 1024)
+    xml:setInt("serverEvent#image_height", 1024)
+    xml:setString("serverEvent#overview_asset_identity", "runtime-generated:" .. safeMapId)
+    xml:setInt("serverEvent#version", 1)
+    xml:setBool("serverEvent#image_y_inverted", true)
+    for index, record in ipairs(records) do
+        local fieldKey = string.format("serverEvent.fields.field(%d)", index - 1)
+        xml:setInt(fieldKey .. "#field_id", record.id)
+        if record.farmland ~= nil then xml:setInt(fieldKey .. "#farmland_id", record.farmland) end
+        if record.area ~= nil then xml:setString(fieldKey .. "#area_ha", tostring(record.area)) end
+        for pointIndex, point in ipairs(record.points) do
+            local pointKey = string.format("%s.points.point(%d)", fieldKey, pointIndex - 1)
+            xml:setString(pointKey .. "#x", tostring(point.x))
+            xml:setString(pointKey .. "#z", tostring(point.z))
+        end
+    end
+    xml:save(); xml:delete()
+    self.eventSeen[eventId] = true
+    self.mapGeometryExported = true
+    Logging.info("[SiN Map] runtime geometry queued map=%s fields=%s", mapId, tostring(#records))
     return true
 end
 
@@ -1347,6 +1495,17 @@ function FS25SiNServer:reportFarmlandDiagnostic()
     Logging.info("%s complete; no methods were invoked", prefix)
 end
 
+function FS25SiNServer:saveReceiptAndConsume(receipt, command, operationId)
+    if receipt == nil then return false end
+    local receiptPath = self.receiptDirectory .. tostring(operationId) .. ".xml"
+    receipt:save()
+    receipt:delete()
+    if not fileExists(receiptPath) then return false end
+    if command ~= nil then command:delete() end
+    self:consumeCommandFile(operationId)
+    return true
+end
+
 function FS25SiNServer:processPermissionCommands()
     -- Receipt-only probe. Permission mutation remains disabled until its FS25
     -- role API mapping is verified in the running game.
@@ -1359,8 +1518,10 @@ function FS25SiNServer:processPermissionCommands()
         local key = string.format("permissionCommands.command(%d)", index)
         local operationId = manifest:getString(key .. "#operationId")
         if operationId == nil then break end
-        local command = XMLFile.load("networkLocalCommand", self.commandDirectory .. operationId .. ".xml")
-        if command ~= nil and not fileExists(self.receiptDirectory .. operationId .. ".xml") then
+        local commandPath = self.commandDirectory .. operationId .. ".xml"
+        local receiptPath = self.receiptDirectory .. operationId .. ".xml"
+        local command = XMLFile.load("networkLocalCommand", commandPath)
+        if command ~= nil and not fileExists(receiptPath) then
             local operationType = command:getString("networkLocalCommand#operation_type")
             if operationType == "ensure_farm" or operationType == "provision_farm" then
                 self:processFarmProvisionCommand(command, operationId, operationType)
@@ -1392,12 +1553,25 @@ function FS25SiNServer:processPermissionCommands()
             receipt:setString("permissionReceipt#revision", command:getString("permissionCommand#revision"))
             receipt:setString("permissionReceipt#status", applied and "applied" or "pending_validation")
             receipt:setString("permissionReceipt#receipt", "Verified FS25 state: userId=" .. tostring(userId) .. "; currentFarm=" .. tostring(currentFarm and currentFarm.farmId) .. "; manager=" .. tostring(manager))
-            receipt:save(); receipt:delete(); command:delete()
+            self:saveReceiptAndConsume(receipt, command, operationId)
             end
+        elseif command ~= nil and fileExists(receiptPath) then
+            -- A prior runtime may have closed the XML handle without removing
+            -- the durable command.  The receipt is the explicit proof that
+            -- the command was consumed; remove only this exact operation.
+            command:delete()
+            self:consumeCommandFile(operationId)
         end
         index = index + 1
     end
     manifest:delete()
+    if deleteFile ~= nil then deleteFile(manifestPath) end
+end
+
+function FS25SiNServer:consumeCommandFile(operationId)
+    if operationId ~= nil and deleteFile ~= nil then
+        deleteFile(self.commandDirectory .. tostring(operationId) .. ".xml")
+    end
 end
 
 -- The central chat mailbox contract is in place, but this build deliberately
@@ -1413,7 +1587,7 @@ function FS25SiNServer:processChatCommand(command, operationId)
     receipt:setString("permissionReceipt#save_id", command:getString("networkLocalCommand#save_id"))
     receipt:setString("permissionReceipt#status", "pending_validation")
     receipt:setString("permissionReceipt#receipt", "FS25 chat display API requires live runtime verification; no chat mutation was attempted")
-    receipt:save(); receipt:delete(); command:delete()
+    self:saveReceiptAndConsume(receipt, command, operationId)
 end
 
 function FS25SiNServer:findFarmByName(name)
@@ -1622,8 +1796,7 @@ function FS25SiNServer:processFarmProvisionCommand(command, operationId, operati
     receipt:setInt("networkLocalReceipt#owner_farm_id", owner or 0)
     receipt:setString("networkLocalReceipt#status", status)
     receipt:setString("networkLocalReceipt#receipt", reason)
-    receipt:save(); receipt:delete()
-    command:delete()
+    self:saveReceiptAndConsume(receipt, command, operationId)
 end
 
 function FS25SiNServer:processNameAlignment(command, operationId)
@@ -1640,7 +1813,17 @@ function FS25SiNServer:processNameAlignment(command, operationId)
     end
     if matched == nil then
         Logging.info("[SiN Identity] uniqueUserId=%s canonicalName=%s nameAligned=false reason=not_connected", self:shortIdentity(uniqueId), tostring(canonical))
-        command:delete()
+        local receipt = XMLFile.create("networkLocalIdentityReceipt", self.receiptDirectory .. operationId .. ".xml", "networkLocalReceipt")
+        if receipt ~= nil then
+            receipt:setString("networkLocalReceipt#operation_id", operationId)
+            receipt:setString("networkLocalReceipt#operation_type", "align_name")
+            receipt:setString("networkLocalReceipt#server_id", command:getString("networkLocalCommand#server_id"))
+            receipt:setString("networkLocalReceipt#save_id", command:getString("networkLocalCommand#save_id"))
+            receipt:setString("networkLocalReceipt#revision", command:getString("networkLocalCommand#revision"))
+            receipt:setString("networkLocalReceipt#status", "pending_validation")
+            receipt:setString("networkLocalReceipt#receipt", "identity was not connected during command processing")
+            self:saveReceiptAndConsume(receipt, command, operationId)
+        end
         return
     end
     local observed = matched:getNickname() or ""
@@ -1656,7 +1839,17 @@ function FS25SiNServer:processNameAlignment(command, operationId)
     end
     local aligned = matched:getNickname() == canonical
     Logging.info("[SiN Identity] uniqueUserId=%s observedName=%s canonicalName=%s nameAligned=%s", self:shortIdentity(uniqueId), tostring(observed), tostring(canonical), tostring(aligned))
-    command:delete()
+    local receipt = XMLFile.create("networkLocalIdentityReceipt", self.receiptDirectory .. operationId .. ".xml", "networkLocalReceipt")
+    if receipt ~= nil then
+        receipt:setString("networkLocalReceipt#operation_id", operationId)
+        receipt:setString("networkLocalReceipt#operation_type", "align_name")
+        receipt:setString("networkLocalReceipt#server_id", command:getString("networkLocalCommand#server_id"))
+        receipt:setString("networkLocalReceipt#save_id", command:getString("networkLocalCommand#save_id"))
+        receipt:setString("networkLocalReceipt#revision", command:getString("networkLocalCommand#revision"))
+        receipt:setString("networkLocalReceipt#status", aligned and "applied" or "pending_validation")
+        receipt:setString("networkLocalReceipt#receipt", aligned and "nickname matched canonical identity" or "nickname could not be verified")
+        self:saveReceiptAndConsume(receipt, command, operationId)
+    end
 end
 
 function FS25SiNServer:processLandCommand(command, operationId)
@@ -1696,8 +1889,7 @@ function FS25SiNServer:processLandCommand(command, operationId)
     receipt:setInt("networkLocalReceipt#owner_farm_id", owner)
     receipt:setString("networkLocalReceipt#status", status)
     receipt:setString("networkLocalReceipt#receipt", reason)
-    receipt:save(); receipt:delete()
-    command:delete()
+    self:saveReceiptAndConsume(receipt, command, operationId)
 end
 
 function FS25SiNServer:reconcileManagerAuthorityDrift()

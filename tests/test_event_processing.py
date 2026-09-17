@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 from pymongo.errors import DuplicateKeyError
 
 from fs25_network_core.event_processing import (CentralEventProcessor, EventAuthenticationError,
-                                                EventScopeError, scoped_event_id)
+                                                EventRetryableError, EventScopeError, scoped_event_id)
 
 
 class EventProcessingTests(unittest.TestCase):
@@ -48,6 +48,34 @@ class EventProcessingTests(unittest.TestCase):
         result = self.processor.process(self.event("player_connected"))
         self.assertTrue(result["duplicate"])
         self.database.db.activity_outbox.insert_one.assert_not_called()
+
+    def test_completed_disconnect_repairs_missing_summary_outbox(self):
+        self.database.db.processed_server_events.find_one.return_value = {"_id": "processed"}
+        self.processor.telemetry_sessions = MagicMock()
+        self.processor.telemetry_sessions.disconnected.return_value = {
+            "status": "accepted", "duplicate": True, "summary": {
+                "total_counted_minutes": 4, "active_minutes": 2,
+                "idle_minutes": 2, "afk_minutes": 0}}
+        event = self.event("player_disconnected")
+        event["payload"].update({"session_id": "session-1", "user_id": "2", "farm_id": "2"})
+        result = self.processor.process(event)
+        self.assertTrue(result["duplicate"])
+        self.database.db.activity_outbox.insert_one.assert_called_once()
+
+    def test_disconnect_retry_after_projection_before_marker_is_idempotent(self):
+        self.database.db.processed_server_events.find_one.return_value = None
+        self.processor.telemetry_sessions = MagicMock()
+        self.processor.telemetry_sessions.disconnected.return_value = {
+            "status": "accepted", "duplicate": True, "summary": {
+                "total_counted_minutes": 4, "active_minutes": 2,
+                "idle_minutes": 2, "afk_minutes": 0}}
+        event = self.event("player_disconnected")
+        event["payload"].update({"session_id": "session-1", "user_id": "2", "farm_id": "2"})
+        self.processor.process(event)
+        self.processor.process(event)
+        first = self.database.db.activity_outbox.insert_one.call_args_list[0].args[0]
+        second = self.database.db.activity_outbox.insert_one.call_args_list[1].args[0]
+        self.assertEqual(first["_id"], second["_id"])
 
     def test_processed_event_id_is_scoped_to_server_and_save(self):
         self.database.db.processed_server_events.find_one.return_value = None
@@ -100,3 +128,48 @@ class EventProcessingTests(unittest.TestCase):
         self.assertEqual(result["status"], "accepted")
         payload = self.processor.telemetry_sessions.connected.call_args.args[3]
         self.assertEqual(payload["session_id"], "event-1")
+
+    def test_disconnect_activity_card_includes_completed_session_summary(self):
+        self.processor.telemetry_sessions = MagicMock()
+        self.processor.telemetry_sessions.disconnected.return_value = {
+            "status": "accepted", "duplicate": False, "save_key": "main-save",
+            "summary": {"total_counted_minutes": 14, "active_minutes": 1,
+                         "idle_minutes": 11, "afk_minutes": 2},
+        }
+        event = self.event("player_disconnected")
+        event["payload"].update({"session_id": "session-1", "user_id": "2", "farm_id": "2"})
+        self.processor.process(event)
+        message = self.database.db.activity_outbox.insert_one.call_args.args[0]["message"]
+        self.assertIn("Session: 14 min", message)
+        self.assertIn("Active: 1 min", message)
+        self.assertIn("AFK: 2 min", message)
+
+    def test_disconnect_watermark_waits_for_all_minutes_before_completion(self):
+        event = self.event("player_disconnected")
+        event["payload"].update({"session_id": "session-1", "final_minute_sequence": 2})
+        self.database.db.player_activity_sessions.find_one.return_value = None
+        self.database.db.player_activity_minutes.find.return_value = [{"minute_sequence": 1}]
+        with self.assertRaises(EventRetryableError):
+            self.processor.process(event)
+        self.database.db.player_activity_minutes.find.return_value = [
+            {"minute_sequence": 1}, {"minute_sequence": 2}]
+        result = self.processor.process(event)
+        self.assertEqual(result["status"], "accepted")
+        self.assertEqual(self.database.db.player_activity_sessions.update_one.call_args.args[1]["$set"]["state"], "completed")
+
+    def test_map_geometry_event_is_validated_and_persisted_for_jin(self):
+        event = self.event("map_geometry")
+        event["payload"] = {"map": {
+            "schema_version": 1, "map_id": "synthetic", "map_title": "Synthetic",
+            "world_width": 100, "world_depth": 100, "image_width": 32, "image_height": 32,
+            "overview_asset_identity": "runtime-generated:synthetic", "version": 1,
+            "image_y_inverted": True, "fields": {"22": {
+                "field_id": 22, "farmland_id": 22,
+                "rings": [[[-10, -10], [10, -10], [0, 10]]], "area_ha": 1,
+            }}, "farmlands": {},
+        }}
+        result = self.processor.process(event)
+        self.assertEqual(result["map_id"], "synthetic")
+        update = self.database.db.sin_maps.update_one.call_args.args[1]
+        self.assertEqual(update["$set"]["map_payload"]["map_id"], "synthetic")
+        self.assertTrue(set(update["$setOnInsert"]).isdisjoint(update["$set"]))

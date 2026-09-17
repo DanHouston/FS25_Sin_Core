@@ -54,6 +54,12 @@ class BusinessWorkflowTests(unittest.TestCase):
         self.assertEqual(record["fields"], "22, 24")
         self.assertEqual(record["compensation_type"], "hourly")
         self.assertEqual(record["rate"], 250)
+        self.assertEqual(record["scope"], "network")
+
+    def test_server_bound_contract_requires_complete_scope(self):
+        service = ContractService(self.database)
+        with self.assertRaisesRegex(ValueError, "both server_key and save_key"):
+            service.create("creator", "", "Work", 10, server_key="server")
 
     def test_marketplace_message_metadata_does_not_change_contract_state(self):
         service = ContractService(self.database)

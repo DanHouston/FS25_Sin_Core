@@ -14,6 +14,8 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass
 import math
+import hashlib
+import json
 import struct
 from typing import Mapping, Sequence
 import zlib
@@ -26,6 +28,26 @@ MAX_RING_POINTS = 10_000
 MAX_TOTAL_POINTS = 100_000
 MAX_OVERLAYS = 100
 MAP_SCHEMA_VERSION = 1
+
+
+def generated_background(width, height):
+    """Return a deterministic neutral canvas when no trusted PDA raster exists.
+
+    This is intentionally not a geographic approximation.  Runtime field
+    polygons remain the only map geometry; the canvas merely makes those
+    polygons visible in a Discord attachment without importing copyrighted
+    GIANTS/map assets into Central.
+    """
+    width = _positive_dimension(width, "image_width")
+    height = _positive_dimension(height, "image_height")
+    pixels = bytearray(width * height * 4)
+    offset = 0
+    for y in range(height):
+        for x in range(width):
+            grid = 5 if x % 64 == 0 or y % 64 == 0 else 0
+            pixels[offset:offset + 4] = (38 + grid, 48 + grid, 58 + grid, 255)
+            offset += 4
+    return bytes(pixels)
 
 
 class MapValidationError(ValueError):
@@ -294,6 +316,11 @@ class MapModel:
                 "version": self.version, "image_y_inverted": self.image_y_inverted,
                 "fields": {str(key): value.to_dict() for key, value in self.fields.items()},
                 "farmlands": {str(key): value.to_dict() for key, value in self.farmlands.items()}}
+
+    @property
+    def revision(self):
+        encoded = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
     @classmethod
     def from_dict(cls, value):
@@ -665,6 +692,7 @@ class MapService:
         self._maps[(str(server_key), str(save_key))] = {
             "model": model, "base_rgba": bytes(base_rgba) if base_rgba is not None else None,
             "overview_dds": bytes(overview_dds) if overview_dds is not None else None,
+            "revision": model.revision,
         }
         self._base_cache.clear()
         self._render_cache.clear()
@@ -677,6 +705,8 @@ class MapService:
         code; it never accepts or opens a filesystem path.
         """
         model = MapModel.from_dict(payload)
+        if base_rgba is None and overview_dds is None:
+            base_rgba = generated_background(model.image_width, model.image_height)
         self.register_map(server_key, save_key, model, base_rgba=base_rgba, overview_dds=overview_dds)
         return model
 
@@ -691,9 +721,13 @@ class MapService:
             raise MapUnavailable("No validated map is registered for this server/save")
         return record["model"]
 
+    def revision(self, server_key, save_key):
+        record = self._maps.get((str(server_key), str(save_key)))
+        return record.get("revision") if record else None
+
     def _base(self, key, record):
         model = record["model"]
-        cache_key = (key, model.version, model.overview_asset_identity)
+        cache_key = (key, model.version, model.revision, model.overview_asset_identity)
         cached = self._base_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -732,7 +766,7 @@ class MapService:
             hash(ownership_key)
         except TypeError:
             ownership_key = repr(ownership_key)
-        render_key = (key, model.version, model.overview_asset_identity, fields, farmlands,
+        render_key = (key, model.version, model.revision, model.overview_asset_identity, fields, farmlands,
                       bool(labels), ownership_key)
         cached = self._render_cache.get(render_key)
         if cached is not None:

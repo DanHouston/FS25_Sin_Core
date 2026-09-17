@@ -1,0 +1,40 @@
+{
+  "manifest_schema": "sin.live-validation/1",
+  "campaign": "sin-offline-integration",
+  "required_scenarios": [
+    "registration",
+    "control_plane_backlog",
+    "activity_disconnect",
+    "map_contract",
+    "contract_scope",
+    "authority_regression"
+  ],
+  "authoritative_adapters": [
+    {"id": "mailbox_xml", "component": "PairingAgent", "boundary": "FS25 mailbox XML"},
+    {"id": "central_http", "component": "BoundaryCentral", "boundary": "authenticated HTTP transport"},
+    {"id": "central_processor", "component": "CentralEventProcessor", "boundary": "central event acceptance"},
+    {"id": "memory_persistence", "component": "_MemoryDatabase", "boundary": "durable service state"},
+    {"id": "activity_publisher", "component": "ActivityPublisher", "boundary": "durable Discord outbox publisher"},
+    {"id": "map_service", "component": "MapService", "boundary": "validated map/render contract"},
+    {"id": "networkbot_presentation", "component": "NetworkBot", "boundary": "contract card and Discord I/O"}
+  ],
+  "scenario_boundaries": {
+    "registration": ["mailbox_xml", "central_http"],
+    "control_plane_backlog": ["mailbox_xml", "central_http"],
+    "activity_disconnect": ["mailbox_xml", "central_http", "central_processor", "memory_persistence", "activity_publisher"],
+    "map_contract": ["mailbox_xml", "central_http", "central_processor", "memory_persistence", "map_service", "networkbot_presentation"],
+    "contract_scope": ["memory_persistence", "networkbot_presentation"],
+    "authority_regression": ["memory_persistence"]
+  },
+  "semantic_scenarios": ["server-pairing", "farm-lifecycle", "player-registration", "activity-telemetry", "map-discovery", "release-evidence"],
+  "boundary_scenarios": ["offline-full", "artifact-and-snapshot", "mailbox-roundtrip", "event-ordering", "registration-roundtrip", "map-geometry-boundary"],
+  "live_checks": [
+    {"id": "runtime-load", "scenario": "authority_regression", "evidence": "server/client ZIP SHA256 and sinSelfTest"},
+    {"id": "farm-manager-sync", "scenario": "authority_regression", "evidence": "sinPermissions farm-switch output"},
+    {"id": "activity-watermark", "scenario": "activity_disconnect", "evidence": "activity_status after disconnect/reconnect"},
+    {"id": "player-registration", "scenario": "registration", "evidence": "registration prompt and response log"},
+    {"id": "map-geometry", "scenario": "map_contract", "evidence": "Map probe and PDA comparison"},
+    {"id": "full-operator-pass", "scenario": "control_plane_backlog", "evidence": "secret-free campaign report"}
+  ],
+  "excluded_from_live": ["credentials", "pairing_codes", "connection_strings"]
+}

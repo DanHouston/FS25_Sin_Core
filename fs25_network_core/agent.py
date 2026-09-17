@@ -1,6 +1,7 @@
 """Mongo-free per-server Agent for authenticated mailbox transport."""
 import argparse
 import errno
+import hashlib
 import json
 import logging
 import os
@@ -12,6 +13,7 @@ from urllib.parse import quote
 from xml.etree import ElementTree
 
 LOG = logging.getLogger(__name__)
+DEFAULT_EVENT_BATCH_SIZE = 50
 
 
 class MailboxWriteError(OSError):
@@ -54,7 +56,11 @@ def _atomic_replace(temporary, destination, attempts=8, initial_backoff=0.05, ma
 
 
 class PairingAgent:
-    def __init__(self, mailbox_dir, backend_url, opener=None):
+    DEFAULT_EVENT_BATCH_SIZE = DEFAULT_EVENT_BATCH_SIZE
+    MAX_EVENT_BATCH_SIZE = 500
+    MAX_EVENT_LOOKAHEAD = 1000
+
+    def __init__(self, mailbox_dir, backend_url, opener=None, event_batch_size=None):
         self.directory = Path(mailbox_dir)
         self.commands = self.directory / "permission-commands"
         self.registration_requests = self.directory / "registration-requests"
@@ -66,6 +72,11 @@ class PairingAgent:
         self.snapshot_url = self.backend_root + "/api/server/snapshot"
         self.manager_authority_url = self.backend_root + "/api/server/manager-authority"
         self.opener = opener or urlopen
+        self._event_cache = {}
+        batch_size = self.DEFAULT_EVENT_BATCH_SIZE if event_batch_size is None else int(event_batch_size)
+        if batch_size < 1 or batch_size > self.MAX_EVENT_BATCH_SIZE:
+            raise ValueError(f"event batch size must be between 1 and {self.MAX_EVENT_BATCH_SIZE}")
+        self.event_batch_size = batch_size
 
     @staticmethod
     def _quarantine(path):
@@ -107,7 +118,8 @@ class PairingAgent:
                           data=body, headers=headers, method="POST")
         with self.opener(request, timeout=10) as response:
             if response.status != 200:
-                raise RuntimeError("event API rejected request")
+                raise HTTPError(request.full_url, response.status, "event API rejected request",
+                                response.headers, None)
             return json.loads(response.read().decode("utf-8"))
 
     def _post_registration(self, server_key, credential, request):
@@ -214,6 +226,11 @@ class PairingAgent:
             if not operation_id or not isinstance(payload, dict):
                 continue
             destination = self.commands / (operation_id + ".xml")
+            # A durable receipt is authoritative evidence that this operation
+            # was already consumed by the game. Do not recreate or redispatch
+            # its command during the fetch-before-ack window.
+            if (self.directory / "permission-receipts" / (operation_id + ".xml")).exists():
+                continue
             if not destination.exists():
                 values = {"operation_id": operation_id, "operation_type": operation.get("operation_type", ""),
                           "server_id": server_key, "save_id": operation.get("save_key", ""),
@@ -265,7 +282,10 @@ class PairingAgent:
                 self._quarantine(path)
             except (HTTPError, URLError, TimeoutError, RuntimeError, OSError, json.JSONDecodeError) as error:
                 if getattr(error, "code", None) in {400, 401, 403, 404, 422}:
-                    self._quarantine(path)
+                    # Failed/rejected receipts remain durable audit evidence;
+                    # Central reconciliation may need them after a policy or
+                    # scope correction. Never bulk-delete authoritative acks.
+                    LOG.warning("receipt rejected; retaining for audit path=%s", path.name)
         return receipts
 
     def process_manager_authority_once(self):
@@ -387,35 +407,186 @@ class PairingAgent:
                 LOG.warning("malformed pairing request quarantined")
         return processed
 
-    def process_events_once(self):
+    @staticmethod
+    def _short_event_id(event_id):
+        """Return a non-sensitive stable diagnostic label for an event ID."""
+        digest = hashlib.sha256(str(event_id).encode("utf-8")).hexdigest()
+        return digest[:12]
+
+    @staticmethod
+    def _event_sort_key(item):
+        """Keep lifecycle order deterministic without relying on cwd or mtime.
+
+        NetworkLocal emits minute observations before the matching disconnect,
+        but filenames from different event families do not share a common
+        lexical prefix.  Grouping by session and ordering connect -> minute ->
+        disconnect keeps a disconnect summary from being finalized ahead of
+        the minute files already present in the mailbox.
+        """
+        path, event = item
+        payload = event.get("payload") or {}
+        scope = (str(event.get("server_key", "")), str(event.get("save_id", "")),
+                 str(payload.get("unique_user_id", "")), str(payload.get("session_id", "")))
+        event_type = event.get("event_type")
+        priority = {"player_connected": 0, "player_activity_minute": 1,
+                    "player_disconnected": 2}.get(event_type, 1)
+        try:
+            minute = int(payload.get("minute_sequence", 0))
+        except (TypeError, ValueError):
+            minute = 0
+        return (scope, priority, minute, path.name)
+
+    @staticmethod
+    def _event_minute_sequence(event):
+        """Return a valid activity minute, or None for malformed metadata."""
+        try:
+            minute = int((event.get("payload") or {}).get("minute_sequence"))
+        except (TypeError, ValueError):
+            return None
+        return minute if minute >= 1 else None
+
+    @classmethod
+    def _parse_event_file(cls, path):
+        root = ElementTree.parse(path).getroot()
+        required = {"event_id", "event_type", "server_key", "server_credential", "save_id"}
+        if root.tag != "serverEvent" or not required.issubset(root.attrib):
+            raise ValueError("invalid event XML")
+        event = dict(root.attrib)
+        event["payload"] = {key: value for key, value in event.items() if key not in required}
+        if event["event_type"] not in {"heartbeat", "player_connected", "player_disconnected",
+                                        "player_activity_minute", "chat_message", "map_geometry"}:
+            raise ValueError("unsupported event type")
+        if event["event_type"] == "map_geometry":
+            event["payload"] = cls._parse_map_geometry(root)
+        return event
+
+    def _cached_event(self, path):
+        stat = path.stat()
+        cache_key = (stat.st_mtime_ns, stat.st_size)
+        cached = self._event_cache.get(path)
+        if cached and cached[0] == cache_key:
+            return cached[1]
+        event = self._parse_event_file(path)
+        self._event_cache[path] = (cache_key, event)
+        return event
+
+    @staticmethod
+    def _parse_map_geometry(root):
+        """Convert the bounded nested XML map export into the API payload."""
+        fields = {}
+        for field in root.findall("./fields/field"):
+            field_id = field.get("field_id")
+            if field_id is None:
+                raise ValueError("map field ID is required")
+            points = []
+            for point in field.findall("./points/point"):
+                points.append([point.get("x"), point.get("z")])
+            fields[str(field_id)] = {
+                "field_id": field_id,
+                "farmland_id": field.get("farmland_id"),
+                "area_ha": field.get("area_ha"),
+                "rings": [points],
+            }
+        payload = {key: root.get(key) for key in (
+            "map_id", "map_title", "world_width", "world_depth", "image_width",
+            "image_height", "overview_asset_identity", "version", "image_y_inverted")}
+        payload["schema_version"] = root.get("schema_version", "1")
+        payload["image_y_inverted"] = str(payload.get("image_y_inverted", "true")).lower() == "true"
+        payload["fields"] = fields
+        payload["farmlands"] = {}
+        return {"map": payload}
+
+    def process_events_once(self, max_events=None):
         events = self.directory / "events"
         events.mkdir(parents=True, exist_ok=True)
         processed = []
-        for path in sorted(events.glob("*.xml")):
+        paths = sorted(events.glob("*.xml"))
+        bounded = max_events is not None
+        limit = len(paths) if max_events is None else max(0, int(max_events))
+        # Parse only the work budget initially.  If that window contains a
+        # watermarked disconnect, discover just enough of the mailbox to find
+        # its session minutes. Cached headers keep retries from becoming a
+        # repeated full XML parse; the hard cap prevents a hostile mailbox
+        # from turning one watch pass into an unbounded parse.
+        scan_paths = paths if not bounded else paths[:limit]
+        pending = []
+        for path in scan_paths:
             try:
-                root = ElementTree.parse(path).getroot()
-                required = {"event_id", "event_type", "server_key", "server_credential", "save_id"}
-                if root.tag != "serverEvent" or not required.issubset(root.attrib):
-                    raise ValueError("invalid event XML")
-                event = dict(root.attrib)
-                event["payload"] = {key: value for key, value in event.items() if key not in required}
-                if event["event_type"] not in {"heartbeat", "player_connected", "player_disconnected",
-                                                "player_activity_minute", "chat_message"}:
-                    raise ValueError("unsupported event type")
+                pending.append((path, self._cached_event(path)))
+            except (ElementTree.ParseError, ValueError, OSError):
+                self._quarantine(path)
+                LOG.warning("malformed event quarantined")
+
+        disconnects = [event for _, event in pending
+                       if event.get("event_type") == "player_disconnected"
+                       and (event.get("payload") or {}).get("final_minute_sequence") is not None]
+        discovered = 0
+        targets = set()
+        for event in disconnects:
+            payload = event.get("payload") or {}
+            try:
+                watermark = int(payload.get("final_minute_sequence"))
+            except (TypeError, ValueError):
+                continue
+            targets.add((str(event.get("server_key", "")), str(event.get("save_id", "")),
+                         str(payload.get("unique_user_id", "")), str(payload.get("session_id", "")),
+                         watermark))
+        if bounded and targets:
+            for path in paths[limit:limit + self.MAX_EVENT_LOOKAHEAD]:
+                try:
+                    event = self._cached_event(path)
+                except (ElementTree.ParseError, ValueError, OSError):
+                    self._quarantine(path)
+                    continue
+                payload = event.get("payload") or {}
+                candidate_key = (str(event.get("server_key", "")), str(event.get("save_id", "")),
+                                 str(payload.get("unique_user_id", "")), str(payload.get("session_id", "")))
+                minute = self._event_minute_sequence(event)
+                if event.get("event_type") == "player_activity_minute" and minute is not None and any(
+                        candidate_key == target[:4] and minute <= target[4] for target in targets):
+                    pending.append((path, event))
+                    discovered += 1
+
+        pending.sort(key=self._event_sort_key)
+        if max_events is None:
+            max_events = len(pending)
+        else:
+            max_events = max(0, int(max_events))
+        attempted = 0
+        effective_max = len(pending) if max_events is None else max(0, int(max_events))
+        selected = pending
+        blocked_sessions = set()
+        for path, event in selected:
+            if attempted >= effective_max:
+                break
+            payload = event.get("payload") or {}
+            ordering_key = (str(event.get("server_key", "")), str(event.get("save_id", "")),
+                            str(payload.get("unique_user_id", "")), str(payload.get("session_id", "")))
+            if ordering_key in blocked_sessions:
+                continue
+            attempted += 1
+            try:
                 self._post_event(event)
                 path.unlink()
                 processed.append(path.name)
-                LOG.info("event delivered; local event removed")
-            except (ElementTree.ParseError, ValueError):
-                self._quarantine(path)
-                LOG.warning("malformed event quarantined")
             except (HTTPError, URLError, TimeoutError, RuntimeError, json.JSONDecodeError, OSError) as error:
                 status = getattr(error, "code", None)
                 if status in {400, 401, 403, 404, 422}:
                     self._quarantine(path)
-                    LOG.warning("event permanently rejected and quarantined")
+                    LOG.warning("event permanently rejected and quarantined type=%s id=%s",
+                                event.get("event_type"), self._short_event_id(event.get("event_id")))
                 else:
-                    LOG.warning("event API unavailable; event retained for retry")
+                    LOG.warning("event API unavailable; event retained for retry type=%s id=%s",
+                                event.get("event_type"), self._short_event_id(event.get("event_id")))
+                    # Preserve per-session ordering without starving other
+                    # sessions whose events are eligible in this pass.
+                    blocked_sessions.add(ordering_key)
+                    continue
+        remaining = len(list(events.glob("*.xml")))
+        if attempted:
+            types = sorted({event.get("event_type", "unknown") for _, event in pending})
+            LOG.info("event batch complete count=%s removed=%s remaining=%s catch_up=%s types=%s",
+                     attempted, len(processed), remaining, remaining > 0, ",".join(types))
         return processed
 
     def process_registration_once(self):
@@ -462,11 +633,16 @@ class PairingAgent:
         next_snapshot = 0
         next_authority = 0
         while not stop or not stop():
+            # Control-plane work is deliberately ahead of the event batch.
+            # A historical event backlog must not delay pairing, registration,
+            # operations, receipts, or current policy refreshes.
             self.process_once()
-            self.process_events_once()
             self.process_registration_once()
-            self.process_operations_once()
             self.process_receipts_once()
+            # Receipt polling precedes operation materialization: a command
+            # acknowledged by the game must never be recreated in the window
+            # between those two control-plane calls.
+            self.process_operations_once()
             if time.monotonic() >= next_authority:
                 self.process_manager_authority_once()
                 next_authority = time.monotonic() + 20
@@ -476,6 +652,7 @@ class PairingAgent:
             if time.monotonic() >= next_clock_refresh:
                 refresh_seconds = self.process_clock_once()
                 next_clock_refresh = time.monotonic() + max(5, refresh_seconds)
+            self.process_events_once(self.event_batch_size)
             time.sleep(max(0.1, interval))
 
 
@@ -487,11 +664,13 @@ def main():
     parser.add_argument("--backend-url", default=os.environ.get("SIN_BACKEND_URL"))
     parser.add_argument("--mailbox-dir", default=os.environ.get("SIN_MAILBOX_DIR"))
     parser.add_argument("--interval", type=float, default=float(os.environ.get("SIN_POLL_INTERVAL", "2")))
+    parser.add_argument("--event-batch-size", type=int,
+                        default=int(os.environ.get("SIN_EVENT_BATCH_SIZE", str(DEFAULT_EVENT_BATCH_SIZE))))
     args = parser.parse_args()
     if not args.backend_url or not args.mailbox_dir:
         parser.error("SIN_BACKEND_URL and SIN_MAILBOX_DIR are required")
     logging.basicConfig(level=logging.INFO)
-    agent = PairingAgent(args.mailbox_dir, args.backend_url)
+    agent = PairingAgent(args.mailbox_dir, args.backend_url, event_batch_size=args.event_batch_size)
     try:
         if args.pair is not None:
             server_key = agent.pair_once(args.pair)

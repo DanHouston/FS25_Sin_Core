@@ -101,6 +101,19 @@ class MapServiceTests(unittest.TestCase):
         self.assertLessEqual(len(service._render_cache), 1)
         self.assertLessEqual(len(service._base_cache), 1)
 
+    def test_changed_geometry_revision_refreshes_cached_render(self):
+        service = MapService()
+        model = synthetic_model()
+        service.register_map("server", "save", model, base_rgba=rgba_base(32, 32))
+        first = service.render_contract_map("server", "save", "22")
+        changed = MapModel("synthetic-map", "Synthetic Map", 100, 100, 32, 32,
+                           "fixture:synthetic-overview-v1", {}, {})
+        service.register_map("server", "save", changed, base_rgba=rgba_base(32, 32))
+        second = service.render_contract_map("server", "save", "22") if changed.fields else None
+        self.assertIsNone(second)
+        self.assertNotEqual(model.revision, changed.revision)
+        self.assertNotEqual(first, service.render_map("server", "save"))
+
     def test_registered_image_bytes_are_bounded_before_caching(self):
         model = synthetic_model()
         service = MapService()
@@ -120,6 +133,15 @@ class MapServiceTests(unittest.TestCase):
         with self.assertRaises(MapValidationError):
             service.register_payload("server", "save", {"map_id": "../unsafe"},
                                      base_rgba=rgba_base(32, 32))
+
+    def test_geometry_only_payload_uses_deterministic_neutral_background(self):
+        service = MapService()
+        restored = service.register_payload("server", "save", synthetic_model().to_dict())
+        first = service.render_contract_map("server", "save", "22")
+        service.unregister_map("server", "save")
+        service.register_payload("server", "save", restored.to_dict())
+        second = service.render_contract_map("server", "save", "22")
+        self.assertEqual(first, second)
 
     def test_uncompressed_dds_conversion_is_bounded_and_deterministic(self):
         header = bytearray(128)

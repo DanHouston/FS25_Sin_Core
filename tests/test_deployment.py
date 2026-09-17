@@ -56,6 +56,10 @@ class DeploymentPackagingTests(unittest.TestCase):
                 self.assertIn("modDesc.xml", archive.namelist())
                 self.assertIn("NetworkLocal.lua", archive.namelist())
                 self.assertIn("events/SiNRegistrationWarningEvent.lua", archive.namelist())
+            with ZipFile(output / "sin-agent.zip") as archive:
+                agent_source = archive.read("fs25_network_core/agent.py").decode("utf-8")
+                self.assertIn("process_events_once(self.event_batch_size)", agent_source)
+                self.assertIn("_event_minute_sequence", agent_source)
             self.assertFalse((output / "FS25_SiN_NetworkLocal.zip").exists())
             self.assertEqual(
                 hashlib.sha256((output / "FS25_SiN_Server.zip").read_bytes()).hexdigest(),

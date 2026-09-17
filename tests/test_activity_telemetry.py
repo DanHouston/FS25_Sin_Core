@@ -147,3 +147,13 @@ class ActivitySessionPersistenceTests(unittest.TestCase):
             user_id="1", farm_id="0", display_name="Server"))
         self.assertTrue(result["ignored"])
         self.db.player_activity_sessions.update_one.assert_not_called()
+
+    def test_disconnect_returns_completed_session_summary(self):
+        self.db.player_activity_sessions.find_one.side_effect = [
+            {"_id": "session-key", "state": "active"},
+            {"_id": "session-key", "state": "completed", "total_counted_minutes": 14,
+             "active_minutes": 1, "idle_minutes": 11, "afk_minutes": 2},
+        ]
+        result = self.processor.disconnected("server", "save", "disconnect-event", self.payload())
+        self.assertEqual(result["summary"], {"total_counted_minutes": 14, "active_minutes": 1,
+                                               "idle_minutes": 11, "afk_minutes": 2})
