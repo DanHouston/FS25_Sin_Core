@@ -245,9 +245,8 @@ class AgentTests(unittest.TestCase):
         agent.process_snapshot_once = lambda: calls.append("snapshot")
         agent.process_clock_once = lambda: 60
         agent.process_events_once = lambda limit: calls.append("events")
-        with patch.object(agent_module.time, "sleep", side_effect=lambda _: (_ for _ in ()).throw(StopIteration)):
-            with self.assertRaises(StopIteration):
-                agent.watch(stop=lambda: False)
+        with patch.object(agent_module.time, "sleep"):
+            agent.watch(stop=lambda: bool(calls))
         self.assertLess(calls.index("receipts"), calls.index("operations"))
 
     def test_chat_event_uses_authenticated_event_transport(self):
