@@ -156,8 +156,8 @@ class ContractService:
 
     def create(self, creator_id, title, description, value=0, server_key=None, save_key=None, due_at=None,
                work_type=None, fields=None, compensation_type="fixed", rate=None, server_name=None):
-        if (server_key is None) != (save_key is None):
-            raise ValueError("Server-bound contracts require both server_key and save_key")
+        if not server_key or not save_key:
+            raise ValueError("Work contracts require an explicit server and save context")
         if work_type is not None:
             work_type = str(work_type).strip().lower()
             if work_type not in self.WORK_TYPES:
@@ -190,10 +190,9 @@ class ContractService:
         if type(value) is not int or value < 0 or value > 1_000_000_000:
             raise ValueError("Contract value must be a whole currency unit between 0 and 1,000,000,000")
         contract_id = str(uuid.uuid4())
-        scope = "server" if server_key is not None else "network"
         record = {"contract_id": contract_id, "creator_discord_id": str(creator_id),
                   "acceptor_discord_id": None, "creator_farm_id": None, "acceptor_farm_id": None,
-                  "scope": scope, "server_key": server_key, "save_key": save_key, "title": title,
+                  "scope": "server", "server_key": str(server_key), "save_key": str(save_key), "title": title,
                   "server_name": server_name,
                   "description": description, "value": value, "work_type": work_type,
                   "fields": fields, "compensation_type": compensation_type, "rate": value,

@@ -10,6 +10,7 @@ build-manifest.json
 SHA256SUMS.txt
 Update-SiN.ps1
 Update-SiN-Client.ps1
+Restart-SiN-Agent.ps1
 ```
 
 The Agent archive contains only `fs25_network_core/__init__.py` and
@@ -78,6 +79,19 @@ writes `C:\SiN\deployment.json`.
 Agent updates take effect after the updater restarts the Agent. A changed
 FS25_SiN_Server ZIP prints `FS25 RESTART REQUIRED`; the updater never restarts the
 FS25 dedicated server. Identical mod hashes do not require a restart.
+
+For an Agent-only interruption or recovery, use the packaged explicit restart
+script. It reads the backend URL, canonical mailbox, Agent root, and poll
+interval from `C:\SiN\deployment.json`, so operators do not need to reconstruct
+launcher environment variables:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File C:\SiN\Deploy\Restart-SiN-Agent.ps1
+```
+
+The release builder treats `dist/` as ephemeral generated state and cleans it
+before a canonical local build. Deployment downloads authoritative GitHub
+Release assets and does not consume local `dist/` contents.
 
 The newest updater is downloaded as `C:\SiN\Deploy\Update-SiN.next.ps1` so the
 currently running script is not replaced mid-execution.

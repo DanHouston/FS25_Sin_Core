@@ -26,7 +26,8 @@ class BusinessWorkflowTests(unittest.TestCase):
 
     def test_contract_lifecycle_enforces_participants(self):
         service = ContractService(self.database)
-        record = service.create("creator", "Haul", "Move grain", 100)
+        record = service.create("creator", "Haul", "Move grain", 100,
+                                server_key="server", save_key="save")
         self.assertEqual(record["status"], "open")
         self.db.contracts.find_one.side_effect = [record, dict(record, status="accepted", acceptor_discord_id="acceptor")]
         self.db.contracts.update_one.return_value.modified_count = 1
@@ -49,16 +50,22 @@ class BusinessWorkflowTests(unittest.TestCase):
         service = ContractService(self.database)
         record = service.create("creator", "", "Harvest instructions", 250,
                                 work_type="harvesting", fields="22, 24,22",
-                                compensation_type="hourly", rate=250)
+                                compensation_type="hourly", rate=250,
+                                server_key="server-a", save_key="save-a")
         self.assertEqual(record["title"], "Harvesting — Fields 22, 24")
         self.assertEqual(record["fields"], "22, 24")
         self.assertEqual(record["compensation_type"], "hourly")
         self.assertEqual(record["rate"], 250)
-        self.assertEqual(record["scope"], "network")
+        self.assertEqual(record["scope"], "server")
+
+    def test_work_contract_requires_explicit_server_and_save_scope(self):
+        service = ContractService(self.database)
+        with self.assertRaisesRegex(ValueError, "explicit server and save"):
+            service.create("creator", "", "Work", 10)
 
     def test_server_bound_contract_requires_complete_scope(self):
         service = ContractService(self.database)
-        with self.assertRaisesRegex(ValueError, "both server_key and save_key"):
+        with self.assertRaisesRegex(ValueError, "explicit server and save"):
             service.create("creator", "", "Work", 10, server_key="server")
 
     def test_marketplace_message_metadata_does_not_change_contract_state(self):

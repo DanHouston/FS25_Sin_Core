@@ -84,7 +84,7 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
                 _json_response(self, 200, {"operations": safe, "save_key": save_key})
                 return
             if path == "/api/server/manager-authority":
-                managers = self.event_processor.authorization.db.memberships.find({
+                relationships = self.event_processor.authorization.db.memberships.find({
                     "server_id": record["server_key"], "save_id": save_key,
                     # A pending manager assignment is already a persisted SiN
                     # authorization created only after the game confirmed the
@@ -95,9 +95,13 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
                     # empty authority XML prevents the game from applying the
                     # pending job in the first place.
                     "state": {"$in": ["pending", "active"]},
-                    "desired_role": "farm_manager"})
+                    "desired_role": {"$in": ["farm_manager", "contractor"]}})
+                managers = [row for row in relationships if row.get("desired_role") == "farm_manager"]
+                contractors = [row for row in relationships if row.get("desired_role") == "contractor"]
                 _json_response(self, 200, {"save_key": save_key, "managers": [
-                    {"game_player_id": row["game_player_id"], "farm_id": row["farm_id"]} for row in managers]})
+                    {"game_player_id": row["game_player_id"], "farm_id": row["farm_id"]} for row in managers],
+                    "contractors": [{"game_player_id": row["game_player_id"], "farm_id": row["farm_id"]}
+                                    for row in contractors]})
                 return
             policy = self.event_processor.registry.clock_policy(record["server_key"], save_key)
             local = datetime.now(timezone.utc).astimezone(ZoneInfo(policy["timezone"]))

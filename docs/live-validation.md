@@ -4,6 +4,31 @@ This document lists only checks that require a real FS25 server/client. The
 central services, Agent mailbox transport, persistence, idempotency, and
 authorization rules are covered by the local test suite.
 
+## v0.1.24 live-validation checkpoint
+
+The released baseline is `v0.1.24` at commit
+`c9bcb980dd50e951a80cf076003f6ad033e3e855`. Real FS25/Mongo/Discord evidence
+validated deployment, clean startup, Courtright Line map acquisition, stable
+identity across reconnect, personal-farm manager restoration, active/idle/AFK
+accounting, normal disconnect, durable Agent and Central retry, runtime
+generation rollover, and durable JiN contract interactions.
+
+The same evidence found five runtime/domain issues and two operational issues:
+farm observation lagged the authoritative farm, SiN Harvest contractor access
+was absent, one historical session remained active, the PDA map was vertically
+inverted, work contracts exposed an invalid network-wide scope, JiN dynamic
+autocomplete could degrade while commands remained registered, and a direct
+Agent restart lacked launcher configuration. Courtright Line also confirmed
+that farmland IDs and field geometry are different layers: ownership may use
+authoritative farmland IDs, but no farmland polygon is fabricated from field
+polygons.
+
+The following remain explicitly synthetic-only or live-deferred: positive
+cross-farm acceptance, forced renderer failure, fresh identity registration,
+second-server isolation, actual farmland parcel geometry, and the vanilla
+cause of reconnecting at the shop. The negative self-farm acceptance path was
+live-proven; it must not be generalized into a live positive-acceptance claim.
+
 The automated suite also covers disconnect watermark ordering, durable receipt
 reconciliation, contract scope selection, and runtime map persistence/rendering.
 It does not replace live validation of GIANTS runtime geometry extraction,
@@ -37,8 +62,8 @@ dedicated server and reconnect the client once. Use the read-only commands
 1. Log directly into the personal farm and run `sinPermissions`; record the
    client-side `manager=true` and permission booleans.
 2. Switch from the personal farm to `SiN Harvest`; run `sinPermissions` and
-   confirm manager authority is absent while ordinary shared permissions are
-   retained.
+   confirm personal manager authority remains tied to the personal farm while
+   the independent SiN Harvest contractor permission set is present.
 3. Switch back without reconnecting; run `sinPermissions` and confirm the
    client reports manager authority and the complete manager permission set.
 4. Intentionally demote the player in-game, wait longer than the periodic
@@ -118,10 +143,10 @@ server/save automatically. Withdrawals remain disabled unless a server
 explicitly enables a verified FS25 money-delivery adapter.
 
 `/contract_create` uses work type, comma-separated numeric fields, and fixed or
-hourly compensation. Its optional server selector must match the creator's
-registered identity context; one eligible context is selected automatically,
-while multiple contexts require an explicit server. Use the explicit
-`network_wide` option for a network-wide contract. If `channels.jobs` is
+hourly compensation. Its server selector must resolve the creator's registered
+identity context; one eligible context is selected automatically, while
+multiple, missing, or ambiguous contexts fail closed. Work contracts are never
+network-wide and persist explicit server/save scope. If `channels.jobs` is
 configured, verify that a new contract card appears and that Accept remains
 safe after a bot restart. Event
 creation accepts a timezone-bearing ISO-8601 value such as

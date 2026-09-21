@@ -502,6 +502,26 @@ class AgentTests(unittest.TestCase):
             parsed = PairingAgent._parse_event_file(event)
             self.assertEqual(parsed["payload"]["map"]["fields"]["22"]["rings"][0][1], ["10", "-10"])
 
+    def test_manager_authority_snapshot_preserves_contractor_relationship(self):
+        response = MagicMock()
+        response.status = 200
+        response.read.return_value = json.dumps({
+            "managers": [{"game_player_id": "stable-player", "farm_id": 2}],
+            "contractors": [{"game_player_id": "stable-player", "farm_id": 99}],
+        }).encode("utf-8")
+        response.__enter__.return_value = response
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "serverBinding.xml").write_text(
+                '<serverBinding serverKey="server" credential="secret"/>', encoding="utf-8")
+            (root / "snapshot.xml").write_text(
+                '<networkLocal savegameIndex="1"/>', encoding="utf-8")
+            agent = PairingAgent(root, "https://central", MagicMock(return_value=response))
+            self.assertTrue(agent.process_manager_authority_once())
+            authority = (root / "manager-authority.xml").read_text(encoding="utf-8")
+            self.assertIn('manager gamePlayerId="stable-player" farmId="2"', authority)
+            self.assertIn('contractor gamePlayerId="stable-player" farmId="99"', authority)
+
     def test_map_geometry_event_preserves_farmland_identity_and_optional_geometry(self):
         with tempfile.TemporaryDirectory() as folder:
             event = Path(folder) / "map.xml"

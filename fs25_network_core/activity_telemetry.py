@@ -177,8 +177,11 @@ class ActivityTelemetryProcessor:
             self.db.player_activity_sessions.update_one(
                 {"_id": session_key},
                 {"$setOnInsert": session_insert,
-                 "$set": {"last_seen_at": now, "current_state": values["bucket"],
-                           "current_inactive_minutes": values["inactive_minutes"], "updated_at": now},
+                  "$set": {"last_seen_at": now, "current_state": values["bucket"],
+                            "current_inactive_minutes": values["inactive_minutes"],
+                            "observed_farm_id": values["farm_id"], "observed_farm_at": now,
+                            "observed_display_name": values["display_name"],
+                            "transient_user_id": values["transient_user_id"], "updated_at": now},
                   "$inc": dict(increments, total_counted_minutes=1)}, upsert=True, session=session)
             LOG.info("[SiN Telemetry] activity interval accepted serverKey=%s saveKey=%s player=%s session=%s minute=%s bucket=%s",
                      server_key, save_key, values["unique_id"], session_id,
@@ -239,10 +242,21 @@ class ActivitySessionProcessor:
                                "session_id": session_id, "connected_at": now,
                                "state": "active", "created_at": now},
              "$set": {"last_seen_at": now, "updated_at": now,
-                       "transient_user_id": str(payload.get("user_id", "")),
-                       "observed_farm_id": str(payload.get("farm_id", "0")),
-                       "observed_display_name": str(payload.get("display_name", ""))}},
+                        "transient_user_id": str(payload.get("user_id", "")),
+                        "observed_farm_id": str(payload.get("farm_id", "0")),
+                        "observed_farm_at": now,
+                        "observed_display_name": str(payload.get("display_name", ""))}},
             upsert=True)
+        # A new authoritative connection supersedes an older session that
+        # never delivered a normal disconnect. Preserve the historical record
+        # and identify the reconciliation source rather than fabricating a
+        # normal completion summary for the stale session.
+        self.db.player_activity_sessions.update_many(
+            {"server_key": server_key, "save_key": save_key,
+             "fs25_unique_user_id": unique_id, "state": "active",
+             "session_id": {"$ne": session_id}},
+            {"$set": {"state": "reconciled", "reconciled_at": now,
+                       "reconciled_by_session_id": session_id, "updated_at": now}})
         LOG.info("[SiN Telemetry] session observed/started serverKey=%s saveKey=%s player=%s session=%s",
                  server_key, save_key, unique_id, session_id)
         return {"status": "accepted", "duplicate": False, "save_key": save_key,

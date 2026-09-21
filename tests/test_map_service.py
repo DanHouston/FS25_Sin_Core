@@ -149,6 +149,37 @@ class MapServiceTests(unittest.TestCase):
         with self.assertRaises(MapValidationError):
             transform.world_to_pixel(51, 0)
 
+    def test_live_courtright_corner_anchors_use_pda_orientation(self):
+        transform = MapTransform(100, 100, 101, 101)
+        anchors = {
+            1: (-40, -40),   # NW
+            15: (40, -40),   # NE
+            59: (-40, 40),   # SW
+            71: (40, 40),    # SE
+            30: (0, 0),      # center reference
+        }
+        pixels = {field_id: transform.world_to_pixel(*point)
+                  for field_id, point in anchors.items()}
+        self.assertEqual(pixels[1], (10, 10))
+        self.assertEqual(pixels[15], (90, 10))
+        self.assertEqual(pixels[59], (10, 90))
+        self.assertEqual(pixels[71], (90, 90))
+        self.assertEqual(pixels[30], (50, 50))
+
+    def test_selected_highlight_preserves_geometry_and_whole_map_bounds(self):
+        model = synthetic_model()
+        transform = MapTransform(model.world_width, model.world_depth,
+                                 model.image_width, model.image_height)
+        geometry = model.fields[22]
+        expected = [tuple(transform.world_to_pixel(x, z) for x, z in ring)
+                    for ring in geometry.rings]
+        self.assertEqual(MapRenderer._pixel_rings(geometry.rings, transform), expected)
+        self.assertEqual(transform.world_to_pixel(*model.world_bounds[:2]), (0, 0))
+        self.assertEqual(transform.world_to_pixel(*model.world_bounds[2:]),
+                         (model.image_width - 1, model.image_height - 1))
+        rendered = MapRenderer().render(model, rgba_base(32, 32), highlight_fields=[22])
+        self.assertTrue(rendered.startswith(b"\x89PNG"))
+
     def test_renderer_outputs_deterministic_png_with_field_and_farmland_overlays(self):
         model = synthetic_model()
         base = rgba_base(model.image_width, model.image_height)

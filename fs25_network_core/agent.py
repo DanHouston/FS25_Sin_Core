@@ -302,11 +302,18 @@ class PairingAgent:
             managers = payload.get("managers") if isinstance(payload, dict) else None
             if not isinstance(managers, list):
                 raise ValueError("manager authority API returned an invalid response")
+            contractors = payload.get("contractors", []) if isinstance(payload, dict) else []
+            if not isinstance(contractors, list):
+                raise ValueError("contractor authority API returned an invalid response")
             root = ElementTree.Element("managerAuthority", schemaVersion="1")
             for manager in managers:
                 if isinstance(manager, dict) and manager.get("game_player_id") is not None:
                     ElementTree.SubElement(root, "manager", gamePlayerId=str(manager["game_player_id"]),
                                             farmId=str(manager.get("farm_id", 0)))
+            for contractor in contractors:
+                if isinstance(contractor, dict) and contractor.get("game_player_id") is not None:
+                    ElementTree.SubElement(root, "contractor", gamePlayerId=str(contractor["game_player_id"]),
+                                            farmId=str(contractor.get("farm_id", 0)))
             destination = self.directory / "manager-authority.xml"
             temporary = destination.with_suffix(".tmp")
             ElementTree.ElementTree(root).write(temporary, encoding="utf-8", xml_declaration=True)
@@ -511,7 +518,7 @@ class PairingAgent:
             "image_height", "overview_asset_identity", "version", "image_y_inverted",
             "coordinate_system")}
         payload["schema_version"] = root.get("schema_version", "1")
-        payload["image_y_inverted"] = str(payload.get("image_y_inverted", "true")).lower() == "true"
+        payload["image_y_inverted"] = str(payload.get("image_y_inverted", "false")).lower() == "true"
         payload["farmland_ids"] = farmland_ids
         payload["fields"] = fields
         payload["farmlands"] = farmlands

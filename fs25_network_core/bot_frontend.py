@@ -111,6 +111,7 @@ class NetworkBot(discord.Client):
         self.channels = {name: int(value) for name, value in (channels or {}).items()}
         self.community_timezone = str(community_timezone or "UTC")
         self.tree = app_commands.CommandTree(self)
+        self._command_sync_lock = asyncio.Lock()
         self.authorization = AuthorizationManager(bank.database)
         self.authorizations = authorizations or {}
         self.community = CommunityApplications(bank.database)
@@ -185,7 +186,11 @@ class NetworkBot(discord.Client):
                 return []
             try:
                 records = await asyncio.to_thread(self.server_registry.eligible_servers, purpose)
-            except (ValueError, OSError):
+            except (ValueError, OSError, asyncio.TimeoutError) as error:
+                logging.warning("Dynamic server autocomplete unavailable purpose=%s error=%s", purpose, error)
+                return []
+            except Exception:
+                logging.exception("Dynamic server autocomplete failed purpose=%s", purpose)
                 return []
             query = (current or "").lower()
             choices = []
@@ -652,23 +657,18 @@ class NetworkBot(discord.Client):
         )
         async def contract_create(interaction: discord.Interaction, work_type: app_commands.Choice[str], fields: str,
                                   compensation: app_commands.Choice[str], rate: app_commands.Range[int, 1, 1_000_000_000],
-                                  network_wide: bool = False, description: str = "", server: str = ""):
-            context = {}
-            if network_wide:
-                if server:
-                    raise ValueError("Choose either a server or a network-wide contract, not both")
-            else:
-                try:
-                    # Explicit selection must still be resolved through the
-                    # caller's durable identity contexts.  Registry
-                    # eligibility alone is not authorization to create a
-                    # contract for an unrelated server/save.
-                    context = await asyncio.to_thread(
-                        self.resolve_identity_context, str(interaction.user.id), server or None, "reconcile")
-                except ValueError as error:
-                    if "multiple game contexts" in str(error).lower():
-                        raise ValueError("Select an eligible server with the server option; no server was chosen") from None
-                    raise
+                                  description: str = "", server: str = ""):
+            try:
+                # Explicit selection must still be resolved through the
+                # caller's durable identity contexts. Registry eligibility
+                # alone is not authorization to create work for an unrelated
+                # server/save. Missing and ambiguous contexts fail closed.
+                context = await asyncio.to_thread(
+                    self.resolve_identity_context, str(interaction.user.id), server or None, "reconcile")
+            except ValueError as error:
+                if "multiple game contexts" in str(error).lower():
+                    raise ValueError("Select an eligible server with the server option; no server was chosen") from None
+                raise
             record = await asyncio.to_thread(self.contracts.create, str(interaction.user.id), "", description,
                                              work_type=work_type.value, fields=fields,
                                              compensation_type=compensation.value, rate=rate,
@@ -1013,8 +1013,6 @@ class NetworkBot(discord.Client):
         status = str(record.get("status", "open")).replace("_", " ").title()
         server = record.get("server_name") or record.get("server_key")
         server_line = f"Server: {server}\n" if server else ""
-        if not server_line and record.get("scope") == "network":
-            server_line = "Scope: Network-wide\n"
         return (f"**{record.get('title', 'Farm work')}**\n"
                 f"{record.get('description', '')}\n"
                 f"Work: {str(record.get('work_type', 'general')).title()} | Fields: {fields}\n"
@@ -1124,25 +1122,38 @@ class NetworkBot(discord.Client):
 
     async def setup_hook(self):
         self.tree.copy_global_to(guild=self.guild)
-        try:
-            commands = await self.tree.sync(guild=self.guild)
-        except discord.Forbidden:
-            invite = discord.utils.oauth_url(
-                self.application_id, permissions=discord.Permissions(view_channel=True, send_messages=True),
-                guild=self.guild, scopes=("bot", "applications.commands"), disable_guild_select=True)
-            raise DiscordSetupError(
-                f"Discord accepted the token, but application {self.application_id} cannot register commands "
-                f"in server {self.guild.id}. Verify the server ID and install this application using "
-                f"Guild Install with bot and applications.commands scopes.\n"
-                f"Open this invite in your browser, authorize it for your server, then restart:\n{invite}"
-            ) from None
-        logging.info("Registered %s commands in Discord server %s", len(commands), self.guild.id)
+        if not await self._sync_command_registry("setup"):
+            raise DiscordSetupError("Discord command registry could not be synchronized; inspect JiN logs and retry.")
         await self.restore_contract_views()
         await self.restore_event_views()
+
+    async def _sync_command_registry(self, reason):
+        async with self._command_sync_lock:
+            try:
+                commands = await self.tree.sync(guild=self.guild)
+            except discord.Forbidden:
+                invite = discord.utils.oauth_url(
+                    self.application_id, permissions=discord.Permissions(view_channel=True, send_messages=True),
+                    guild=self.guild, scopes=("bot", "applications.commands"), disable_guild_select=True)
+                raise DiscordSetupError(
+                    f"Discord accepted the token, but application {self.application_id} cannot register commands "
+                    f"in server {self.guild.id}. Verify the server ID and install this application using "
+                    f"Guild Install with bot and applications.commands scopes.\n"
+                    f"Open this invite in your browser, authorize it for your server, then restart:\n{invite}"
+                ) from None
+            except Exception:
+                logging.exception("Discord command registry sync failed reason=%s", reason)
+                return False
+        logging.info("Registered %s commands in Discord server %s reason=%s", len(commands), self.guild.id, reason)
+        return True
 
     async def on_ready(self):
         logging.info("Discord bot connected as %s (ID %s)", self.user, self.user.id)
         self.activity_publisher.start()
+
+    async def on_resumed(self):
+        logging.info("Discord gateway resumed; refreshing command registry")
+        await self._sync_command_registry("gateway_resumed")
 
     async def close(self):
         await self.activity_publisher.stop()

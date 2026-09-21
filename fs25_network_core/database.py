@@ -88,6 +88,8 @@ class Database:
             ("server_key", 1), ("save_key", 1), ("fs25_unique_user_id", 1)], unique=True)
         self.db.player_activity_sessions.create_index([
             ("server_key", 1), ("save_key", 1), ("fs25_unique_user_id", 1), ("connected_at", -1)])
+        self.db.player_activity_sessions.create_index([
+            ("server_key", 1), ("save_key", 1), ("fs25_unique_user_id", 1), ("state", 1)])
         self._replace_legacy_unique_index(
             self.db.chat_messages,
             [("message_id", 1)],

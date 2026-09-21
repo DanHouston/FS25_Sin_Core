@@ -364,7 +364,7 @@ class MailboxBoundaryAdapter:
             'map_id="campaign-map" map_title="Campaign Map" world_width="2048" '
             'world_depth="2048" image_width="256" image_height="256" '
             'overview_asset_identity="campaign-overview" version="1" '
-            'image_y_inverted="true"><fields><field field_id="22" farmland_id="22" '
+            'image_y_inverted="false"><fields><field field_id="22" farmland_id="22" '
             'area_ha="12.5"><points><point x="0" z="0"/><point x="10" z="0"/>'
             '<point x="10" z="10"/></points></field></fields></serverEvent>',
             encoding="utf-8")
@@ -416,7 +416,7 @@ class MailboxBoundaryAdapter:
             'map_id="campaign-map" map_title="Campaign Map" world_width="2048" '
             'world_depth="2048" image_width="128" image_height="128" '
             'overview_asset_identity="campaign-overview" version="1" '
-            'image_y_inverted="true" coordinate_system="giants-centered-xz"><fields>'
+            'image_y_inverted="false" coordinate_system="giants-centered-xz"><fields>'
             f'<field field_id="22" farmland_id="22" area_ha="12.5"><points>{field_22_points}</points></field>'
             f'<field field_id="47" farmland_id="47" area_ha="18.0"><points>{field_47_points}</points></field>'
             f'</fields><farmlands>{farmland_xml}</farmlands></serverEvent>', encoding="utf-8")
@@ -523,6 +523,10 @@ class _MemoryCollection:
         for key, expected in query.items():
             actual = row.get(key)
             if isinstance(expected, dict):
+                if "$in" in expected and actual not in expected["$in"]:
+                    return False
+                if "$exists" in expected and ((key in row) != bool(expected["$exists"])):
+                    return False
                 if "$gte" in expected and (actual is None or actual < expected["$gte"]):
                     return False
                 if "$lte" in expected and (actual is None or actual > expected["$lte"]):
@@ -555,6 +559,16 @@ class _MemoryCollection:
         for key, value in update.get("$inc", {}).items():
             target[key] = target.get(key, 0) + value
         return _MemoryResult(1)
+
+    def update_many(self, query, update, **_kwargs):
+        matched = 0
+        for row in self.rows:
+            if self._matches(row, query):
+                row.update(update.get("$set", {}))
+                for key, value in update.get("$inc", {}).items():
+                    row[key] = row.get(key, 0) + value
+                matched += 1
+        return _MemoryResult(matched)
 
 
 class _MemoryDatabase:
@@ -1257,7 +1271,7 @@ def _authoritative_contract_scope(root: Path) -> Mapping[str, object]:
     if command is None:
         raise AssertionError("production contract_create command was not registered")
 
-    async def invoke(discord_id="contract-user", server="", network_wide=False):
+    async def invoke(discord_id="contract-user", server=""):
         interaction = _CommandInteraction(discord_id=discord_id)
         try:
             await command.callback(
@@ -1266,7 +1280,6 @@ def _authoritative_contract_scope(root: Path) -> Mapping[str, object]:
                 "22, 22",
                 app_commands.Choice(name="Fixed price", value="fixed"),
                 1200,
-                network_wide,
                 "Deterministic contract-scope fixture",
                 server,
             )
@@ -1346,22 +1359,7 @@ def _authoritative_contract_scope(root: Path) -> Mapping[str, object]:
         if not scoped_reloaded or scoped_reloaded.get("scope") != "server":
             raise AssertionError("explicitly scoped contract did not survive service reload")
 
-        # Case D: network-wide is now an explicit command option, so it cannot
-        # be confused with the multiple-context fail-closed path above.
-        network = await invoke(network_wide=True)
-        network_record = bot.contracts.get(network["contract"]["contract_id"]) if network["contract"] else None
-        network_evidence = {
-            "explicit_request": True,
-            "normalized_scope": network_record.get("scope") if network_record else None,
-            "contract_id": network_record.get("contract_id") if network_record else None,
-            "persisted_scope": {key: network_record.get(key) for key in ("scope", "server_key", "save_key")}
-            if network_record else None,
-        }
-        if (not network_record or network_record.get("scope") != "network"
-                or network_record.get("server_key") is not None
-                or network_record.get("save_key") is not None):
-            raise AssertionError("explicit network-wide request was not persisted as network-wide")
-
+        # Case D: an invalid or missing context cannot reach ContractService.
         invalid_count = len(database.db.contracts.rows)
         invalid = await invoke(server="server-not-eligible")
         invalid_evidence = {
@@ -1372,12 +1370,21 @@ def _authoritative_contract_scope(root: Path) -> Mapping[str, object]:
         }
         if invalid["contract"] is not None or len(database.db.contracts.rows) != invalid_count:
             raise AssertionError("invalid explicit selector created a contract")
+        missing_context = await invoke(discord_id="unregistered-user")
+        missing_context_evidence = {
+            "result": "rejected",
+            "error": missing_context["error"],
+            "contract_created": missing_context["contract"] is not None,
+        }
+        if missing_context["contract"] is not None:
+            raise AssertionError("missing server/save context created a contract")
         return {
             "single": single_evidence,
             "multiple": multiple_evidence,
             "explicit_selector": explicit_evidence,
             "invalid_selector": invalid_evidence,
-            "network_wide": network_evidence,
+            "network_wide": {"available": False},
+            "missing_context": missing_context_evidence,
             "jobs_channel": {
                 "configured_destination": 704,
                 "captured_destination": channel.channel_id,
@@ -1386,8 +1393,6 @@ def _authoritative_contract_scope(root: Path) -> Mapping[str, object]:
             "persistence": {
                 "scoped_reload": {key: scoped_reloaded.get(key) for key in
                                   ("contract_id", "scope", "server_key", "save_key", "fields")},
-                "network_reload": {key: bot.contracts.get(network_record["contract_id"]).get(key)
-                                   for key in ("contract_id", "scope", "server_key", "save_key", "fields")},
                 "total_contracts": len(database.db.contracts.rows),
             },
             "presentation": {
@@ -1395,16 +1400,15 @@ def _authoritative_contract_scope(root: Path) -> Mapping[str, object]:
                 "captured_messages": len(channel.deliveries),
                 "all_to_configured_jobs": all(channel.channel_id == 704 for _ in channel.deliveries),
                 "response_count": len(single["interaction"].response.messages)
-                + len(explicit["interaction"].response.messages)
-                + len(network["interaction"].response.messages),
+                + len(explicit["interaction"].response.messages),
             },
             "fallback": {
                 "render_failure": map_service.render_attempts > 0,
                 "render_attempts": map_service.render_attempts,
                 "contracts_persisted": len(database.db.contracts.rows),
-                "scope_preserved": all(record.get("scope") in {"server", "network"}
+                "scope_preserved": all(record.get("scope") == "server"
                                         for record in database.db.contracts.rows),
-                "text_published": len(channel.deliveries) == 3,
+                "text_published": len(channel.deliveries) == 2,
                 "attachment_count": sum("file" in delivery for delivery in channel.deliveries),
                 "destination": channel.channel_id,
             },

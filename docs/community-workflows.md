@@ -4,12 +4,11 @@ The first central-only foundations for community features live in
 `fs25_network_core/business_workflows.py`. They are intentionally separate
 from farm membership and manager authority.
 
-`/contract_create` has an optional eligible server selector with autocomplete.
-A caller with exactly one eligible identity context is scoped automatically;
-multiple contexts require an explicit server, whose configured save must also
-be unambiguous. The explicit `network_wide` option creates a network-wide
-contract; an omitted server selector no longer silently falls back to that
-scope when identity resolution fails.
+`/contract_create` has an eligible server selector with autocomplete. A caller
+with exactly one eligible identity context is scoped automatically; multiple
+contexts require an explicit server, whose configured save must also be
+unambiguous. Work contracts are never network-wide: missing, stale, or
+ambiguous server/save context fails closed before persistence.
 
 ## Chat
 
@@ -60,7 +59,8 @@ deployment value; an operator may instead supply `DISCORD_JOBS_CHANNEL_ID` in
 the bot environment. The bot never guesses or creates a channel. A contract
 creator with exactly one eligible registered server/save is scoped there
 automatically; multiple eligible identity contexts fail closed rather than
-silently selecting a server.
+silently selecting a server. Every persisted work contract contains explicit
+`scope: "server"`, `server_key`, and `save_key`.
 
 Invoices are separate `invoices` documents and pay through the banking ledger
 exactly once; an issuer cannot invoice the same Discord account. Community

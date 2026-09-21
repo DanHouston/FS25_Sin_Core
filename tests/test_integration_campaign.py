@@ -155,10 +155,8 @@ class IntegrationCampaignTests(unittest.TestCase):
             "scope": "server", "server_key": "server-b", "save_key": "save-b"})
         self.assertFalse(explicit["other_context_selected"])
         self.assertFalse(evidence["invalid_selector"]["contract_created"])
-        network = evidence["network_wide"]
-        self.assertTrue(network["explicit_request"])
-        self.assertEqual(network["persisted_scope"], {
-            "scope": "network", "server_key": None, "save_key": None})
+        self.assertFalse(evidence["network_wide"]["available"])
+        self.assertFalse(evidence["missing_context"]["contract_created"])
         self.assertTrue(evidence["jobs_channel"]["matched"])
         self.assertEqual(evidence["presentation"]["path"], "NetworkBot.publish_contract_card")
         self.assertTrue(evidence["fallback"]["render_failure"])

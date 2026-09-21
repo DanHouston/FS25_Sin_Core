@@ -115,7 +115,9 @@ class DatabaseConfigurationTests(unittest.TestCase):
         self.assertEqual(
             [keys for keys, _options in fake_database.player_activity_sessions.create_calls],
             [[("server_key", 1), ("save_key", 1),
-              ("fs25_unique_user_id", 1), ("connected_at", -1)]],
+              ("fs25_unique_user_id", 1), ("connected_at", -1)],
+             [("server_key", 1), ("save_key", 1),
+              ("fs25_unique_user_id", 1), ("state", 1)]],
         )
 
     def test_legacy_event_indexes_are_replaced_only_when_exactly_matching(self):

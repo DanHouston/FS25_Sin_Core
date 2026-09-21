@@ -52,6 +52,8 @@ jobs:
           assert hashlib.sha256((root / "Update-SiN.ps1").read_bytes()).hexdigest() == manifest["updater_sha256"]
           assert (root / "Update-SiN-Client.ps1").is_file()
           assert hashlib.sha256((root / "Update-SiN-Client.ps1").read_bytes()).hexdigest() == manifest["client_updater_sha256"]
+          assert (root / "Restart-SiN-Agent.ps1").is_file()
+          assert hashlib.sha256((root / "Restart-SiN-Agent.ps1").read_bytes()).hexdigest() == manifest["agent_restart_sha256"]
           assert (root / "integration-campaign.json").is_file()
           assert hashlib.sha256((root / "integration-campaign.json").read_bytes()).hexdigest() == manifest["campaign_report_sha256"]
           assert (root / "live-validation-manifest.json").is_file()
@@ -60,6 +62,7 @@ jobs:
           checksums = (root / "SHA256SUMS.txt").read_text()
           assert "Update-SiN.ps1" in checksums
           assert "Update-SiN-Client.ps1" in checksums
+          assert "Restart-SiN-Agent.ps1" in checksums
           with ZipFile(root / "sin-agent.zip") as archive:
               assert set(archive.namelist()) == {"fs25_network_core/__init__.py", "fs25_network_core/agent.py"}
           with ZipFile(root / "FS25_SiN_Server.zip") as archive:

@@ -264,7 +264,10 @@ class MapModel:
     fields: Mapping[int, FieldGeometry]
     farmlands: Mapping[int, FarmlandGeometry]
     version: int = MAP_SCHEMA_VERSION
-    image_y_inverted: bool = True
+    # The validated GIANTS-centered-xz contract maps increasing world Z to
+    # increasing image Y.  Keep the field for payload compatibility, but make
+    # the live-validated orientation the safe default.
+    image_y_inverted: bool = False
     coordinate_system: str = MAP_COORDINATE_SYSTEM
     farmland_ids: tuple = ()
 
@@ -367,7 +370,7 @@ class MapModel:
         return cls(value.get("map_id"), value.get("map_title"), value.get("world_width"),
                    value.get("world_depth"), value.get("image_width"), value.get("image_height"),
                    value.get("overview_asset_identity"), fields, farmlands,
-                   value.get("version", MAP_SCHEMA_VERSION), value.get("image_y_inverted", True),
+                   value.get("version", MAP_SCHEMA_VERSION), value.get("image_y_inverted", False),
                    value.get("coordinate_system") or MAP_COORDINATE_SYSTEM,
                    value.get("farmland_ids", ()))
 
@@ -387,7 +390,7 @@ class MapTransform:
     world_depth: float
     image_width: int
     image_height: int
-    image_y_inverted: bool = True
+    image_y_inverted: bool = False
     coordinate_system: str = MAP_COORDINATE_SYSTEM
 
     def __post_init__(self):
@@ -431,6 +434,7 @@ class MapRenderer:
 
     FIELD_FILL = (255, 193, 7, 85)
     FIELD_OUTLINE = (255, 193, 7, 235)
+    FIELD_CONTEXT_OUTLINE = (180, 205, 220, 190)
     FARMLAND_OUTLINE = (0, 220, 255, 235)
     LABEL = (255, 255, 255, 255)
 
@@ -452,6 +456,14 @@ class MapRenderer:
         transform = MapTransform(model.world_width, model.world_depth, model.image_width,
                                  model.image_height, model.image_y_inverted,
                                  model.coordinate_system)
+        # Always draw trusted field outlines as geographic context.  Selected
+        # fields are rendered in a second pass so highlighting cannot alter
+        # the underlying transform or the location of any other field.
+        for field_id, geometry in sorted(model.fields.items()):
+            if field_id not in fields:
+                self._outline_rings(pixels, model.image_width, model.image_height,
+                                    self._pixel_rings(geometry.rings, transform),
+                                    self.FIELD_CONTEXT_OUTLINE)
         for field_id in fields:
             geometry = model.fields[field_id]
             rings = self._pixel_rings(geometry.rings, transform)

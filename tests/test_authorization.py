@@ -75,6 +75,21 @@ class AuthorizationTests(unittest.TestCase):
         self.assertEqual(record["farm_id"], 2)
         self.db.permission_jobs.insert_one.assert_called_once()
 
+    def test_personal_manager_and_shared_contractor_relationships_coexist(self):
+        self.db.game_identities.find_one.return_value = {
+            "discord_id": "123", "game_player_id": "player", "fs25_unique_user_id": "player"}
+        self.db.memberships.find_one.side_effect = [None, None, None, None]
+
+        self.auth.assign("123", "server", "save", 2, "farm_manager", {2: "Personal"},
+                         "farm-approval", allow_unapproved_identity=True)
+        self.auth.assign("123", "server", "save", 99, "contractor", {99: "SiN Harvest"},
+                         "farm-approval", allow_unapproved_identity=True)
+
+        records = [call.args[1] for call in self.db.memberships.replace_one.call_args_list]
+        self.assertEqual([(record["farm_id"], record["desired_role"]) for record in records],
+                         [(2, "farm_manager"), (99, "contractor")])
+        self.assertNotEqual(records[0]["_id"], records[1]["_id"])
+
     def test_idempotent_pending_assignment_repairs_missing_permission_job(self):
         self.db.game_identities.find_one.return_value = {
             "discord_id": "123", "game_player_id": "player", "fs25_unique_user_id": "player"}

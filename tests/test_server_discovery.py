@@ -97,3 +97,18 @@ class DiscordServerAutocompleteTests(unittest.IsolatedAsyncioTestCase):
         choices = await command._params["starting_field"].autocomplete(interaction, "")
         self.assertEqual([(choice.name, choice.value) for choice in choices], [("12", "12")])
         self.bot.server_registry.eligible_server.assert_called_once_with("sin-fs25-01", "farm_request")
+
+    async def test_server_autocomplete_logs_provider_failure_and_recovers(self):
+        interaction = MagicMock()
+        interaction.guild_id = 1
+        command = self.bot.tree.get_command("server_reconcile")
+        self.bot.server_registry.eligible_servers.side_effect = OSError("temporary registry outage")
+        with self.assertLogs(level="WARNING") as logs:
+            self.assertEqual(await command._params["server"].autocomplete(interaction, ""), [])
+        self.assertIn("Dynamic server autocomplete unavailable", "\n".join(logs.output))
+        self.bot.server_registry.eligible_servers.side_effect = None
+        self.bot.server_registry.eligible_servers.return_value = [
+            {"server_key": "sin-fs25-01", "display_name": "SiN Test Server 01", "saves": []}]
+        choices = await command._params["server"].autocomplete(interaction, "")
+        self.assertEqual([(choice.name, choice.value) for choice in choices],
+                         [("SiN Test Server 01", "sin-fs25-01")])

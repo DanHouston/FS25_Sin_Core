@@ -33,23 +33,27 @@ class DeploymentPackagingTests(unittest.TestCase):
             manifest = json.loads((output / "build-manifest.json").read_text(encoding="utf-8"))
             updater = output / "Update-SiN.ps1"
             client = output / "Update-SiN-Client.ps1"
+            restart = output / "Restart-SiN-Agent.ps1"
             self.assertTrue((output / "sin-agent.zip").is_file())
             self.assertTrue((output / "FS25_SiN_Server.zip").is_file())
             self.assertTrue((output / "SHA256SUMS.txt").is_file())
             self.assertTrue(updater.is_file())
             self.assertTrue(client.is_file())
+            self.assertTrue(restart.is_file())
             self.assertEqual(hashlib.sha256(updater.read_bytes()).hexdigest(), manifest["updater_sha256"])
             self.assertEqual(hashlib.sha256(client.read_bytes()).hexdigest(), manifest["client_updater_sha256"])
+            self.assertEqual(hashlib.sha256(restart.read_bytes()).hexdigest(), manifest["agent_restart_sha256"])
             sums = (output / "SHA256SUMS.txt").read_text(encoding="utf-8")
             self.assertIn("sin-agent.zip", sums)
             self.assertIn("FS25_SiN_Server.zip", sums)
             self.assertIn("Update-SiN.ps1", sums)
             self.assertIn("Update-SiN-Client.ps1", sums)
+            self.assertIn("Restart-SiN-Agent.ps1", sums)
             checksum_entries = {
                 line.split(None, 1)[1]: line.split(None, 1)[0]
                 for line in sums.splitlines() if line.strip()
             }
-            for asset in ("sin-agent.zip", "FS25_SiN_Server.zip", "Update-SiN.ps1", "Update-SiN-Client.ps1"):
+            for asset in ("sin-agent.zip", "FS25_SiN_Server.zip", "Update-SiN.ps1", "Update-SiN-Client.ps1", "Restart-SiN-Agent.ps1"):
                 self.assertEqual(hashlib.sha256((output / asset).read_bytes()).hexdigest(),
                                  checksum_entries[asset])
             with ZipFile(output / "FS25_SiN_Server.zip") as archive:
@@ -272,5 +276,6 @@ class DeploymentPackagingTests(unittest.TestCase):
         self.assertIn("FS25_SiN_NetworkLocal", updater)
         self.assertIn("MigrateLegacyMailbox", updater)
         self.assertIn("SHA256SUMS.txt", client)
+        self.assertIn("Restart-SiN-Agent.ps1", updater)
         self.assertNotIn("serverBinding.xml", client)
         self.assertNotIn("MONGODB", client)

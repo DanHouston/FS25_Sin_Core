@@ -181,9 +181,17 @@ function FS25SiNServer:enforceFarmChange(player)
     if user == nil then return end
     local farm = g_farmManager:getFarmByUserId(user:getId())
     if farm == nil then return end
-    local authorityFarmId = self:loadManagerAuthority()[tostring(user:getUniqueUserId())]
+    local managerAuthority, contractorAuthority = self:loadManagerAuthority()
+    local authorityFarmId = managerAuthority[tostring(user:getUniqueUserId())]
     local authorized = authorityFarmId ~= nil and tonumber(authorityFarmId) == tonumber(farm.farmId)
     self:enforceAuthorizedManagerState(user, farm, authorized, "immediate")
+    local contractorFarmId = contractorAuthority[tostring(user:getUniqueUserId())]
+    if contractorFarmId ~= nil and tonumber(contractorFarmId) ~= tonumber(farm.farmId) then
+        local contractorFarm = g_farmManager:getFarmById(tonumber(contractorFarmId))
+        if contractorFarm ~= nil then
+            self:enforceAuthorizedContractorState(user, contractorFarm, "immediate-contractor")
+        end
+    end
     self:scheduleDeferredManagerSync(user, farm)
 end
 
@@ -227,7 +235,8 @@ function FS25SiNServer:processDeferredManagerSyncs()
                     Logging.info("[SiN Authorization] stale deferred sync discarded userId=%s reason=dedicated_server_user",
                         tostring(user:getId()))
                 else
-                    local authorityFarmId = self:loadManagerAuthority()[uniqueId]
+                    local managerAuthority, contractorAuthority = self:loadManagerAuthority()
+                    local authorityFarmId = managerAuthority[uniqueId]
                     local authorized = authorityFarmId ~= nil
                         and tonumber(authorityFarmId) == tonumber(farm.farmId)
                     local ok, errorMessage = pcall(self.enforceAuthorizedManagerState, self,
@@ -235,6 +244,18 @@ function FS25SiNServer:processDeferredManagerSyncs()
                     if not ok then
                         Logging.error("[SiN Authorization] deferred permission sync failed userId=%s farmId=%s error=%s",
                             tostring(user:getId()), tostring(farm.farmId), tostring(errorMessage))
+                    end
+                    local contractorFarmId = contractorAuthority[uniqueId]
+                    if contractorFarmId ~= nil and tonumber(contractorFarmId) ~= tonumber(farm.farmId) then
+                        local contractorFarm = g_farmManager:getFarmById(tonumber(contractorFarmId))
+                        if contractorFarm ~= nil then
+                            local contractorOk, contractorError = pcall(self.enforceAuthorizedContractorState,
+                                self, user, contractorFarm, "deferred-contractor")
+                            if not contractorOk then
+                                Logging.error("[SiN Authorization] deferred contractor sync failed userId=%s farmId=%s error=%s",
+                                    tostring(user:getId()), tostring(contractorFarm.farmId), tostring(contractorError))
+                            end
+                        end
                     end
                 end
             end
@@ -250,8 +271,8 @@ end
 function FS25SiNServer:loadManagerAuthority()
     local path = self.directory .. "manager-authority.xml"
     local authority = fileExists(path) and XMLFile.load("networkLocalAuthority", path) or nil
-    local authorized = {}
-    if authority == nil then return authorized end
+    local authorized, contractors = {}, {}
+    if authority == nil then return authorized, contractors end
     local index = 0
     while true do
         local key = string.format("managerAuthority.manager(%d)", index)
@@ -260,8 +281,16 @@ function FS25SiNServer:loadManagerAuthority()
         authorized[tostring(playerId)] = authority:getInt(key .. "#farmId")
         index = index + 1
     end
+    index = 0
+    while true do
+        local key = string.format("managerAuthority.contractor(%d)", index)
+        local playerId = authority:getString(key .. "#gamePlayerId")
+        if playerId == nil then break end
+        contractors[tostring(playerId)] = authority:getInt(key .. "#farmId")
+        index = index + 1
+    end
     authority:delete()
-    return authorized
+    return authorized, contractors
 end
 
 function FS25SiNServer:readFarmManagerState(farm, userId)
@@ -426,6 +455,30 @@ function FS25SiNServer:enforceAuthorizedManagerState(user, farm, authorized, syn
         self:shortIdentity(user:getUniqueUserId()), tostring(farm.farmId), tostring(authorized == true),
         tostring(beforeManager), tostring(afterManager), tostring(permissionCount), tostring(grantedCount))
     return afterManager == (authorized == true)
+end
+
+function FS25SiNServer:enforceAuthorizedContractorState(user, farm, syncReason)
+    if user == nil or farm == nil or farm.farmId == nil or farm.farmId <= 0 then return false end
+    local userId = user:getId()
+    local _, beforePermissions = self:readFarmManagerState(farm, userId)
+    local permissionKeys = self:getFarmPermissionKeys(farm, beforePermissions)
+    if next(permissionKeys) == nil then error("FS25 contractor permission set is unavailable") end
+    if farm.setUserPermission == nil then error("FS25 setUserPermission is unavailable") end
+    for permission, _ in pairs(permissionKeys) do
+        if beforePermissions[permission] ~= true then
+            farm:setUserPermission(userId, permission, true)
+        end
+    end
+    local _, afterPermissions = self:readFarmManagerState(farm, userId)
+    self:replicateFarmPermissions(userId, farm, afterPermissions, false, farm.farmId, syncReason)
+    local permissionCount, grantedCount = self:countFarmPermissions(afterPermissions)
+    Logging.info("[SiN Authorization] contractor state sync=%s uniqueUserId=%s farmId=%s permissionCount=%s grantedPermissions=%s",
+        tostring(syncReason or "reconciliation"), self:shortIdentity(user:getUniqueUserId()),
+        tostring(farm.farmId), tostring(permissionCount), tostring(grantedCount))
+    for permission, _ in pairs(permissionKeys) do
+        if afterPermissions[permission] ~= true then return false end
+    end
+    return true
 end
 
 function FS25SiNServer:findPlayerObject(userId, user)
@@ -1239,7 +1292,9 @@ function FS25SiNServer:processMapGeometryExport()
     xml:setInt("serverEvent#image_height", 1024)
     xml:setString("serverEvent#overview_asset_identity", "runtime-generated:" .. safeMapId)
     xml:setInt("serverEvent#version", 1)
-    xml:setBool("serverEvent#image_y_inverted", true)
+    -- GIANTS-centered-xz maps increasing world Z to increasing PDA image Y.
+    -- Keep this explicit so Central does not infer orientation from a raster.
+    xml:setBool("serverEvent#image_y_inverted", false)
     xml:setString("serverEvent#coordinate_system", "giants-centered-xz")
     xml:setInt("serverEvent#source_generation", self.runtimeGeneration or 1)
     local farmlandIds = {}
@@ -1530,8 +1585,9 @@ function FS25SiNServer:saveReceiptAndConsume(receipt, command, operationId)
 end
 
 function FS25SiNServer:processPermissionCommands()
-    -- Receipt-only probe. Permission mutation remains disabled until its FS25
-    -- role API mapping is verified in the running game.
+    -- Farm-manager commands remain receipt-only diagnostics until the native
+    -- manager API mapping is verified. Contractor commands use the independent
+    -- farm permission table and never replace the player's personal farm.
     local manifestPath = self.commandDirectory .. "manifest.xml"
     if not fileExists(manifestPath) then return end
     local manifest = XMLFile.load("networkLocalManifest", manifestPath)
@@ -1555,6 +1611,10 @@ function FS25SiNServer:processPermissionCommands()
             elseif operationType == "chat_message" then
                 self:processChatCommand(command, operationId)
             else
+            local requestedRole = command:getString("permissionCommand#role")
+            if requestedRole == "contractor" then
+                self:processContractorPermissionCommand(command, operationId)
+            else
             local playerId = command:getString("permissionCommand#game_player_id")
             local farmId = command:getInt("permissionCommand#farm_id")
             local userId = nil
@@ -1566,7 +1626,6 @@ function FS25SiNServer:processPermissionCommands()
             local farm = g_farmManager:getFarmById(farmId)
             local currentFarm = userId ~= nil and g_farmManager:getFarmByUserId(userId) or nil
             local manager = farm ~= nil and userId ~= nil and farm:isUserFarmManager(userId)
-            local requestedRole = command:getString("permissionCommand#role")
             local applied = requestedRole == "farm_manager" and currentFarm ~= nil and currentFarm.farmId == farmId and manager
             Logging.info("[SiN (SimNet) Server] Permission diagnostic operation=%s player=%s userId=%s farm=%s currentFarm=%s manager=%s hasSetUserPermission=%s", operationId, tostring(playerId), tostring(userId), tostring(farmId), tostring(currentFarm and currentFarm.farmId), tostring(manager), tostring(farm ~= nil and farm.setUserPermission ~= nil))
             local receipt = XMLFile.create("networkLocalReceipt", self.receiptDirectory .. operationId .. ".xml", "permissionReceipt")
@@ -1577,6 +1636,7 @@ function FS25SiNServer:processPermissionCommands()
             receipt:setString("permissionReceipt#status", applied and "applied" or "pending_validation")
             receipt:setString("permissionReceipt#receipt", "Verified FS25 state: userId=" .. tostring(userId) .. "; currentFarm=" .. tostring(currentFarm and currentFarm.farmId) .. "; manager=" .. tostring(manager))
             self:saveReceiptAndConsume(receipt, command, operationId)
+            end
             end
         elseif command ~= nil and fileExists(receiptPath) then
             -- A prior runtime may have closed the XML handle without removing
@@ -1589,6 +1649,32 @@ function FS25SiNServer:processPermissionCommands()
     end
     manifest:delete()
     if deleteFile ~= nil then deleteFile(manifestPath) end
+end
+
+function FS25SiNServer:processContractorPermissionCommand(command, operationId)
+    local playerId = command:getString("permissionCommand#game_player_id")
+    local farmId = command:getInt("permissionCommand#farm_id")
+    local user = nil
+    if g_currentMission.userManager ~= nil then
+        for _, candidate in ipairs(g_currentMission.userManager:getUsers()) do
+            if tostring(candidate:getUniqueUserId()) == tostring(playerId) then user = candidate; break end
+        end
+    end
+    local farm = g_farmManager:getFarmById(farmId)
+    local applied, reason = false, "contractor user or farm unavailable"
+    if user ~= nil and farm ~= nil then
+        local ok, errorMessage = pcall(self.enforceAuthorizedContractorState, self, user, farm, "command")
+        applied = ok and errorMessage == true
+        reason = applied and "contractor permissions applied" or tostring(errorMessage)
+    end
+    local receipt = XMLFile.create("networkLocalReceipt", self.receiptDirectory .. operationId .. ".xml", "permissionReceipt")
+    receipt:setString("permissionReceipt#operation_id", operationId)
+    receipt:setString("permissionReceipt#server_id", command:getString("permissionCommand#server_id"))
+    receipt:setString("permissionReceipt#save_id", command:getString("permissionCommand#save_id"))
+    receipt:setString("permissionReceipt#revision", command:getString("permissionCommand#revision"))
+    receipt:setString("permissionReceipt#status", applied and "applied" or "pending_validation")
+    receipt:setString("permissionReceipt#receipt", reason)
+    self:saveReceiptAndConsume(receipt, command, operationId)
 end
 
 function FS25SiNServer:consumeCommandFile(operationId)
@@ -1918,7 +2004,7 @@ end
 function FS25SiNServer:reconcileManagerAuthorityDrift()
     -- This is only a self-healing guardrail. Farm changes use the immediate
     -- plus deferred path above; the XML remains the sole SiN authority source.
-    local authorized = self:loadManagerAuthority()
+    local authorized, contractors = self:loadManagerAuthority()
     for _, user in ipairs(g_currentMission.userManager:getUsers()) do
         local userId = user:getId()
         local farm = g_farmManager:getFarmByUserId(userId)
@@ -1953,6 +2039,18 @@ function FS25SiNServer:reconcileManagerAuthorityDrift()
                     else
                         Logging.info("[SiN Authorization] permission drift repaired uniqueUserId=%s farmId=%s permissionCount=%s grantedPermissions=%s",
                             self:shortIdentity(uniqueId), tostring(farm.farmId), tostring(afterCount), tostring(afterGranted))
+                    end
+                end
+            end
+            local contractorFarmId = contractors[uniqueId]
+            if contractorFarmId ~= nil and tonumber(contractorFarmId) ~= tonumber(farm.farmId) then
+                local contractorFarm = g_farmManager:getFarmById(tonumber(contractorFarmId))
+                if contractorFarm ~= nil then
+                    local contractorOk, contractorError = pcall(self.enforceAuthorizedContractorState,
+                        self, user, contractorFarm, "periodic-contractor")
+                    if not contractorOk then
+                        Logging.error("[SiN Authorization] contractor drift repair failed uniqueUserId=%s farmId=%s error=%s",
+                            self:shortIdentity(uniqueId), tostring(contractorFarm.farmId), tostring(contractorError))
                     end
                 end
             end

@@ -18,6 +18,7 @@ from fs25_network_core.integration_campaign import authoritative_manifest, run_c
 AGENT_FILES = ("fs25_network_core/__init__.py", "fs25_network_core/agent.py")
 MOD_ASSET = "FS25_SiN_Server.zip"
 CLIENT_UPDATER_ASSET = "Update-SiN-Client.ps1"
+AGENT_RESTART_ASSET = "Restart-SiN-Agent.ps1"
 
 
 def git(*args):
@@ -84,6 +85,15 @@ def build(version, output):
         dirty = bool(git("status", "--porcelain"))
     except subprocess.CalledProcessError:
         dirty = False
+    canonical_dist = (ROOT / "dist").resolve()
+    if output == canonical_dist and output.exists():
+        # dist is generated state. Clean only this exact repository directory;
+        # caller-supplied output directories remain reusable and untouched.
+        for child in output.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
     output.mkdir(parents=True, exist_ok=True)
     legacy_mod = output / "FS25_SiN_NetworkLocal.zip"
     if legacy_mod.exists():
@@ -96,6 +106,8 @@ def build(version, output):
     shutil.copy2(ROOT / "scripts" / "Update-SiN.ps1", updater)
     client_updater = output / CLIENT_UPDATER_ASSET
     shutil.copy2(ROOT / "scripts" / CLIENT_UPDATER_ASSET, client_updater)
+    agent_restart = output / AGENT_RESTART_ASSET
+    shutil.copy2(ROOT / "scripts" / AGENT_RESTART_ASSET, agent_restart)
     # Ship reproducible validation evidence beside the runtime assets.  The
     # evidence is never included in either runtime ZIP.
     campaign_report = output / "integration-campaign.json"
@@ -111,11 +123,13 @@ def build(version, output):
         "server_sha256": sha256(mod),
         "updater_sha256": sha256(updater),
         "client_updater_sha256": sha256(client_updater),
+        "agent_restart_sha256": sha256(agent_restart),
         "campaign_report_sha256": sha256(campaign_report),
         "live_validation_manifest_sha256": sha256(live_manifest),
         "required_scenarios": json.loads(live_manifest.read_text(encoding="utf-8"))["required_scenarios"],
         "authoritative_adapters": [adapter["id"] for adapter in authoritative_manifest()["adapters"]],
         "agent_entrypoint": "python -m fs25_network_core.agent --watch",
+        "agent_restart_asset": AGENT_RESTART_ASSET,
         "minimum_python": "3.11",
         "release_format_version": 1,
         "source_repository": "DanHouston/FS25_Sin_Core",
@@ -123,7 +137,7 @@ def build(version, output):
         "github_run_id": os.environ.get("GITHUB_RUN_ID"),
     }
     (output / "build-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    checksummed = (agent, mod, updater, client_updater, campaign_report, live_manifest)
+    checksummed = (agent, mod, updater, client_updater, agent_restart, campaign_report, live_manifest)
     (output / "SHA256SUMS.txt").write_text(
         "".join(f"{sha256(path)}  {path.name}\n" for path in checksummed), encoding="utf-8")
     return output

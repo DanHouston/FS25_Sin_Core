@@ -1,6 +1,25 @@
 {
   "manifest_schema": "sin.live-validation/1",
   "campaign": "sin-offline-integration",
+  "live_checkpoint": {
+    "release": "v0.1.24",
+    "commit": "c9bcb980dd50e951a80cf076003f6ad033e3e855",
+    "status": "validated baseline with remediation findings",
+    "real_passes": ["baseline", "deployment", "clean_startup", "map_acquisition", "player_identity", "activity_idle_afk", "normal_disconnect", "agent_recovery", "central_recovery", "jiN_durable_interactions", "cumulative_cold_restart"],
+    "real_pass_with_findings": ["farm_authority", "reconnect", "fs25_runtime_generation"],
+    "real_partial_or_failed": ["contract_map_orientation_and_context", "contract_scope", "autocomplete_resilience"],
+    "synthetic_only_or_live_deferred": ["positive_cross_farm_accept", "renderer_failure_fallback", "fresh_registration", "multi_server_isolation", "actual_farmland_parcel_geometry", "vanilla_reconnect_spawn_behavior"],
+    "findings": [
+      "observed_farm_id was captured at connect rather than authoritative activity time",
+      "personal farm authority and SiN Harvest contractor authority must coexist",
+      "an historical active session remained orphaned after later authoritative evidence",
+      "giants-centered-xz map rendering was vertically inverted",
+      "work contracts must always carry one explicit server/save context",
+      "JiN autocomplete degraded while registered commands remained visible",
+      "direct Agent restart required launcher-supplied configuration"
+    ],
+    "farmland_geometry_policy": "farmland IDs are authoritative for ownership; actual parcel geometry remains unavailable and must not be fabricated from field polygons"
+  },
   "required_scenarios": [
     "registration",
     "control_plane_backlog",
@@ -54,7 +73,7 @@
     {
       "id": "pda-orientation",
       "what": "World-to-PDA orientation and polygon alignment",
-      "procedure": "Render Field 22 and an irregular field, then compare the attachment with the in-game PDA at corners and interior landmarks.",
+      "procedure": "Render Fields 1, 15, 59, 71, and center reference Field 30, then compare the attachment with the in-game PDA at corners and interior landmarks.",
       "success": "Highlights align in position and orientation.",
       "failure": "Adjust explicit orientation metadata or retain geometry-only output pending verification."
     },

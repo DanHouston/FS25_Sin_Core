@@ -14,7 +14,7 @@ import secrets
 from datetime import datetime, timezone, timedelta
 
 
-ROLES = {"farm_manager", "worker", "visitor", "revoked"}
+ROLES = {"farm_manager", "contractor", "worker", "visitor", "revoked"}
 
 
 def key(*parts):
@@ -298,7 +298,7 @@ class AuthorizationManager:
         if farm_id not in farms:
             raise ValueError("Farm is absent from the server snapshot")
         user = str(discord_id)
-        membership_id = key(server_id, save_id, user)
+        relationship_id = key(server_id, save_id, user, farm_id)
         operation_id = str(uuid.uuid4())
 
         def assign(session):
@@ -309,7 +309,19 @@ class AuthorizationManager:
                 raise ValueError("Staff must approve the player's game identity through a farm request first")
             if allow_unapproved_identity and not (identity.get("fs25_unique_user_id") or identity.get("game_player_id")):
                 raise ValueError("A registered game identity is required before manager authority can be assigned")
-            old = self.db.memberships.find_one({"_id": membership_id}, session=session)
+            relationship_query = {"server_id": server_id, "save_id": save_id,
+                                  "discord_id": user, "farm_id": farm_id}
+            old = self.db.memberships.find_one(relationship_query, session=session)
+            # Read the pre-v0.1.25 personal-membership key during migration so
+            # a manager relationship is repaired in place instead of being
+            # duplicated. New relationships are keyed by farm as well as user,
+            # allowing personal and shared-farm authority to coexist.
+            if old is None:
+                legacy = self.db.memberships.find_one(
+                    {"_id": key(server_id, save_id, user)}, session=session)
+                if isinstance(legacy, dict) and int(legacy.get("farm_id", 0)) == farm_id:
+                    old = legacy
+            membership_id = old.get("_id", relationship_id) if isinstance(old, dict) else relationship_id
             if idempotent and old and old.get("farm_id") == farm_id and old.get("desired_role") == role:
                 if old.get("state") == "pending":
                     existing_operation_id = old.get("operation_id")

@@ -142,6 +142,18 @@ class ActivitySessionPersistenceTests(unittest.TestCase):
         duplicate = self.processor.disconnected("server", "save", "disconnect-retry", self.payload())
         self.assertTrue(duplicate["duplicate"])
 
+    def test_new_authoritative_connection_reconciles_only_older_active_sessions(self):
+        self.processor.connected("server", "save", "connect-1", self.payload(session_id="old"))
+        self.processor.connected("server", "save", "connect-2", self.payload(session_id="new", farm_id="2"))
+        query = self.db.player_activity_sessions.update_many.call_args.args[0]
+        update = self.db.player_activity_sessions.update_many.call_args.args[1]
+        self.assertEqual(query["state"], "active")
+        self.assertEqual(query["session_id"], {"$ne": "new"})
+        self.assertEqual(update["$set"]["state"], "reconciled")
+        self.assertEqual(update["$set"]["reconciled_by_session_id"], "new")
+        current_update = self.db.player_activity_sessions.update_one.call_args.args[1]
+        self.assertEqual(current_update["$set"]["observed_farm_id"], "2")
+
     def test_dedicated_server_session_is_ignored(self):
         result = self.processor.connected("server", "save", "event", self.payload(
             user_id="1", farm_id="0", display_name="Server"))

@@ -92,12 +92,19 @@ class LocalPermissionBridge:
         temporary = self.commands / "manifest.tmp"
         ET.ElementTree(manifest).write(temporary, encoding="utf-8", xml_declaration=True)
         temporary.replace(self.commands / "manifest.xml")
-        managers = self.authorization.db.memberships.find({"server_id": self.server_id,
-            "save_id": self.save_id, "state": "active", "desired_role": "farm_manager",
-            "applied_role": "farm_manager"})
+        relationships = self.authorization.db.memberships.find({"server_id": self.server_id,
+            "save_id": self.save_id, "state": {"$in": ["pending", "active"]},
+            "desired_role": {"$in": ["farm_manager", "contractor"]}})
         authority = ET.Element("managerAuthority", schemaVersion="1")
-        for manager in managers:
+        for manager in relationships:
+            if manager.get("desired_role") != "farm_manager":
+                continue
             ET.SubElement(authority, "manager", gamePlayerId=manager["game_player_id"], farmId=str(manager["farm_id"]))
+        for contractor in relationships:
+            if contractor.get("desired_role") != "contractor":
+                continue
+            ET.SubElement(authority, "contractor", gamePlayerId=contractor["game_player_id"],
+                          farmId=str(contractor["farm_id"]))
         temporary = self.directory / "manager-authority.tmp"
         ET.ElementTree(authority).write(temporary, encoding="utf-8", xml_declaration=True)
         temporary.replace(self.directory / "manager-authority.xml")

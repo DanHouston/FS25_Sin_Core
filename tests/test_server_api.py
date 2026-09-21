@@ -120,6 +120,9 @@ class ServerApiTests(unittest.TestCase):
         handler.event_processor.authorization.db.memberships.find.return_value = [{
             "game_player_id": "stable-player", "farm_id": 2,
             "state": "pending", "desired_role": "farm_manager", "applied_role": None,
+        }, {
+            "game_player_id": "stable-player", "farm_id": 99,
+            "state": "pending", "desired_role": "contractor", "applied_role": None,
         }]
         connection = HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
         connection.request("GET", "/api/server/manager-authority?fs25_save_id=1", headers={
@@ -130,6 +133,7 @@ class ServerApiTests(unittest.TestCase):
 
         self.assertEqual(response.status, 200)
         self.assertEqual(body["managers"], [{"game_player_id": "stable-player", "farm_id": 2}])
+        self.assertEqual(body["contractors"], [{"game_player_id": "stable-player", "farm_id": 99}])
         query = handler.event_processor.authorization.db.memberships.find.call_args.args[0]
         self.assertEqual(query["state"], {"$in": ["pending", "active"]})
-        self.assertEqual(query["desired_role"], "farm_manager")
+        self.assertEqual(query["desired_role"], {"$in": ["farm_manager", "contractor"]})

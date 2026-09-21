@@ -17,8 +17,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$assets = @("sin-agent.zip", "FS25_SiN_Server.zip", "build-manifest.json", "SHA256SUMS.txt", "Update-SiN.ps1")
-$checksumAssets = @("sin-agent.zip", "FS25_SiN_Server.zip", "Update-SiN.ps1")
+$assets = @("sin-agent.zip", "FS25_SiN_Server.zip", "build-manifest.json", "SHA256SUMS.txt", "Update-SiN.ps1", "Restart-SiN-Agent.ps1")
+$checksumAssets = @("sin-agent.zip", "FS25_SiN_Server.zip", "Update-SiN.ps1", "Restart-SiN-Agent.ps1")
 $logRoot = "C:\SiN\Logs"
 
 function Get-AgentProcess {
@@ -474,6 +474,10 @@ function Write-Deployment($release, $manifest, $agentHash, $modHash, $modChanged
         agent_sha256 = $agentHash
         server_sha256 = $modHash
         server_path = (Join-Path $ModsPath "FS25_SiN_Server.zip")
+        agent_root = $AgentRoot
+        backend_url = $ApiUrl
+        mailbox_dir = $MailboxDir
+        poll_interval = $PollInterval
         fs25_restart_required = [bool]$modChanged
         backup_path = $backupPath
     }
@@ -527,6 +531,7 @@ try {
     Test-AgentPackage $downloadDirectory
     New-Item -ItemType Directory -Force -Path $DeployRoot | Out-Null
     Copy-Item -LiteralPath (Join-Path $downloadDirectory "Update-SiN.ps1") -Destination (Join-Path $DeployRoot "Update-SiN.next.ps1") -Force
+    Copy-Item -LiteralPath (Join-Path $downloadDirectory "Restart-SiN-Agent.ps1") -Destination (Join-Path $DeployRoot "Restart-SiN-Agent.ps1") -Force
 
     $timestamp = (Get-Date).ToUniversalTime().ToString("yyyyMMdd-HHmmss")
     $backup = Join-Path $BackupRoot "$timestamp-$resolvedVersion"

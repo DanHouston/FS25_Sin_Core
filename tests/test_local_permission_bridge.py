@@ -20,3 +20,20 @@ class LocalPermissionBridgeTests(unittest.TestCase):
             (receipts / "op.xml").write_text('<permissionReceipt operation_id="op" server_id="local-dev" save_id="save" revision="1" status="applied" receipt="fs25"/>')
             self.assertEqual(bridge.consume_receipts(), ["op"])
             auth.acknowledge.assert_called_once_with("op", "local-dev", "save", 1, "fs25")
+
+    def test_authority_snapshot_preserves_personal_manager_and_shared_contractor(self):
+        auth = MagicMock()
+        auth.db.permission_jobs.find.return_value = []
+        auth.db.memberships.find.return_value = [{
+            "game_player_id": "p", "farm_id": 2, "desired_role": "farm_manager",
+            "state": "active", "applied_role": "farm_manager",
+        }, {
+            "game_player_id": "p", "farm_id": 99, "desired_role": "contractor",
+            "state": "pending", "applied_role": None,
+        }]
+        with tempfile.TemporaryDirectory() as folder:
+            bridge = LocalPermissionBridge(auth, folder, "local-dev", "save")
+            bridge.deliver()
+            authority = (Path(folder) / "manager-authority.xml").read_text(encoding="utf-8")
+            self.assertIn('manager gamePlayerId="p" farmId="2"', authority)
+            self.assertIn('contractor gamePlayerId="p" farmId="99"', authority)

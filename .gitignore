@@ -3,6 +3,7 @@ __pycache__/
 .env
 atlas-credentials.env
 .test-deps/
+# Ephemeral release-builder output; deployment consumes GitHub Release assets.
 dist/
 local-test/
 deployment_notes.txt

@@ -32,10 +32,12 @@ u = (world_x + world_width / 2) / world_width
 v = (world_z + world_depth / 2) / world_depth
 ```
 
-The renderer maps `u` to image X and, by default, maps `v` to inverted image Y
-because a top-down raster's north/top is conventionally the low-Y edge. The
-Y inversion is explicit in `MapModel.image_y_inverted`; it still requires
-visual verification against each actual map PDA before production use.
+The renderer maps `u` to image X and, for the live-validated
+`giants-centered-xz` contract, maps increasing world Z to increasing image Y.
+`MapModel.image_y_inverted` remains an explicit compatibility field, but new
+runtime exports set it to `false`. Courtright Line corner anchors are the
+orientation evidence for this choice; a new map still requires live PDA
+comparison before being called validated.
 
 The runtime source evidence is the [GIANTS FS25 FarmlandManager documentation](https://gdn.giants-software.com/documentation_scripting_fs25.php?category=25&class=214&version=engine),
 the [GIANTS FS25 FieldManager documentation](https://gdn.giants-software.com/documentation_scripting_fs25.php?category=17&class=183&version=script),
@@ -141,8 +143,10 @@ Server/save scope is part of both the persistence key and every render-cache
 key. Two servers may use the same field or farmland number without sharing a
 model, revision, or rendered image. Farmland selection is available through
 `render_map(..., highlight_farmlands=[...])` when validated parcel geometry is
-present; this is the same consumer-neutral API a future farm-request flow can
-use, independent of ContractService.
+present; every render also draws trusted field outlines as geographic context,
+while selected fields receive the prominent fill/outline/label overlay. This
+is the same consumer-neutral API a future farm-request flow can use,
+independent of ContractService.
 
 As a local synthetic reference, rendering a 512x512 RGBA fixture with one
 irregular field overlay completed in roughly 76 ms on the development host;
