@@ -216,12 +216,10 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
             if not isinstance(receipt, dict):
                 raise ValueError("operation receipt is required")
             if receipt.get("operation_type") == "assign_farmland":
-                result = self.event_processor.authorization.acknowledge_land(
-                    receipt["operation_id"], record["server_key"], save_key,
-                    int(receipt["farmland_id"]), int(receipt["farm_id"]),
-                    int(receipt["owner_farm_id"]), receipt.get("status") == "applied",
-                    receipt.get("receipt"))
-                result = {"operation_id": receipt["operation_id"], "state": result}
+                # Farmland assignment is a FarmLifecycle operation.  Its
+                # receipt includes the FS25 owner read-back; do not route it
+                # through the legacy land_operations compatibility path.
+                result = self.farm_lifecycle.accept_receipt(record["server_key"], save_key, receipt)
             elif receipt.get("operation_type") in {"vehicle_transfer", "product_transfer"}:
                 result = self.event_processor.transfers.accept_receipt(
                     receipt["transfer_id"], receipt, record["server_key"], save_key)

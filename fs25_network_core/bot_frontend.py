@@ -402,6 +402,30 @@ class NetworkBot(discord.Client):
                     choices.append(app_commands.Choice(name=label[:100], value=record["discord_id"]))
             return choices[:25]
 
+        async def land_pending_requesters(interaction: discord.Interaction, current: str):
+            server = getattr(interaction.namespace, "server", None)
+            if not server:
+                return []
+            try:
+                config = await asyncio.to_thread(server_config, interaction, server)
+                records = await asyncio.to_thread(
+                    self.farm_lifecycle.land_pending_requests, server, selected_save(config))
+            except ValueError:
+                return []
+            choices = []
+            for record in records:
+                display_name = record["discord_id"]
+                try:
+                    member = await interaction.guild.fetch_member(int(record["discord_id"]))
+                    if not member.bot:
+                        display_name = member.display_name
+                except (AttributeError, TypeError, ValueError, discord.HTTPException):
+                    pass
+                label = f"Requester: {display_name} | Farm: {record['farm_name']} | FS25 farm {record.get('farm_id')}"
+                if current.lower() in label.lower():
+                    choices.append(app_commands.Choice(name=label[:100], value=record["discord_id"]))
+            return choices[:25]
+
         @self.tree.command(name="farm_request", description="Request a farm and starting field for staff review")
         @app_commands.check(channel_check)
         async def farm_request(interaction: discord.Interaction, server: str, starting_field: str):
@@ -473,7 +497,7 @@ class NetworkBot(discord.Client):
         async def farm_roster_server_autocomplete(interaction: discord.Interaction, current: str):
             return await server_choices(interaction, current, "reconcile")
 
-        @self.tree.command(name="farm_approve", description="Staff: approve a request and queue automatic farm provisioning")
+        @self.tree.command(name="farm_approve", description="Staff: approve a request and queue farm provisioning")
         @app_commands.check(channel_check)
         @app_commands.default_permissions(administrator=True)
         async def farm_approve(interaction: discord.Interaction, server: str, member: str):
@@ -488,7 +512,7 @@ class NetworkBot(discord.Client):
                                                 save_key, str(interaction.user.id))
             await interaction.followup.send(
                 f"Approved requester `{member}` for **{request['farm_name']}**. "
-                f"Farm provisioning is pending (operation `{operation}`). Manager authority is withheld until the game confirms the exact farm and field.",
+                f"Farm provisioning is pending (operation `{operation}`). After FS25 confirms the farm, use `/farmland_assign` to make one explicit land decision; manager authority remains withheld until its owner read-back succeeds.",
                 ephemeral=True)
 
         @farm_approve.autocomplete("member")
@@ -497,6 +521,58 @@ class NetworkBot(discord.Client):
 
         @farm_approve.autocomplete("server")
         async def farm_approve_server_autocomplete(interaction: discord.Interaction, current: str):
+            return await server_choices(interaction, current, "reconcile")
+
+        @self.tree.command(name="farmland_assign", description="Staff: assign an unowned farmland to a land-pending farm")
+        @app_commands.check(channel_check)
+        @app_commands.default_permissions(administrator=True)
+        async def farmland_assign(interaction: discord.Interaction, server: str, member: str,
+                                  farmland_id: app_commands.Range[int, 1]):
+            staff_check(interaction)
+            config = server_config(interaction, server)
+            save_key = selected_save(config)
+            await interaction.response.defer(ephemeral=True)
+            request = await asyncio.to_thread(self.farm_lifecycle.request_status, member)
+            if not request or request.get("server_key") != server or request.get("save_key") != save_key:
+                raise ValueError("That member has no land-pending farm request for this server")
+            operation = await asyncio.to_thread(
+                self.farm_lifecycle.assign_farmland, request["_id"], server, save_key,
+                int(farmland_id), str(interaction.user.id))
+            await interaction.followup.send(
+                f"Queued farmland **{farmland_id}** → FS25 farm **{request.get('farm_id')}** "
+                f"for **{request['farm_name']}** (operation `{operation}`). FS25 must report that owner back before SiN grants manager authority.",
+                ephemeral=True)
+
+        @farmland_assign.autocomplete("member")
+        async def farmland_assign_member_autocomplete(interaction: discord.Interaction, current: str):
+            return await land_pending_requesters(interaction, current)
+
+        @farmland_assign.autocomplete("server")
+        async def farmland_assign_server_autocomplete(interaction: discord.Interaction, current: str):
+            return await server_choices(interaction, current, "reconcile")
+
+        @self.tree.command(name="farmland_status", description="Staff: inspect current authoritative farmland ownership")
+        @app_commands.check(channel_check)
+        @app_commands.default_permissions(administrator=True)
+        async def farmland_status(interaction: discord.Interaction, server: str,
+                                  farmland_id: app_commands.Range[int, 1]):
+            staff_check(interaction)
+            config = server_config(interaction, server)
+            save_key = selected_save(config)
+            await interaction.response.defer(ephemeral=True)
+            fields = await asyncio.to_thread(self.farm_lifecycle.available_fields, server, save_key)
+            if int(farmland_id) not in fields:
+                raise ValueError("Farmland ID is not present in the current authoritative FS25 snapshot")
+            snapshot = await asyncio.to_thread(self.farm_lifecycle.latest_snapshot, server, save_key)
+            owner = fields[int(farmland_id)]
+            received_at = (snapshot or {}).get("received_at")
+            await interaction.followup.send(
+                f"Farmland **{farmland_id}** on `{server}` / `{save_key}`: authoritative snapshot owner "
+                f"**FS25 farm {owner}** (snapshot `{received_at}`). Assignment receipts additionally record pre/post owner read-back.",
+                ephemeral=True)
+
+        @farmland_status.autocomplete("server")
+        async def farmland_status_server_autocomplete(interaction: discord.Interaction, current: str):
             return await server_choices(interaction, current, "reconcile")
 
         @self.tree.command(name="farm_reject", description="Staff: reject a pending farm request with a reason")

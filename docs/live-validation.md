@@ -35,6 +35,19 @@ It does not replace live validation of GIANTS runtime geometry extraction,
 registration warnings, command execution, Discord permissions, or attachment
 delivery.
 
+## Farmland ownership assignment — LIVE REQUIRED
+
+The current implementation adds a deterministic command/receipt scenario for
+explicit farmland ownership, but it is not live-proven. Field and farmland stay
+separate: use the authoritative farmland ID only, and do not infer a parcel
+polygon from a field. On an exact deployed artifact, choose a safe unowned
+farmland and a `land_pending` farm, record `sinFarmland <ID>`, submit
+`/farmland_assign`, then retain the FS25 UI result, direct post-mutation
+`sinFarmland` output, operation ID/receipt pre/post owner values, and Central's
+single reconciliation result. Repeat the idempotent path, save/restart FS25,
+and verify the same owner remains. See
+[farmland-ownership.md](farmland-ownership.md) for the complete gate.
+
 The machine-readable checklist is [live-validation-manifest.json](live-validation-manifest.json).
 It names the six authoritative scenarios that must pass before collecting the
 corresponding live evidence: `registration`, `control_plane_backlog`,

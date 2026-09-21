@@ -324,19 +324,70 @@ class FarmLifecycle:
             return request["operation_id"]
         if request.get("state") not in {"pending", "requested"}:
             raise ValueError("Farm request is already reviewed")
-        field_id = int(request["starting_field"])
-        fields = self.available_fields(server_key, save_key)
-        if field_id not in fields:
-            raise ValueError("Requested starting field is not present on the current save")
-        if fields[field_id] != 0:
-            raise ValueError("Requested starting field is already owned")
         operation_id = _operation_id("provision-farm", request_id)
         self._queue_operation(operation_id, "provision_farm", server_key, save_key,
                               {"farm_type": MEMBER_FARM_TYPE, "canonical_name": request["farm_name"],
-                               "farmland_id": field_id, "request_id": request_id}, request_id=request_id)
+                               "request_id": request_id}, request_id=request_id)
         self.db.farm_requests.update_one({"_id": request_id, "state": {"$in": ["pending", "requested"]}}, {"$set": {
             "state": "provisioning", "operation_id": operation_id, "approved_by": str(approved_by),
             "approved_at": self._now(), "updated_at": self._now()}})
+        return operation_id
+
+    def land_pending_requests(self, server_key, save_key):
+        """Return provisioned farms awaiting one explicit staff land decision."""
+        return list(self.db.farm_requests.find({"server_key": server_key, "save_key": save_key,
+            "state": "land_pending", "farm_id": {"$exists": True}}).sort("updated_at", 1).limit(25))
+
+    def assign_farmland(self, request_id, server_key, save_key, farmland_id, approved_by):
+        """Queue one operator-authorized, unowned-farmland assignment.
+
+        The current snapshot is only a preflight guard. The FS25 runtime reads
+        ownership again immediately before mutation and supplies the decisive
+        read-after-write evidence in its durable receipt.
+        """
+        if not approved_by:
+            raise ValueError("An operator is required to assign farmland")
+        try:
+            farmland_id = int(farmland_id)
+        except (TypeError, ValueError):
+            raise ValueError("Farmland ID must be a positive FS25 farmland ID") from None
+        if farmland_id <= 0:
+            raise ValueError("Farmland ID must be a positive FS25 farmland ID")
+        request = self.db.farm_requests.find_one({"_id": request_id, "server_key": server_key,
+            "save_key": save_key})
+        if not request:
+            raise ValueError("Unknown farm request for this server/save")
+        if request.get("state") == "land_assigning":
+            if int(request.get("assigned_farmland_id", 0)) == farmland_id and request.get("land_operation_id"):
+                return request["land_operation_id"]
+            raise ValueError("A different farmland assignment is already pending for this farm")
+        if request.get("state") != "land_pending":
+            raise ValueError("Farm is not awaiting an explicit farmland assignment")
+        try:
+            farm_id = int(request.get("farm_id"))
+        except (TypeError, ValueError):
+            raise ValueError("Farm request has no authoritative FS25 farm ID") from None
+        fields = self.available_fields(server_key, save_key)
+        if farmland_id not in fields:
+            raise ValueError("Farmland ID is not present on the current save")
+        if fields[farmland_id] != 0:
+            raise ValueError("Farmland is already owned; reassignment is denied")
+        snapshot = self.latest_snapshot(server_key, save_key) or {}
+        farms = snapshot.get("farms") or {}
+        if str(farm_id) not in {str(key) for key in farms}:
+            raise ValueError("Destination farm is absent from the current authoritative snapshot")
+        operation_id = str(uuid.uuid4())
+        self._queue_operation(operation_id, "assign_farmland", server_key, save_key, {
+            "farmland_id": farmland_id, "farm_id": farm_id,
+            "request_id": str(request_id), "authorized_by": str(approved_by),
+        }, request_id=request_id)
+        result = self.db.farm_requests.update_one({"_id": request_id, "server_key": server_key,
+            "save_key": save_key, "state": "land_pending"}, {"$set": {
+                "state": "land_assigning", "land_operation_id": operation_id,
+                "assigned_farmland_id": farmland_id, "land_authorized_by": str(approved_by),
+                "land_assignment_requested_at": self._now(), "updated_at": self._now()}})
+        if getattr(result, "modified_count", 1) != 1:
+            raise ValueError("Farm land state changed; retry after refreshing status")
         return operation_id
 
     def operations_for(self, server_key, save_key):
@@ -358,6 +409,8 @@ class FarmLifecycle:
         operation = self.db.farm_operations.find_one({"_id": receipt["operation_id"], "server_key": server_key, "save_key": save_key})
         if not operation:
             raise ValueError("unknown farm operation")
+        if operation.get("operation_type") == "assign_farmland":
+            return self._accept_farmland_receipt(operation, server_key, save_key, receipt)
         if operation.get("state") == "succeeded":
             request_id = (operation.get("payload") or {}).get("request_id")
             if request_id and operation.get("operation_type") == "provision_farm":
@@ -377,13 +430,9 @@ class FarmLifecycle:
         farm_id = int(farm_id)
         payload = operation.get("payload") or {}
         if operation.get("operation_type") == "provision_farm":
-            owner_farm_id = receipt.get("owner_farm_id") or receipt.get("result", {}).get("owner_farm_id")
-            receipt_field_id = receipt.get("farmland_id") or receipt.get("result", {}).get("farmland_id")
-            if owner_farm_id is None or int(owner_farm_id) != farm_id \
-                    or receipt_field_id is None or int(receipt_field_id) != int(payload.get("farmland_id")):
-                self.db.farm_operations.update_one({"_id": operation["_id"]}, {"$set": {
-                    "state": "reconciliation_required", "receipt": receipt, "updated_at": self._now()}})
-                return self._operation(operation["_id"])
+            # Provisioning only creates/adopts the named farm. Land is a
+            # separate explicit, receipt-gated operation from land_pending.
+            pass
         mapping_id = _operation_id("farm", server_key, save_key, payload.get("request_id") or operation["operation_id"])
         if operation.get("operation_type") == "ensure_farm":
             existing_system = list(self.db.sin_farms.find({
@@ -421,9 +470,62 @@ class FarmLifecycle:
         if request_id:
             request = self.db.farm_requests.find_one({"_id": request_id})
             if request:
-                self._ensure_manager_authorization(
-                    request, server_key, save_key, farm_id, mapping_id,
-                    payload.get("canonical_name") or request.get("farm_name"))
+                self.db.farm_requests.update_one({"_id": request_id, "state": "provisioning"}, {"$set": {
+                    "state": "land_pending", "farm_id": farm_id, "mapping_id": mapping_id,
+                    "land_confirmed": False, "updated_at": self._now()}})
+        return self._operation(operation["_id"])
+
+    def _accept_farmland_receipt(self, operation, server_key, save_key, receipt):
+        """Commit land progression only from a scoped FS25 owner read-back."""
+        payload = operation.get("payload") or {}
+        success = receipt.get("status") in {"applied", "already_satisfied"}
+        try:
+            farmland_id = int(receipt.get("farmland_id"))
+            farm_id = int(receipt.get("farm_id"))
+            owner_before = int(receipt.get("owner_before_farm_id"))
+            owner_after = int(receipt.get("owner_farm_id"))
+        except (TypeError, ValueError):
+            farmland_id = farm_id = owner_before = owner_after = None
+        try:
+            expected_farmland = int(payload.get("farmland_id"))
+            expected_farm = int(payload.get("farm_id"))
+        except (TypeError, ValueError):
+            expected_farmland = expected_farm = None
+        receipt_scope_matches = (
+            (receipt.get("server_id") is None or str(receipt.get("server_id")) == str(server_key))
+            and (receipt.get("save_id") is None or str(receipt.get("save_id")) == str(save_key)))
+        valid = success and farmland_id == expected_farmland and farm_id == expected_farm \
+            and owner_after == expected_farm and owner_before is not None and receipt_scope_matches
+        if not valid:
+            state = "failed" if receipt.get("status") in {"rejected", "failed"} else "reconciliation_required"
+            self.db.farm_operations.update_one({"_id": operation["_id"]}, {"$set": {
+                "state": state, "receipt": receipt, "updated_at": self._now()}})
+            request_id = payload.get("request_id")
+            if request_id:
+                self.db.farm_requests.update_one({"_id": request_id, "state": "land_assigning"}, {"$set": {
+                    "state": "land_pending", "land_failure_reason": str(receipt.get("receipt") or "ownership was not confirmed")[:300],
+                    "updated_at": self._now()}})
+            return self._operation(operation["_id"])
+        if operation.get("state") == "succeeded":
+            return operation
+        request = self.db.farm_requests.find_one({"_id": payload.get("request_id"),
+            "server_key": server_key, "save_key": save_key, "state": "land_assigning"})
+        if not request:
+            self.db.farm_operations.update_one({"_id": operation["_id"]}, {"$set": {
+                "state": "reconciliation_required", "receipt": receipt, "updated_at": self._now()}})
+            return self._operation(operation["_id"])
+        now = self._now()
+        self.db.farm_operations.update_one({"_id": operation["_id"], "state": {"$in": ["pending", "dispatched"]}},
+            {"$set": {"state": "succeeded", "receipt": receipt, "farmland_id": farmland_id,
+                      "farm_id": farm_id, "owner_before_farm_id": owner_before,
+                      "owner_farm_id": owner_after, "mutation_performed": receipt.get("mutation_performed"),
+                      "updated_at": now}})
+        permission_operation = self._ensure_manager_authorization(
+            request, server_key, save_key, farm_id, request.get("mapping_id"), request.get("farm_name"))
+        self.db.farm_requests.update_one({"_id": request["_id"], "state": "land_assigning"}, {"$set": {
+            "state": "awaiting_manager", "land_confirmed": True, "land_acknowledged_at": now,
+            "owner_before_farm_id": owner_before, "owner_farm_id": owner_after,
+            "permission_operation_id": permission_operation, "updated_at": now}})
         return self._operation(operation["_id"])
 
     def permission_applied(self, operation_id):

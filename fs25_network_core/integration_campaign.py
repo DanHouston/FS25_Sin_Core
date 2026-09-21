@@ -25,7 +25,8 @@ from discord import app_commands
 
 from .agent import PairingAgent
 from .local_test import build_mod, simulate
-from .protocol_harness import MailboxOperationHarness
+from .protocol_harness import MailboxOperationHarness, FarmlandOwnershipReferenceExecutor
+from .farm_lifecycle import FarmLifecycle
 from .business_workflows import ContractService
 from .admin_manager import AdminManager
 from .map_service import MapService
@@ -224,6 +225,37 @@ class OfflineCentral:
             self.events.append(json.loads(request.data.decode("utf-8")))
             return _Response()
         raise AssertionError(f"unexpected offline endpoint: {path}")
+
+
+class _FarmlandLifecycleCentral:
+    """Authenticated HTTP-shaped boundary backed by the real lifecycle.
+
+    The paired reference executor below is deterministic transport evidence,
+    not evidence of a GIANTS API invocation.
+    """
+
+    def __init__(self, lifecycle):
+        self.lifecycle = lifecycle
+        self.receipt_calls = 0
+
+    def __call__(self, request, timeout=10):
+        del timeout
+        if request.headers.get("X-sin-server-key") != "sin-campaign" \
+                or request.headers.get("Authorization") != "Bearer campaign-secret":
+            raise AssertionError("farmland scenario request was not authenticated")
+        path = urlsplit(request.full_url).path
+        if path.endswith("/api/server/operations"):
+            operations = self.lifecycle.operations_for("sin-campaign", "campaign-save")
+            return _Response({"operations": [{key: operation.get(key) for key in (
+                "operation_id", "operation_type", "server_key", "save_key", "payload", "state")}
+                for operation in operations]})
+        if path.endswith("/api/server/operation-receipts"):
+            payload = json.loads(request.data.decode("utf-8"))
+            self.receipt_calls += 1
+            operation = self.lifecycle.accept_receipt("sin-campaign", "campaign-save", payload["receipt"])
+            return _Response({"status": "accepted", "operation_id": operation["operation_id"],
+                              "state": operation["state"]})
+        raise AssertionError(f"unexpected farmland scenario endpoint: {path}")
 
 
 class BoundaryCentral(OfflineCentral):
@@ -756,6 +788,58 @@ def _semantic_farm_lifecycle(root: Path) -> Mapping[str, object]:
             "boundary": "operation-receipt-mailbox"}], "farm_lifecycle": {
                 "operation_id": report["mailbox"]["operations_delivered"][0],
                 "receipt_status": "acknowledged", "farmland_id": 22}}
+
+
+def _semantic_farmland_ownership(root: Path) -> Mapping[str, object]:
+    """Exercise central → Agent XML → reference executor → receipt → central.
+
+    The reference executor deliberately has its own mutable owner map, so this
+    proves receipt-gated reconciliation rather than merely echoing the request.
+    It does not claim to prove a live GIANTS runtime invocation.
+    """
+    class ScenarioAuthorization:
+        def __init__(self):
+            self.assignments = []
+
+        def assign(self, *args, **kwargs):
+            self.assignments.append((args, kwargs))
+            return "scenario-manager-permission"
+
+    database = _MemoryDatabase()
+    authorization = ScenarioAuthorization()
+    lifecycle = FarmLifecycle(database, authorization)
+    database.db.server_snapshots.insert_one({"server_key": "sin-campaign", "save_key": "campaign-save",
+        "source": "game", "farmlands": {"22": 0}, "farms": {"2": "Campaign Farm"}})
+    database.db.farm_requests.insert_one({"_id": "campaign-land-request", "discord_id": "campaign-player",
+        "server_key": "sin-campaign", "save_key": "campaign-save", "farm_name": "Campaign Farm",
+        "farm_id": 2, "mapping_id": "campaign-farm", "state": "land_pending"})
+    operation_id = lifecycle.assign_farmland("campaign-land-request", "sin-campaign", "campaign-save", 22, "staff")
+    duplicate_operation_id = lifecycle.assign_farmland(
+        "campaign-land-request", "sin-campaign", "campaign-save", 22, "staff")
+    _write_binding_and_snapshot(root)
+    central = _FarmlandLifecycleCentral(lifecycle)
+    agent = PairingAgent(root, "http://offline", central)
+    delivered = agent.process_operations_once()
+    executor = FarmlandOwnershipReferenceExecutor(root, owners={22: 0}, valid_farms={2})
+    executed = executor.consume_once()
+    acknowledged = agent.process_receipts_once()
+    operation = database.db.farm_operations.find_one({"_id": operation_id})
+    request = database.db.farm_requests.find_one({"_id": "campaign-land-request"})
+    duplicate_receipt = lifecycle.accept_receipt("sin-campaign", "campaign-save", operation["receipt"])
+    if not (operation_id == duplicate_operation_id and delivered == [operation_id] and executed == [operation_id]
+            and acknowledged == [operation_id + ".xml"] and executor.owners[22] == 2
+            and operation.get("state") == "succeeded" and request.get("state") == "awaiting_manager"
+            and duplicate_receipt.get("state") == "succeeded" and len(authorization.assignments) == 1):
+        raise AssertionError("farmland ownership command/receipt reconciliation did not complete")
+    return {"report_schema": "sin.integration/1", "campaign": "sin-authoritative-integration", "status": "passed",
+            "checks": [{"id": "farmland-ownership", "status": "passed",
+                        "boundary": "central+agent+xml+reference-executor+receipt"}],
+            "farmland_ownership": {"operation_id": operation_id, "server_key": "sin-campaign",
+                "save_key": "campaign-save", "farmland_id": 22, "target_farm_id": 2,
+                "owner_before_farm_id": operation.get("owner_before_farm_id"),
+                "owner_after_farm_id": operation.get("owner_farm_id"),
+                "duplicate_command_idempotent": True, "duplicate_receipt_idempotent": True,
+                "executor": "deterministic reference only; live GIANTS validation required"}}
 
 
 def _semantic_release_evidence(root: Path) -> Mapping[str, object]:
@@ -1474,6 +1558,7 @@ SCENARIOS.register(NamedScenario(
 SEMANTIC_SCENARIOS = {
     "server-pairing": NamedScenario("server-pairing", "Pair a server and publish its binding response.", _semantic_pairing),
     "farm-lifecycle": NamedScenario("farm-lifecycle", "Deliver and acknowledge a farm/land lifecycle operation.", _semantic_farm_lifecycle),
+    "farmland-ownership": NamedScenario("farmland-ownership", "Reconcile an explicit owner read-back through the farmland command mailbox.", _semantic_farmland_ownership),
     "player-registration": NamedScenario("player-registration", "Route a stable player registration request and response.", _registration_scenario),
     "activity-telemetry": NamedScenario("activity-telemetry", "Forward activity minutes before a disconnect watermark.", lambda root: {**{key: value for key, value in _full_scenario(root).items() if key in {"report_schema", "campaign", "status", "checks", "events"}}, "checks": [{"id": "activity-telemetry", "status": "passed", "boundary": "event-mailbox"}]}),
     "map-discovery": NamedScenario("map-discovery", "Forward bounded map geometry for map discovery.", _map_scenario),

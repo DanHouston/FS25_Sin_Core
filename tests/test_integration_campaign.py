@@ -41,12 +41,20 @@ class IntegrationCampaignTests(unittest.TestCase):
             self.assertEqual(report["status"], "passed")
             self.assertTrue(report["checks"])
 
-    def test_semantic_registry_contains_six_operator_workflows(self):
+    def test_semantic_registry_contains_farmland_ownership_workflow(self):
         self.assertEqual(tuple(SEMANTIC_SCENARIOS), (
-            "server-pairing", "farm-lifecycle", "player-registration",
+            "server-pairing", "farm-lifecycle", "farmland-ownership", "player-registration",
             "activity-telemetry", "map-discovery", "release-evidence"))
         for name in SEMANTIC_SCENARIOS:
             self.assertEqual(run_named_scenario(name)["status"], "passed")
+
+    def test_farmland_ownership_scenario_preserves_readback_and_replay_boundary(self):
+        evidence = run_named_scenario("farmland-ownership")["farmland_ownership"]
+        self.assertEqual((evidence["farmland_id"], evidence["target_farm_id"]), (22, 2))
+        self.assertEqual((evidence["owner_before_farm_id"], evidence["owner_after_farm_id"]), (0, 2))
+        self.assertTrue(evidence["duplicate_command_idempotent"])
+        self.assertTrue(evidence["duplicate_receipt_idempotent"])
+        self.assertIn("live GIANTS validation required", evidence["executor"])
 
     def test_authoritative_registry_contains_required_scenarios(self):
         self.assertEqual(AUTHORITATIVE_SCENARIOS.names(), (

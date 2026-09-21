@@ -17,17 +17,19 @@ Member farm requests use the approved application's farm name and a numeric
 starting farmland ID. `/farm_request` stores the friendly server selection and
 field choice; it never creates a farm or grants authority. Staff uses
 `/farm_approve` to queue a `provision_farm` operation. FS25_SiN_Server creates or
-adopts the exact named farm, verifies that the requested field is unowned, and
-calls `g_farmlandManager:setLandOwnership(farmlandId, farmId)` only when safe.
-It then broadcasts the supported `FarmlandStateEvent` so connected clients
-receive the same ownership state used by the authoritative server snapshot.
-The receipt must prove the actual farm and field owner before SiN queues the
-requester's manager permission. The persisted pending manager authorization is
-delivered to FS25_SiN_Server before its permission receipt is acknowledged; until
-that receipt is applied, the request remains `awaiting_manager`, and only then
-does it become `active`.
+adopts the exact named farm, and its receipt moves the request to `land_pending`;
+that operation does not assign land or manager authority. A staff operator must
+then explicitly select an unowned farmland with `/farmland_assign`. The server
+reads the current owner, invokes the GIANTS ownership mutation only for an
+unowned parcel, and reads the owner back. Only a scoped receipt whose observed
+owner equals the requested farm can queue the requester's manager permission.
+Already-target land is an idempotent non-mutating success; foreign ownership is
+denied. See [farmland-ownership.md](farmland-ownership.md) for the command,
+receipt, recovery, and required live validation details.
 
 `/farm_status` takes no server argument and resolves the caller's latest request.
+Staff can inspect the latest authenticated owner preflight with
+`/farmland_status server:<server> farmland_id:<ID>`.
 `/server_reconcile server:<friendly selection>` safely re-queues missing system
 resources for an already paired server. A failed or uncertain game mutation is
 recorded as `reconciliation_required`; operators must reconcile it before retrying.

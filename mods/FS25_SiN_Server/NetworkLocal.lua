@@ -105,6 +105,7 @@ function FS25SiNServer:loadMap()
     self:installLifecycleHooks()
     addConsoleCommand("sinPermissions", "Report local FS25 farm permission state", "consoleCommandPermissions", self)
     addConsoleCommand("sinSelfTest", "Report read-only SiN runtime integration checks", "consoleCommandSelfTest", self)
+    addConsoleCommand("sinFarmland", "Report authoritative owner for a farmland ID", "consoleCommandFarmland", self)
     addConsoleCommand("sinPair", "Pair this server with a SiN pairing code", "consoleCommandPair", self)
     if g_messageCenter ~= nil and MessageType ~= nil and MessageType.PLAYER_FARM_CHANGED ~= nil then
         g_messageCenter:subscribe(MessageType.PLAYER_FARM_CHANGED, self.onPlayerFarmChanged, self)
@@ -1573,6 +1574,32 @@ function FS25SiNServer:reportFarmlandDiagnostic()
     Logging.info("%s complete; no methods were invoked", prefix)
 end
 
+-- Read-only operator evidence for the ownership workflow.  This deliberately
+-- reads the manager directly and does not consult Central or cached snapshots.
+function FS25SiNServer:consoleCommandFarmland(farmlandId)
+    local parsedId = tonumber(farmlandId)
+    if parsedId == nil or parsedId <= 0 or math.floor(parsedId) ~= parsedId then
+        return "Usage: sinFarmland <positive FS25 farmland ID>"
+    end
+    if g_currentMission == nil or not g_currentMission:getIsServer() then
+        return "SiN farmland diagnostics require the authoritative server"
+    end
+    if g_farmlandManager == nil or g_farmlandManager.getIsValidFarmlandId == nil
+        or g_farmlandManager.getFarmlandOwner == nil then
+        return "FS25 farmland manager ownership API is unavailable"
+    end
+    if not g_farmlandManager:getIsValidFarmlandId(parsedId)
+        or (g_farmlandManager.getFarmlandById ~= nil and g_farmlandManager:getFarmlandById(parsedId) == nil) then
+        return "Invalid FS25 farmland ID: " .. tostring(parsedId)
+    end
+    local owner = g_farmlandManager:getFarmlandOwner(parsedId)
+    local result = string.format("[SiN Farmland] server=%s save=%s farmland=%d authoritativeOwnerFarmId=%s",
+        tostring(self.serverKey), tostring(g_currentMission.missionInfo ~= nil and g_currentMission.missionInfo.savegameIndex),
+        parsedId, tostring(owner))
+    Logging.info("%s", result)
+    return result
+end
+
 function FS25SiNServer:saveReceiptAndConsume(receipt, command, operationId)
     if receipt == nil then return false end
     local receiptPath = self.receiptDirectory .. tostring(operationId) .. ".xml"
@@ -1811,29 +1838,36 @@ function FS25SiNServer:nextAvailableFarmId()
     return nil
 end
 
--- setLandOwnership updates the authoritative server mapping and publishes a
--- local message, but the normal FS25 buy path also sends FarmlandStateEvent so
--- connected clients update their own farmland mapping.  Broadcast the same
--- supported event after the server-side mutation; otherwise snapshots can
--- report the new owner while a client Field Info view still shows the old one.
-function FS25SiNServer:setAndReplicateLandOwnership(farmlandId, farmId)
+-- The only success condition for a land operation is the owner read back from
+-- the authoritative farmland manager after setLandOwnership returns.  Its
+-- return value and client replication are deliberately not treated as proof.
+function FS25SiNServer:setAndVerifyLandOwnership(farmlandId, farmId)
     if g_farmlandManager == nil or g_farmlandManager.setLandOwnership == nil then
         error("FS25 farmland ownership API is unavailable")
     end
-    local changed = g_farmlandManager:setLandOwnership(farmlandId, farmId)
+    local mutationOk, mutationError = pcall(function()
+        g_farmlandManager:setLandOwnership(farmlandId, farmId)
+    end)
+    if not mutationOk then error("setLandOwnership failed: " .. tostring(mutationError)) end
     local owner = g_farmlandManager:getFarmlandOwner(farmlandId)
-    if changed ~= true or owner ~= farmId then
-        error("ownership change was not verified on the authoritative server")
+    if owner ~= farmId then
+        return false, owner
     end
+    -- This is best-effort visual replication only.  The current implementation
+    -- has used this event shape, but operation success is never contingent on
+    -- it because the runtime owner read-back above is authoritative.
     if g_server == nil or g_server.broadcastEvent == nil or FarmlandStateEvent == nil
         or FarmlandStateEvent.new == nil then
-        error("FS25 farmland replication event is unavailable")
+        Logging.warning("[SiN Land Operation] ownership changed but farmland replication event is unavailable")
+        return true, owner
     end
     local broadcastOk, broadcastError = pcall(function()
         g_server:broadcastEvent(FarmlandStateEvent.new(farmlandId, farmId, 0))
     end)
-    if not broadcastOk then error("farmland replication failed: " .. tostring(broadcastError)) end
-    return owner
+    if not broadcastOk then
+        Logging.warning("[SiN Land Operation] ownership changed but client replication failed: %s", tostring(broadcastError))
+    end
+    return true, owner
 end
 
 function FS25SiNServer:processFarmProvisionCommand(command, operationId, operationType)
@@ -1842,8 +1876,7 @@ function FS25SiNServer:processFarmProvisionCommand(command, operationId, operati
     local saveId = command:getString("networkLocalCommand#save_id")
     local farmName = command:getString("networkLocalCommand#canonical_name")
     local farmType = command:getString("networkLocalCommand#farm_type")
-    local farmlandId = command:getInt("networkLocalCommand#farmland_id")
-    local status, reason, farmId, owner = "failed", "validation_failed", 0, 0
+    local status, reason, farmId = "failed", "validation_failed", 0
     local ok, errorMessage = pcall(function()
         if g_currentMission == nil or not g_currentMission:getIsServer() then error("not authoritative server") end
         if g_farmManager == nil then error("farm manager unavailable") end
@@ -1875,25 +1908,12 @@ function FS25SiNServer:processFarmProvisionCommand(command, operationId, operati
         farmId = farm.farmId
         local visualStateValid, visualStateError = self:isFarmVisualStateValid(farm)
         if not visualStateValid then error("farm visual state invalid: " .. tostring(visualStateError)) end
-        if operationType == "provision_farm" then
-            if g_farmlandManager == nil then error("farmland manager unavailable") end
-            if farmlandId == nil or not g_farmlandManager:getIsValidFarmlandId(farmlandId) then error("invalid farmland ID") end
-            owner = g_farmlandManager:getFarmlandOwner(farmlandId)
-            local noOwner = FarmlandManager.NO_OWNER_FARM_ID or 0
-            if owner ~= noOwner and owner ~= farmId then error("farmland is owned by another farm") end
-            local alreadyOwned = owner == farmId
-            -- Re-broadcast an already-applied assignment as well. This repairs
-            -- a client that joined after the original mutation.
-            owner = self:setAndReplicateLandOwnership(farmlandId, farmId)
-            reason = alreadyOwned and "already_owned_by_target" or "assigned_and_verified"
-        else
-            reason = "farm_exists_or_created"
-        end
+        reason = "farm_exists_or_created"
         status = "applied"
     end)
     if not ok then reason = tostring(errorMessage) end
-    Logging.info("%s operation=%s server=%s save=%s farm=%s farmland=%s status=%s owner=%s reason=%s",
-        prefix, operationId, tostring(serverId), tostring(saveId), tostring(farmId), tostring(farmlandId), status, tostring(owner), reason)
+    Logging.info("%s operation=%s server=%s save=%s farm=%s status=%s reason=%s",
+        prefix, operationId, tostring(serverId), tostring(saveId), tostring(farmId), status, reason)
     local receipt = XMLFile.create("networkLocalFarmReceipt", self.receiptDirectory .. operationId .. ".xml", "networkLocalReceipt")
     if receipt == nil then return end
     receipt:setString("networkLocalReceipt#operation_id", operationId)
@@ -1901,8 +1921,6 @@ function FS25SiNServer:processFarmProvisionCommand(command, operationId, operati
     receipt:setString("networkLocalReceipt#server_id", serverId)
     receipt:setString("networkLocalReceipt#save_id", saveId)
     receipt:setInt("networkLocalReceipt#farm_id", farmId)
-    receipt:setInt("networkLocalReceipt#farmland_id", farmlandId or 0)
-    receipt:setInt("networkLocalReceipt#owner_farm_id", owner or 0)
     receipt:setString("networkLocalReceipt#status", status)
     receipt:setString("networkLocalReceipt#receipt", reason)
     self:saveReceiptAndConsume(receipt, command, operationId)
@@ -1967,27 +1985,45 @@ function FS25SiNServer:processLandCommand(command, operationId)
     local saveId = command:getString("networkLocalCommand#save_id")
     local farmlandId = command:getInt("networkLocalCommand#farmland_id")
     local farmId = command:getInt("networkLocalCommand#farm_id")
-    local status, reason, owner = "failed", "validation_failed", -1
+    local status, reason, ownerBefore, ownerAfter, mutationPerformed = "failed", "validation_failed", -1, -1, false
     local ok, errorMessage = pcall(function()
         if g_currentMission == nil or not g_currentMission:getIsServer() then error("not authoritative server") end
+        if serverId == nil or serverId == "" or tostring(serverId) ~= tostring(self.serverKey) then
+            error("REJECTED: command server scope does not match this FS25 server")
+        end
         if g_farmManager == nil then error("farm manager unavailable") end
         if g_farmlandManager == nil then error("farmland manager unavailable") end
         local farm = g_farmManager:getFarmById(farmId)
-        if farm == nil or farmId <= 0 or farmId >= 255 then error("invalid target farm") end
-        if not g_farmlandManager:getIsValidFarmlandId(farmlandId) then error("invalid farmland ID") end
-        if farmlandId == (FarmlandManager.NOT_BUYABLE_FARM_ID or 255) then error("farmland is not buyable") end
-        if g_farmlandManager:getFarmlandById(farmlandId) == nil then error("farmland record unavailable") end
-        owner = g_farmlandManager:getFarmlandOwner(farmlandId)
-        local noOwner = FarmlandManager.NO_OWNER_FARM_ID or 0
-        if owner ~= noOwner and owner ~= farmId then error("farmland is owned by another farm") end
-        local alreadyOwned = owner == farmId
-        owner = self:setAndReplicateLandOwnership(farmlandId, farmId)
+        if farm == nil or farmId <= 0 or farmId >= 255 then error("REJECTED: invalid target farm") end
+        if not g_farmlandManager:getIsValidFarmlandId(farmlandId) then error("REJECTED: invalid farmland ID") end
+        if farmlandId == ((FarmlandManager and FarmlandManager.NOT_BUYABLE_FARM_ID) or 255) then error("REJECTED: farmland is not buyable") end
+        if g_farmlandManager:getFarmlandById(farmlandId) == nil then error("REJECTED: farmland record unavailable") end
+        ownerBefore = g_farmlandManager:getFarmlandOwner(farmlandId)
+        local noOwner = (FarmlandManager and FarmlandManager.NO_OWNER_FARM_ID) or 0
+        if ownerBefore ~= noOwner and ownerBefore ~= farmId then error("REJECTED: farmland is owned by another farm") end
+        if ownerBefore == farmId then
+            ownerAfter = g_farmlandManager:getFarmlandOwner(farmlandId)
+            if ownerAfter ~= farmId then error("ownership changed before idempotency verification") end
+            status = "already_satisfied"
+            reason = "already_owned_by_target_verified"
+            return
+        end
+        local verified
+        verified, ownerAfter = self:setAndVerifyLandOwnership(farmlandId, farmId)
+        mutationPerformed = true
+        if not verified then
+            error("ownership change was not verified; authoritative owner after mutation was " .. tostring(ownerAfter))
+        end
         status = "applied"
-        reason = alreadyOwned and "already_owned_by_target" or "assigned_and_verified"
+        reason = "assigned_and_verified"
     end)
-    if not ok then reason = tostring(errorMessage) end
-    Logging.info("%s operation=%s server=%s save=%s farmland=%s farm=%s status=%s owner=%s reason=%s",
-        prefix, operationId, tostring(serverId), tostring(saveId), tostring(farmlandId), tostring(farmId), status, tostring(owner), reason)
+    if not ok then
+        reason = tostring(errorMessage)
+        if string.sub(reason, 1, 9) == "REJECTED:" then status = "rejected" end
+    end
+    Logging.info("%s operation=%s server=%s save=%s farmland=%s farm=%s status=%s before=%s after=%s mutated=%s reason=%s",
+        prefix, operationId, tostring(serverId), tostring(saveId), tostring(farmlandId), tostring(farmId), status,
+        tostring(ownerBefore), tostring(ownerAfter), tostring(mutationPerformed), reason)
     local receipt = XMLFile.create("networkLocalLandReceipt", self.receiptDirectory .. operationId .. ".xml", "networkLocalReceipt")
     receipt:setString("networkLocalReceipt#operation_id", operationId)
     receipt:setString("networkLocalReceipt#operation_type", "assign_farmland")
@@ -1995,7 +2031,9 @@ function FS25SiNServer:processLandCommand(command, operationId)
     receipt:setString("networkLocalReceipt#save_id", saveId)
     receipt:setInt("networkLocalReceipt#farmland_id", farmlandId)
     receipt:setInt("networkLocalReceipt#farm_id", farmId)
-    receipt:setInt("networkLocalReceipt#owner_farm_id", owner)
+    receipt:setInt("networkLocalReceipt#owner_before_farm_id", ownerBefore)
+    receipt:setInt("networkLocalReceipt#owner_farm_id", ownerAfter)
+    receipt:setBool("networkLocalReceipt#mutation_performed", mutationPerformed)
     receipt:setString("networkLocalReceipt#status", status)
     receipt:setString("networkLocalReceipt#receipt", reason)
     self:saveReceiptAndConsume(receipt, command, operationId)
@@ -2134,6 +2172,7 @@ function FS25SiNServer:deleteMap()
     self.failed = true
     removeConsoleCommand("sinPermissions")
     removeConsoleCommand("sinSelfTest")
+    removeConsoleCommand("sinFarmland")
     if g_messageCenter ~= nil and MessageType ~= nil and MessageType.PLAYER_FARM_CHANGED ~= nil then
         g_messageCenter:unsubscribe(MessageType.PLAYER_FARM_CHANGED, self)
     end

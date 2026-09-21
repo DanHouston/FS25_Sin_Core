@@ -50,23 +50,10 @@ class LocalPermissionBridge:
                 ET.ElementTree(root).write(temporary, encoding="utf-8", xml_declaration=True)
                 temporary.replace(destination)
             delivered.append(job["_id"])
-        land_jobs = self.authorization.db.land_operations.find({"server_id": self.server_id,
-            "save_id": self.save_id, "state": {"$in": ["pending", "dispatched"]}})
-        for job in land_jobs:
-            payload = {"operation_id": job["_id"], "operation_type": "assign_farmland",
-                       "server_id": job["server_id"], "save_id": job["save_id"],
-                       "request_id": job["request_id"], "farm_id": job["farm_id"],
-                       "farmland_id": job["farmland_id"]}
-            destination = self.commands / (job["_id"] + ".xml")
-            if not destination.exists():
-                temporary = destination.with_suffix(".tmp")
-                root = ET.Element("networkLocalCommand", schemaVersion="1",
-                                  **{key: str(value) for key, value in payload.items()})
-                ET.ElementTree(root).write(temporary, encoding="utf-8", xml_declaration=True)
-                temporary.replace(destination)
-            self.authorization.db.land_operations.update_one({"_id": job["_id"], "state": "pending"},
-                {"$set": {"state": "dispatched"}})
-            delivered.append(job["_id"])
+        # Deliberately do not deliver legacy land_operations.  Authoritative
+        # farmland mutations use FarmLifecycle → Agent → authenticated Central
+        # receipt so owner read-back and scope cannot be bypassed by this
+        # development-only Mongo bridge.
         identities = self.authorization.db.game_identities.find({"server_id": self.server_id, "save_id": self.save_id})
         for identity in identities:
             application = self.authorization.db.community_applications.find_one(
@@ -116,16 +103,6 @@ class LocalPermissionBridge:
         applied = []
         for path in self.receipts.glob("*.xml"):
             receipt = ET.parse(path).getroot().attrib
-            if receipt.get("operation_type") == "assign_farmland":
-                required = {"operation_id", "operation_type", "server_id", "save_id", "farmland_id", "farm_id", "owner_farm_id", "status", "receipt"}
-                if not required.issubset(receipt) or receipt["status"] != "applied":
-                    continue
-                if receipt["server_id"] != self.server_id or receipt["save_id"] != self.save_id:
-                    continue
-                self.authorization.acknowledge_land(receipt["operation_id"], self.server_id, self.save_id,
-                    int(receipt["farmland_id"]), int(receipt["farm_id"]), int(receipt["owner_farm_id"]), True, receipt["receipt"])
-                applied.append(receipt["operation_id"])
-                continue
             required = {"operation_id", "server_id", "save_id", "revision", "status", "receipt"}
             if not required.issubset(receipt) or receipt["status"] != "applied":
                 continue

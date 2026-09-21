@@ -241,14 +241,17 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("return nil, \"no unused FS25 farm color is available\"", selector)
         self.assertNotIn("setColor", selector)
 
-    def test_server_runtime_land_receipt_requires_client_replication_event(self):
+    def test_server_runtime_land_receipt_requires_authoritative_readback_not_client_replication(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
             encoding="utf-8")
-        helper = source[source.index("function FS25SiNServer:setAndReplicateLandOwnership") :]
+        helper = source[source.index("function FS25SiNServer:setAndVerifyLandOwnership") :]
         helper = helper[:helper.index("function FS25SiNServer:processFarmProvisionCommand")]
         self.assertIn("getFarmlandOwner(farmlandId)", helper)
+        self.assertIn("owner ~= farmId", helper)
+        self.assertIn("pcall(function()", helper)
         self.assertIn("FarmlandStateEvent.new(farmlandId, farmId, 0)", helper)
-        self.assertIn("farmland replication event is unavailable", helper)
+        self.assertIn("ownership changed but farmland replication event is unavailable", helper)
+        self.assertNotIn("changed ~= true", helper)
 
     def test_server_runtime_rejects_malformed_farm_visual_state_before_operations(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(

@@ -113,6 +113,26 @@ class ServerApiTests(unittest.TestCase):
         self.assertNotIn("created_at", body["operations"][0])
         connection.close()
 
+    def test_farmland_receipt_uses_receipt_gated_farm_lifecycle_not_legacy_land_path(self):
+        handler = self.server.RequestHandlerClass
+        handler.farm_lifecycle = MagicMock()
+        handler.farm_lifecycle.accept_receipt.return_value = {"operation_id": "land-op", "state": "succeeded"}
+        handler.event_processor.registry.authenticate.return_value = {"server_key": "sin-fs25-01"}
+        handler.event_processor.registry.resolve_save.return_value = "main"
+        payload = {"fs25_save_id": "1", "receipt": {"operation_id": "land-op",
+            "operation_type": "assign_farmland", "status": "applied", "farmland_id": "12",
+            "farm_id": "2", "owner_before_farm_id": "0", "owner_farm_id": "2"}}
+        connection = HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
+        connection.request("POST", "/api/server/operation-receipts", json.dumps(payload), {
+            "Content-Type": "application/json", "X-SiN-Server-Key": "sin-fs25-01",
+            "Authorization": "Bearer secret"})
+        response = connection.getresponse()
+        body = json.loads(response.read())
+        connection.close()
+        self.assertEqual((response.status, body["operation_state"]), (200, "succeeded"))
+        handler.farm_lifecycle.accept_receipt.assert_called_once_with("sin-fs25-01", "main", payload["receipt"])
+        handler.event_processor.authorization.acknowledge_land.assert_not_called()
+
     def test_manager_authority_endpoint_includes_persisted_pending_manager_assignment(self):
         handler = self.server.RequestHandlerClass
         handler.event_processor.registry.authenticate.return_value = {"server_key": "sin-fs25-01"}

@@ -57,6 +57,7 @@ python scripts/run_integration_campaign.py --list-scenarios
 python scripts/run_integration_campaign.py --scenario artifact-and-snapshot --output local-test/artifact.json
 python scripts/run_integration_campaign.py --scenario mailbox-roundtrip --output local-test/mailbox.json
 python scripts/run_integration_campaign.py --scenario event-ordering --output local-test/events.json
+python scripts/run_integration_campaign.py --scenario farmland-ownership --output local-test/farmland-ownership.json
 ```
 
 The six authoritative scenario names are `registration`,
@@ -69,6 +70,13 @@ through the real Agent control plane and reports `backlog_size`,
 `processed_events`, `batches`, and `elapsed_ms`. `activity_disconnect` routes
 the ordered events through `CentralEventProcessor`; `map_contract` continues
 through central map validation and deterministic rendering.
+
+`farmland-ownership` is a focused Central → Agent mailbox → reference executor
+→ receipt → Central reconciliation scenario. Its reference executor keeps an
+independent mutable owner map so a requested farm ID is not automatically an
+observed owner. It proves receipt-gated idempotency and scope handling only;
+run the real-FS25 procedure in [farmland-ownership.md](farmland-ownership.md)
+before claiming GIANTS ownership mutation validation.
 
 `offline-full` is the default and produces the complete campaign report. A
 consumer can register a `NamedScenario(name, description, execute)` with the
@@ -142,15 +150,17 @@ API reference used for XML create/set/save lifecycle:
 
 ### Continuous local bridge
 
-Run python -m fs25_network_core.local_permission_bridge <modSettings-path> --server local-dev --save local-dev-save-001 --watch to continuously poll the existing mailbox. Authenticated server events are consumed from the mod events directory and processed once; malformed events are quarantined as .failed. Build dist/FS25_SiN_Server.zip after any source change under mods/FS25_SiN_Server.
+Run python -m fs25_network_core.local_permission_bridge <modSettings-path> --server local-dev --save local-dev-save-001 --watch only for legacy local permission/event development. It does not deliver farmland ownership operations: those must use the production-shaped Agent and Central `FarmLifecycle` receipt path. Authenticated server events are consumed from the mod events directory and processed once; malformed events are quarantined as .failed. Build dist/FS25_SiN_Server.zip after any source change under mods/FS25_SiN_Server.
 
 The bridge writes authenticated, normalized activity records to Mongo `activity_outbox`. JiN starts one background publisher on Discord readiness and routes records through `sin_servers.discord_activity_channel_id`. Server Offline announcements remain deferred.
 
-### Pairing-only standalone Agent
+### Standalone Agent
 
-The first production-shaped Agent slice handles only server pairing. It does not
-read MongoDB and does not process events, commands, land operations, or receipts.
-The central pairing API owns the existing `ServerRegistry.pair_code()` logic.
+The standalone Agent handles pairing plus authenticated snapshot, event, command,
+and receipt transport. It does not read MongoDB. Central owns pairing, durable
+operation state, and receipt reconciliation; farmland ownership specifically
+uses the scoped `FarmLifecycle` path documented in
+[farmland-ownership.md](farmland-ownership.md).
 
 Central machine (with `MONGODB_URI` and the normal central Python dependencies):
 
