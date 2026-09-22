@@ -42,7 +42,20 @@ the user to the selected farm with default permissions. SiN does not force an
 approved member into SiN Harvest and does not prevent a registered member from
 switching farms. The FS25_SiN_Server authority loop only demotes a manager when no
 matching persisted SiN manager authorization exists; joining a farm never grants
-manager status. There is no SiN-specific contractor role in this path.
+manager status.
+
+Every linked identity whose community application is currently approved receives
+a separate, server/save-scoped **contractor** relationship for the one active
+`SiN Harvest` system-farm mapping. This is a derived relationship, not the
+member's primary farm: for example, Repton can remain `farm_manager` of Repton
+Does / Farm 2 while independently holding `contractor` access to SiN Harvest.
+The normal Central operations poll reconciles all approved identities, including
+members who existed before the feature was deployed; reconnects and service or
+FS25 restarts therefore do not require re-registration or a manual per-member
+grant. A missing, duplicate, inactive, or invalid system-farm mapping grants
+nothing. If approval is later lost, Central queues a contractor-only revocation
+through the same durable permission-command/receipt path. It never demotes or
+overwrites the member's personal manager relationship.
 
 Players request a farm. Only Network Admins associate Discord identities with
 observed game players and farms. `/link` is removed on the next successful guild

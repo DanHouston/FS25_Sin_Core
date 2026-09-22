@@ -85,6 +85,30 @@ dedicated server and reconnect the client once. Use the read-only commands
 5. Run `sinSelfTest` and retain the output with the server log. The self-test
    is read-only and does not repair state.
 
+### SiN Harvest shared contractor authority â€” LIVE REQUIRED
+
+The v0.1.25 validation confirmed this as a real failure: a personal Farm Manager
+did not receive the intended independent SiN Harvest contractor permissions.
+The corrected policy is deterministically covered through Central, Agent XML,
+and a reference executor, but that is not GIANTS runtime proof. On the exact
+deployed artifact:
+
+1. Connect an approved, linked member who is Farm Manager of a personal farm.
+2. Confirm Central has both server/save-scoped memberships: personal
+   `farm_manager` and SiN Harvest `contractor`.
+3. Switch to SiN Harvest and run `sinPermissions`; confirm the contractor
+   permissions are present without changing the personal manager relationship.
+4. Reconnect, restart the Agent, restart Central, and restart FS25 one at a
+   time; confirm the same two relationships are reconciled and remain usable.
+5. Repeat with another approved member and confirm neither membership changes
+   the other member's permissions.
+6. On a disposable identity whose approved membership is removed, confirm the
+   durable revocation receipt restores SiN Harvest defaults without demoting the
+   member's unrelated personal-farm manager authority.
+
+Do not call shared contractor authority LIVE PASS until those observations and
+the exact release hash are retained.
+
 ### Activity telemetry
 
 During the same connected session, move enough to produce an active minute,

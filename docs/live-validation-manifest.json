@@ -8,7 +8,7 @@
     "real_passes": ["baseline", "deployment", "clean_startup", "map_acquisition", "player_identity", "activity_idle_afk", "normal_disconnect", "agent_recovery", "central_recovery", "jiN_durable_interactions", "cumulative_cold_restart"],
     "real_pass_with_findings": ["farm_authority", "reconnect", "fs25_runtime_generation"],
     "real_partial_or_failed": ["contract_map_orientation_and_context", "contract_scope", "autocomplete_resilience"],
-    "synthetic_only_or_live_deferred": ["positive_cross_farm_accept", "renderer_failure_fallback", "fresh_registration", "multi_server_isolation", "actual_farmland_parcel_geometry", "vanilla_reconnect_spawn_behavior", "authoritative_farmland_ownership_assignment"],
+    "synthetic_only_or_live_deferred": ["positive_cross_farm_accept", "renderer_failure_fallback", "fresh_registration", "multi_server_isolation", "actual_farmland_parcel_geometry", "vanilla_reconnect_spawn_behavior", "authoritative_farmland_ownership_assignment", "shared_sin_harvest_contractor_authority"],
     "findings": [
       "observed_farm_id was captured at connect rather than authoritative activity time",
       "personal farm authority and SiN Harvest contractor authority must coexist",
@@ -45,7 +45,7 @@
     "contract_scope": ["memory_persistence", "networkbot_presentation"],
     "authority_regression": ["memory_persistence"]
   },
-  "semantic_scenarios": ["server-pairing", "farm-lifecycle", "farmland-ownership", "player-registration", "activity-telemetry", "map-discovery", "release-evidence"],
+  "semantic_scenarios": ["server-pairing", "farm-lifecycle", "farmland-ownership", "shared-contractor-authority", "player-registration", "activity-telemetry", "map-discovery", "release-evidence"],
   "boundary_scenarios": ["offline-full", "artifact-and-snapshot", "mailbox-roundtrip", "event-ordering", "registration-roundtrip", "map-geometry-boundary"],
   "live_checks": [
     {"id": "runtime-load", "scenario": "authority_regression", "evidence": "server/client ZIP SHA256 and sinSelfTest"},
@@ -54,6 +54,7 @@
     {"id": "player-registration", "scenario": "registration", "evidence": "registration prompt and response log"},
     {"id": "map-geometry", "scenario": "map_contract", "evidence": "Map probe, sanitized geometry metadata, and PDA comparison"},
     {"id": "farmland-ownership", "scenario": "farmland-ownership", "evidence": "sinFarmland before/after, FS25 UI, durable read-back receipt, and one Central reconciliation"},
+    {"id": "shared-contractor-authority", "scenario": "shared-contractor-authority", "evidence": "two scoped memberships, sinPermissions on SiN Harvest, durable grant/revocation receipts, and restart reconciliation"},
     {"id": "full-operator-pass", "scenario": "control_plane_backlog", "evidence": "secret-free campaign report"}
   ],
   "live_validation_required": [
@@ -77,6 +78,13 @@
       "procedure": "On a safe unowned farmland selected in /farm_request, record sinFarmland before/after, approve the request with /farm_approve, verify the FS25 UI and durable receipt, retry approval idempotently, then save/restart and recheck.",
       "success": "The post-call runtime owner, receipt owner, Central state, UI, and post-restart owner all equal the selected target farm; an equivalent retry is non-mutating.",
       "failure": "Keep the operation/reason/receipt for diagnosis; do not advance manager authority or label the capability live-proven."
+    },
+    {
+      "id": "giants-shared-contractor-authority",
+      "what": "Independent SiN Harvest contractor grant and contractor-only revocation",
+      "procedure": "For an approved linked personal-farm manager, verify both memberships, switch to SiN Harvest, retain sinPermissions and the durable grant receipt, then test reconnect and service/FS25 restarts. On a disposable ineligible identity, retain the contractor revocation receipt and verify the personal manager relationship remains unchanged.",
+      "success": "Each approved member receives only the scoped SiN Harvest contractor relationship; personal manager relationships coexist, survive reconciliation, and are not changed by shared grant/revocation.",
+      "failure": "Retain membership/job/receipt and runtime logs; do not manually substitute a farm role or claim shared access works."
     },
     {
       "id": "pda-orientation",

@@ -32,6 +32,7 @@ class IntegrationCampaignTests(unittest.TestCase):
         self.assertTrue({"giants-field-extraction", "giants-farmland-layer",
                          "pda-orientation", "map-change-refresh",
                          "discord-map-presentation", "fs25-mailbox-lifecycle"}.issubset(checks))
+        self.assertIn("giants-shared-contractor-authority", checks)
 
     def test_each_named_scenario_returns_structured_pass_report(self):
         for name in SCENARIOS.names():
@@ -43,8 +44,8 @@ class IntegrationCampaignTests(unittest.TestCase):
 
     def test_semantic_registry_contains_farmland_ownership_workflow(self):
         self.assertEqual(tuple(SEMANTIC_SCENARIOS), (
-            "server-pairing", "farm-lifecycle", "farmland-ownership", "player-registration",
-            "activity-telemetry", "map-discovery", "release-evidence"))
+            "server-pairing", "farm-lifecycle", "farmland-ownership", "shared-contractor-authority",
+            "player-registration", "activity-telemetry", "map-discovery", "release-evidence"))
         for name in SEMANTIC_SCENARIOS:
             self.assertEqual(run_named_scenario(name)["status"], "passed")
 
@@ -55,6 +56,12 @@ class IntegrationCampaignTests(unittest.TestCase):
         self.assertTrue(evidence["duplicate_command_idempotent"])
         self.assertTrue(evidence["duplicate_receipt_idempotent"])
         self.assertIn("live GIANTS validation required", evidence["executor"])
+
+    def test_shared_contractor_scenario_preserves_two_authority_relationships(self):
+        evidence = run_named_scenario("shared-contractor-authority")["shared_contractor_authority"]
+        self.assertEqual((evidence["personal_farm_id"], evidence["shared_farm_id"]), (2, 99))
+        self.assertTrue(evidence["duplicate_delivery_idempotent"])
+        self.assertIn("live GIANTS contractor validation required", evidence["executor"])
 
     def test_authoritative_registry_contains_required_scenarios(self):
         self.assertEqual(AUTHORITATIVE_SCENARIOS.names(), (

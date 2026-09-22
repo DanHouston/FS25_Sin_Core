@@ -359,6 +359,59 @@ class AuthorizationManager:
             return operation_id
         return assign(session) if session is not None else self.database.atomic(assign)
 
+    def revoke_contractor(self, discord_id, server_id, save_id, farm_id, approved_by,
+                          session=None, idempotent=True):
+        """Durably remove a previously derived shared-farm contractor grant.
+
+        This is deliberately narrower than a general farm-role editor.  The
+        shared-authority policy may revoke only its own contractor relationship;
+        it cannot demote a personal farm manager or silently repurpose another
+        membership.  The FS25 command remains receipt-gated just like a grant.
+        """
+        if type(farm_id) is not int or farm_id <= 0 or not approved_by:
+            raise ValueError("Invalid farm or revocation approver")
+        user = str(discord_id)
+
+        def revoke(session):
+            relationship = self.db.memberships.find_one({
+                "server_id": server_id, "save_id": save_id,
+                "discord_id": user, "farm_id": farm_id}, session=session)
+            if not relationship:
+                return None
+            if relationship.get("desired_role") not in {"contractor", "revoked"} \
+                    or relationship.get("applied_role") not in {"contractor", "revoked", None}:
+                raise ValueError("Only a shared contractor relationship can be revoked")
+            membership_id = relationship.get("_id") or key(server_id, save_id, user, farm_id)
+            if relationship.get("state") == "pending":
+                # A durable grant may already be in the Agent mailbox.  Do not
+                # overwrite its revision: let its exact receipt settle, then
+                # the next reconciliation poll will issue the revocation.
+                return relationship.get("operation_id") if idempotent else None
+            if relationship.get("state") == "revoked" and relationship.get("desired_role") == "revoked":
+                return relationship.get("operation_id") if idempotent else None
+            game_player_id = relationship.get("game_player_id")
+            identity = self.db.game_identities.find_one(
+                {"server_id": server_id, "save_id": save_id, "discord_id": user}, session=session)
+            if identity and identity.get("game_player_id"):
+                game_player_id = identity["game_player_id"]
+            if not game_player_id:
+                raise ValueError("A registered game identity is required before contractor authority can be revoked")
+            operation_id = str(uuid.uuid4())
+            revision = int(relationship.get("revision", 0)) + 1
+            record = dict(relationship, _id=membership_id, discord_id=user,
+                          server_id=server_id, save_id=save_id, game_player_id=game_player_id,
+                          farm_id=farm_id, desired_role="revoked", revision=revision,
+                          state="pending", operation_id=operation_id,
+                          approved_by=str(approved_by))
+            self.db.memberships.replace_one({"_id": membership_id}, record, upsert=True, session=session)
+            self.db.permission_jobs.insert_one(dict(
+                _id=operation_id, membership_id=membership_id, server_id=server_id,
+                save_id=save_id, game_player_id=game_player_id, farm_id=farm_id,
+                role="revoked", revision=revision, state="pending",
+                approved_by=str(approved_by), created_at=datetime.now(timezone.utc)), session=session)
+            return operation_id
+        return revoke(session) if session is not None else self.database.atomic(revoke)
+
     def acknowledge(self, operation_id, authenticated_server_id, save_id, revision, receipt):
         """Only after the mod confirms the exact job was applied and persisted."""
         if not receipt:

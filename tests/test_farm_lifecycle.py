@@ -324,3 +324,99 @@ class FarmlandAssignmentLifecycleTests(unittest.TestCase):
             "owner_before_farm_id": 0, "owner_farm_id": 2, "receipt": "wrong scope"})
         self.assertEqual(mismatch["state"], "reconciliation_required")
         self.assertEqual(self.db.farm_requests.find_one({"_id": "request"})["state"], "land_pending")
+
+
+class SharedContractorAuthorityTests(unittest.TestCase):
+    """Policy tests use real Central membership/job records, never a role stub."""
+
+    def setUp(self):
+        self.database = _MemoryDatabase()
+        self.authorization = AuthorizationManager(self.database)
+        self.lifecycle = FarmLifecycle(self.database, self.authorization)
+        self.db = self.database.db
+        self.db.sin_farms.insert_one({"_id": "sin-harvest", "server_key": "server", "save_key": "save",
+            "farm_type": "system", "canonical_name": "SiN Harvest", "state": "active", "fs25_farm_id": 99})
+
+    def approved_identity(self, discord_id, player_id):
+        self.db.game_identities.insert_one({"server_id": "server", "save_id": "save",
+            "discord_id": discord_id, "game_player_id": player_id, "fs25_unique_user_id": player_id})
+        self.db.community_applications.insert_one({"_id": discord_id, "state": "approved",
+            "farm_name": discord_id + " Farm"})
+
+    def memberships_for(self, discord_id):
+        return sorted(self.db.memberships.find({"server_id": "server", "save_id": "save",
+                                                "discord_id": discord_id}), key=lambda row: row["farm_id"])
+
+    def test_existing_approved_manager_receives_independent_shared_contractor(self):
+        self.approved_identity("repton", "stable-repton")
+        self.db.memberships.insert_one({"_id": "personal", "server_id": "server", "save_id": "save",
+            "discord_id": "repton", "game_player_id": "stable-repton", "farm_id": 2,
+            "farm_name": "Repton Does", "desired_role": "farm_manager", "applied_role": "farm_manager",
+            "state": "active", "operation_id": "personal-op", "revision": 1})
+
+        self.lifecycle.operations_for("server", "save")
+
+        relationships = self.memberships_for("repton")
+        self.assertEqual([(row["farm_id"], row["desired_role"], row["state"]) for row in relationships], [
+            (2, "farm_manager", "active"), (99, "contractor", "pending")])
+        job = self.db.permission_jobs.find_one({"membership_id": relationships[1]["_id"]})
+        self.assertEqual((job["server_id"], job["save_id"], job["game_player_id"], job["farm_id"], job["role"]),
+                         ("server", "save", "stable-repton", 99, "contractor"))
+
+        self.authorization.acknowledge(job["_id"], "server", "save", job["revision"], "fs25-receipt")
+        relationships = self.memberships_for("repton")
+        self.assertEqual([(row["farm_id"], row["desired_role"], row["applied_role"], row["state"])
+                          for row in relationships], [
+            (2, "farm_manager", "farm_manager", "active"),
+            (99, "contractor", "contractor", "active")])
+
+    def test_multiple_members_and_restart_reconciliation_are_idempotent(self):
+        self.approved_identity("repton", "stable-repton")
+        self.approved_identity("sam", "stable-sam")
+        self.lifecycle.operations_for("server", "save")
+        first_jobs = list(self.db.permission_jobs.find({"state": "pending"}))
+        restarted = FarmLifecycle(self.database, self.authorization)
+        restarted.operations_for("server", "save")
+        second_jobs = list(self.db.permission_jobs.find({"state": "pending"}))
+
+        self.assertEqual(len(first_jobs), 2)
+        self.assertEqual({job["game_player_id"] for job in first_jobs}, {"stable-repton", "stable-sam"})
+        self.assertEqual({job["_id"] for job in second_jobs}, {job["_id"] for job in first_jobs})
+        self.assertEqual(len(list(self.db.memberships.find({"farm_id": 99, "desired_role": "contractor"}))), 2)
+
+    def test_ineligible_or_ambiguous_system_farm_never_grants_access(self):
+        self.db.game_identities.insert_one({"server_id": "server", "save_id": "save",
+            "discord_id": "unapproved", "game_player_id": "stable-unapproved"})
+        self.lifecycle.operations_for("server", "save")
+        self.assertIsNone(self.db.memberships.find_one({"discord_id": "unapproved"}))
+
+        self.approved_identity("repton", "stable-repton")
+        self.db.sin_farms.insert_one({"_id": "duplicate", "server_key": "server", "save_key": "save",
+            "farm_type": "system", "canonical_name": "SiN Harvest", "state": "active", "fs25_farm_id": 100})
+        self.lifecycle.operations_for("server", "save")
+        self.assertIsNone(self.db.memberships.find_one({"discord_id": "repton"}))
+
+    def test_loss_of_approval_revokes_only_the_shared_relationship_after_receipt(self):
+        self.approved_identity("repton", "stable-repton")
+        self.db.memberships.insert_one({"_id": "personal", "server_id": "server", "save_id": "save",
+            "discord_id": "repton", "game_player_id": "stable-repton", "farm_id": 2,
+            "desired_role": "farm_manager", "applied_role": "farm_manager", "state": "active",
+            "operation_id": "personal-op", "revision": 1})
+        self.lifecycle.operations_for("server", "save")
+        grant = self.db.permission_jobs.find_one({"farm_id": 99, "role": "contractor"})
+        self.authorization.acknowledge(grant["_id"], "server", "save", grant["revision"], "grant-receipt")
+        self.db.community_applications.update_one({"_id": "repton"}, {"$set": {"state": "denied"}})
+
+        self.lifecycle.operations_for("server", "save")
+        shared = self.db.memberships.find_one({"discord_id": "repton", "farm_id": 99})
+        revoke = self.db.permission_jobs.find_one({"membership_id": shared["_id"], "role": "revoked"})
+        self.assertEqual((shared["desired_role"], shared["applied_role"], shared["state"]),
+                         ("revoked", "contractor", "pending"))
+        self.authorization.acknowledge(revoke["_id"], "server", "save", revoke["revision"], "revoke-receipt")
+
+        personal = self.db.memberships.find_one({"_id": "personal"})
+        shared = self.db.memberships.find_one({"discord_id": "repton", "farm_id": 99})
+        self.assertEqual((personal["desired_role"], personal["applied_role"], personal["state"]),
+                         ("farm_manager", "farm_manager", "active"))
+        self.assertEqual((shared["desired_role"], shared["applied_role"], shared["state"]),
+                         ("revoked", "revoked", "revoked"))

@@ -199,6 +199,16 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("InitEventClass(SiNRegistrationWarningEvent", event)
         self.assertIn("streamWriteBool", event)
         self.assertIn("streamWriteString", event)
+
+    def test_server_runtime_handles_shared_contractor_grant_and_receipt_gated_revocation(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('requestedRole == "contractor"', source)
+        self.assertIn('requestedRole == "revoked"', source)
+        self.assertIn("processContractorRevocationCommand", source)
+        self.assertIn("revokeAuthorizedContractorState", source)
+        self.assertIn("refusing to revoke contractor permissions from a farm manager", source)
         self.assertIn("self.registrationWarning = nil", source)
         self.assertIn("self.registrationRequired = false", source)
         self.assertIn("self.registrationCode = nil", source)

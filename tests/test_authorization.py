@@ -125,6 +125,33 @@ class AuthorizationTests(unittest.TestCase):
         update = self.db.memberships.update_one.call_args.args[1]["$set"]
         self.assertEqual(update, {"applied_role": "revoked", "state": "revoked"})
 
+    def test_shared_contractor_revocation_is_a_new_receipt_gated_revision(self):
+        self.db.memberships.find_one.return_value = {
+            "_id": "shared-membership", "discord_id": "123", "server_id": "server", "save_id": "save",
+            "game_player_id": "stable-player", "farm_id": 99, "farm_name": "SiN Harvest",
+            "desired_role": "contractor", "applied_role": "contractor", "state": "active",
+            "operation_id": "grant-op", "revision": 1,
+        }
+        self.db.game_identities.find_one.return_value = {"game_player_id": "stable-player"}
+
+        operation = self.auth.revoke_contractor("123", "server", "save", 99, "shared-policy")
+
+        membership = self.db.memberships.replace_one.call_args.args[1]
+        job = self.db.permission_jobs.insert_one.call_args.args[0]
+        self.assertEqual(membership["desired_role"], "revoked")
+        self.assertEqual(membership["state"], "pending")
+        self.assertEqual(membership["applied_role"], "contractor")
+        self.assertEqual((job["_id"], job["role"], job["revision"]), (operation, "revoked", 2))
+
+    def test_shared_contractor_revocation_never_targets_personal_manager(self):
+        self.db.memberships.find_one.return_value = {
+            "_id": "manager-membership", "desired_role": "farm_manager",
+            "applied_role": "farm_manager", "state": "active", "farm_id": 2,
+        }
+        with self.assertRaisesRegex(ValueError, "Only a shared contractor"):
+            self.auth.revoke_contractor("123", "server", "save", 2, "shared-policy")
+        self.db.permission_jobs.insert_one.assert_not_called()
+
     def test_banking_requires_applied_active_manager(self):
         self.db.memberships.find_one.return_value = None
         with self.assertRaises(ValueError):

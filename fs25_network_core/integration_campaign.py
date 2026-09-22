@@ -27,6 +27,7 @@ from .agent import PairingAgent
 from .local_test import build_mod, simulate
 from .protocol_harness import MailboxOperationHarness, FarmlandOwnershipReferenceExecutor
 from .farm_lifecycle import FarmLifecycle
+from .authorization import AuthorizationManager
 from .business_workflows import ContractService
 from .admin_manager import AdminManager
 from .map_service import MapService
@@ -576,6 +577,17 @@ class _MemoryCollection:
         query = query or {}
         return _MemoryCursor(dict(row) for row in self.rows if self._matches(row, query))
 
+    def replace_one(self, query, replacement, **_kwargs):
+        index = next((index for index, row in enumerate(self.rows)
+                      if self._matches(row, query)), None)
+        if index is None:
+            if not _kwargs.get("upsert"):
+                return _MemoryResult(0)
+            self.rows.append(dict(replacement))
+            return _MemoryResult(1)
+        self.rows[index] = dict(replacement)
+        return _MemoryResult(1)
+
     def update_one(self, query, update, **_kwargs):
         index = next((index for index, row in enumerate(self.rows)
                       if self._matches(row, query)), None)
@@ -845,6 +857,77 @@ def _semantic_farmland_ownership(root: Path) -> Mapping[str, object]:
                 "owner_after_farm_id": operation.get("owner_farm_id"),
                 "duplicate_command_idempotent": True, "duplicate_receipt_idempotent": True,
                 "executor": "deterministic reference only; live GIANTS validation required"}}
+
+
+def _semantic_shared_contractor_authority(root: Path) -> Mapping[str, object]:
+    """Exercise shared contractor policy through the production-shaped mailbox.
+
+    The executor only proves Central/Agent/XML/receipt idempotency.  It is not
+    evidence that a real GIANTS permission table was mutated.
+    """
+    class SharedAuthorityCentral:
+        def __init__(self, lifecycle, authorization):
+            self.lifecycle = lifecycle
+            self.authorization = authorization
+            self.receipt_calls = 0
+
+        def __call__(self, request, timeout=10):
+            del timeout
+            if request.headers.get("X-sin-server-key") != "sin-campaign" \
+                    or request.headers.get("Authorization") != "Bearer campaign-secret":
+                raise AssertionError("shared authority scenario request was not authenticated")
+            path = urlsplit(request.full_url).path
+            if path.endswith("/api/server/operations"):
+                self.lifecycle.operations_for("sin-campaign", "campaign-save")
+                jobs = list(self.authorization.db.permission_jobs.find({
+                    "server_id": "sin-campaign", "save_id": "campaign-save", "state": "pending"}))
+                return _Response({"operations": [{"operation_id": job["_id"], "operation_type": "permission",
+                    "server_key": "sin-campaign", "save_key": "campaign-save", "state": "pending",
+                    "payload": {key: job[key] for key in ("game_player_id", "farm_id", "role", "revision")}}
+                    for job in jobs]})
+            if path.endswith("/api/server/operation-receipts"):
+                payload = json.loads(request.data.decode("utf-8"))
+                receipt = payload["receipt"]
+                self.receipt_calls += 1
+                state = self.authorization.acknowledge(receipt["operation_id"], "sin-campaign",
+                    "campaign-save", int(receipt["revision"]), receipt.get("receipt"))
+                return _Response({"status": "accepted", "operation_id": receipt["operation_id"], "state": state})
+            raise AssertionError(f"unexpected shared authority endpoint: {path}")
+
+    database = _MemoryDatabase()
+    authorization = AuthorizationManager(database)
+    lifecycle = FarmLifecycle(database, authorization)
+    database.db.sin_farms.insert_one({"_id": "system", "server_key": "sin-campaign",
+        "save_key": "campaign-save", "farm_type": "system", "canonical_name": "SiN Harvest",
+        "state": "active", "fs25_farm_id": 99})
+    database.db.game_identities.insert_one({"server_id": "sin-campaign", "save_id": "campaign-save",
+        "discord_id": "repton", "game_player_id": "stable-repton", "fs25_unique_user_id": "stable-repton"})
+    database.db.community_applications.insert_one({"_id": "repton", "state": "approved", "farm_name": "Repton Does"})
+    database.db.memberships.insert_one({"_id": "personal", "server_id": "sin-campaign", "save_id": "campaign-save",
+        "discord_id": "repton", "game_player_id": "stable-repton", "farm_id": 2,
+        "desired_role": "farm_manager", "applied_role": "farm_manager", "state": "active",
+        "operation_id": "personal-op", "revision": 1})
+    _write_binding_and_snapshot(root)
+    central = SharedAuthorityCentral(lifecycle, authorization)
+    agent = PairingAgent(root, "http://offline", central)
+    delivered = agent.process_operations_once()
+    executed = MailboxOperationHarness(root).consume_once()
+    acknowledged = agent.process_receipts_once()
+    relationships = sorted(database.db.memberships.find({"discord_id": "repton"}), key=lambda row: row["farm_id"])
+    replay = agent.process_operations_once()
+    if not (len(delivered) == 1 and delivered == executed and acknowledged == [delivered[0] + ".xml"]
+            and replay == [] and central.receipt_calls == 1
+            and [(row["farm_id"], row["desired_role"], row["applied_role"], row["state"])
+                for row in relationships] == [
+                    (2, "farm_manager", "farm_manager", "active"),
+                    (99, "contractor", "contractor", "active")]):
+        raise AssertionError("shared contractor mailbox reconciliation did not preserve simultaneous authority")
+    return {"report_schema": "sin.integration/1", "campaign": "sin-authoritative-integration", "status": "passed",
+            "checks": [{"id": "shared-contractor-authority", "status": "passed",
+                        "boundary": "central+agent+xml+reference-executor+receipt"}],
+            "shared_contractor_authority": {"personal_farm_id": 2, "shared_farm_id": 99,
+                "duplicate_delivery_idempotent": True,
+                "executor": "deterministic reference only; live GIANTS contractor validation required"}}
 
 
 def _semantic_release_evidence(root: Path) -> Mapping[str, object]:
@@ -1564,6 +1647,7 @@ SEMANTIC_SCENARIOS = {
     "server-pairing": NamedScenario("server-pairing", "Pair a server and publish its binding response.", _semantic_pairing),
     "farm-lifecycle": NamedScenario("farm-lifecycle", "Deliver and acknowledge a farm/land lifecycle operation.", _semantic_farm_lifecycle),
     "farmland-ownership": NamedScenario("farmland-ownership", "Reconcile an explicit owner read-back through the farmland command mailbox.", _semantic_farmland_ownership),
+    "shared-contractor-authority": NamedScenario("shared-contractor-authority", "Reconcile simultaneous personal-manager and shared-contractor authority.", _semantic_shared_contractor_authority),
     "player-registration": NamedScenario("player-registration", "Route a stable player registration request and response.", _registration_scenario),
     "activity-telemetry": NamedScenario("activity-telemetry", "Forward activity minutes before a disconnect watermark.", lambda root: {**{key: value for key, value in _full_scenario(root).items() if key in {"report_schema", "campaign", "status", "checks", "events"}}, "checks": [{"id": "activity-telemetry", "status": "passed", "boundary": "event-mailbox"}]}),
     "map-discovery": NamedScenario("map-discovery", "Forward bounded map geometry for map discovery.", _map_scenario),

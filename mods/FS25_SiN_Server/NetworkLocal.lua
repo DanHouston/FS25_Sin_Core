@@ -482,6 +482,35 @@ function FS25SiNServer:enforceAuthorizedContractorState(user, farm, syncReason)
     return true
 end
 
+function FS25SiNServer:revokeAuthorizedContractorState(user, farm, syncReason)
+    if user == nil or farm == nil or farm.farmId == nil or farm.farmId <= 0 then return false end
+    local userId = user:getId()
+    local manager, beforePermissions = self:readFarmManagerState(farm, userId)
+    -- A derived contractor grant must never be used to demote an independent
+    -- manager relationship. Central only creates this command for contractor
+    -- memberships; fail closed if runtime state contradicts that model.
+    if manager then error("refusing to revoke contractor permissions from a farm manager") end
+    if type(farm.defaultPermissions) ~= "table" or farm.setUserPermission == nil then
+        error("FS25 contractor revocation permission state is unavailable")
+    end
+    local permissionKeys = self:getFarmPermissionKeys(farm, beforePermissions)
+    if next(permissionKeys) == nil then error("FS25 contractor permission set is unavailable") end
+    for permission, _ in pairs(permissionKeys) do
+        local defaultPermission = farm.defaultPermissions[permission] == true
+        if beforePermissions[permission] ~= defaultPermission then
+            farm:setUserPermission(userId, permission, defaultPermission)
+        end
+    end
+    local afterManager, afterPermissions = self:readFarmManagerState(farm, userId)
+    self:replicateFarmPermissions(userId, farm, afterPermissions, afterManager, farm.farmId, syncReason)
+    for permission, _ in pairs(permissionKeys) do
+        if afterPermissions[permission] ~= (farm.defaultPermissions[permission] == true) then return false end
+    end
+    Logging.info("[SiN Authorization] contractor revoked sync=%s uniqueUserId=%s farmId=%s",
+        tostring(syncReason or "reconciliation"), self:shortIdentity(user:getUniqueUserId()), tostring(farm.farmId))
+    return afterManager == false
+end
+
 function FS25SiNServer:findPlayerObject(userId, user)
     if user ~= nil then
         if user.player ~= nil then return user.player end
@@ -1641,6 +1670,8 @@ function FS25SiNServer:processPermissionCommands()
             local requestedRole = command:getString("permissionCommand#role")
             if requestedRole == "contractor" then
                 self:processContractorPermissionCommand(command, operationId)
+            elseif requestedRole == "revoked" then
+                self:processContractorRevocationCommand(command, operationId)
             else
             local playerId = command:getString("permissionCommand#game_player_id")
             local farmId = command:getInt("permissionCommand#farm_id")
@@ -1693,6 +1724,32 @@ function FS25SiNServer:processContractorPermissionCommand(command, operationId)
         local ok, errorMessage = pcall(self.enforceAuthorizedContractorState, self, user, farm, "command")
         applied = ok and errorMessage == true
         reason = applied and "contractor permissions applied" or tostring(errorMessage)
+    end
+    local receipt = XMLFile.create("networkLocalReceipt", self.receiptDirectory .. operationId .. ".xml", "permissionReceipt")
+    receipt:setString("permissionReceipt#operation_id", operationId)
+    receipt:setString("permissionReceipt#server_id", command:getString("permissionCommand#server_id"))
+    receipt:setString("permissionReceipt#save_id", command:getString("permissionCommand#save_id"))
+    receipt:setString("permissionReceipt#revision", command:getString("permissionCommand#revision"))
+    receipt:setString("permissionReceipt#status", applied and "applied" or "pending_validation")
+    receipt:setString("permissionReceipt#receipt", reason)
+    self:saveReceiptAndConsume(receipt, command, operationId)
+end
+
+function FS25SiNServer:processContractorRevocationCommand(command, operationId)
+    local playerId = command:getString("permissionCommand#game_player_id")
+    local farmId = command:getInt("permissionCommand#farm_id")
+    local user = nil
+    if g_currentMission.userManager ~= nil then
+        for _, candidate in ipairs(g_currentMission.userManager:getUsers()) do
+            if tostring(candidate:getUniqueUserId()) == tostring(playerId) then user = candidate; break end
+        end
+    end
+    local farm = g_farmManager:getFarmById(farmId)
+    local applied, reason = false, "contractor user or farm unavailable"
+    if user ~= nil and farm ~= nil then
+        local ok, errorMessage = pcall(self.revokeAuthorizedContractorState, self, user, farm, "command-revoke")
+        applied = ok and errorMessage == true
+        reason = applied and "contractor permissions revoked" or tostring(errorMessage)
     end
     local receipt = XMLFile.create("networkLocalReceipt", self.receiptDirectory .. operationId .. ".xml", "permissionReceipt")
     receipt:setString("permissionReceipt#operation_id", operationId)

@@ -183,8 +183,8 @@ class FarmLifecycle:
                     "state": "active", "owner_discord_id": request.get("discord_id"),
                     "updated_at": self._now()}})
             try:
-                contractor_operation = self._ensure_contractor_authorization(
-                    request, server_key, save_key, int(farm_id), request.get("approved_by") or "farm-provisioning")
+                contractor_operation = self._reconcile_shared_contractor_authorizations(
+                    server_key, save_key).get(str(request["discord_id"]))
             except Exception as contractor_error:
                 # Shared-farm access is an independent relationship. A
                 # temporary contractor failure must not roll back or obscure
@@ -205,29 +205,78 @@ class FarmLifecycle:
             self._manager_authorization_error(request_id, farm_id, mapping_id, error)
             return None
 
-    def _ensure_contractor_authorization(self, request, server_key, save_key, personal_farm_id, approved_by):
-        """Queue shared SiN Harvest access without replacing personal authority."""
-        system = self.db.sin_farms.find_one({
+    def _shared_system_farm(self, server_key, save_key):
+        """Return one authoritative SiN Harvest mapping, or fail closed."""
+        mappings = list(self.db.sin_farms.find({
             "server_key": server_key, "save_key": save_key,
             "farm_type": SYSTEM_FARM_TYPE, "canonical_name": SYSTEM_FARM_NAME,
-            "state": "active", "fs25_farm_id": {"$exists": True}})
-        if not isinstance(system, dict) or system.get("fs25_farm_id") is None:
+            "state": "active", "fs25_farm_id": {"$exists": True}}))
+        if len(mappings) != 1:
             return None
+        mapping = mappings[0]
+        try:
+            farm_id = int(mapping.get("fs25_farm_id"))
+        except (TypeError, ValueError):
+            return None
+        return mapping if farm_id > 0 else None
+
+    def _reconcile_shared_contractor_authorizations(self, server_key, save_key):
+        """Derive SiN Harvest access for every currently approved identity.
+
+        A contractor relationship is a second, farm-scoped membership.  It is
+        intentionally independent of farm requests and personal manager
+        authority, so existing approved/registered members receive repair on
+        the normal Agent operations poll after a deploy or restart.
+        """
+        system = self._shared_system_farm(server_key, save_key)
+        if not system:
+            return {}
         shared_farm_id = int(system["fs25_farm_id"])
-        if shared_farm_id == int(personal_farm_id):
-            return None
-        operation = self.authorization.assign(
-            request["discord_id"], server_key, save_key, shared_farm_id,
-            "contractor", {shared_farm_id: SYSTEM_FARM_NAME}, approved_by,
-            allow_unapproved_identity=True, idempotent=True)
-        membership = self.db.memberships.find_one({
-            "server_id": server_key, "save_id": save_key,
-            "discord_id": str(request["discord_id"]), "farm_id": shared_farm_id,
-            "desired_role": "contractor"})
-        if isinstance(membership, dict) and membership.get("state") == "active" \
-                and membership.get("applied_role") == "contractor":
-            return operation
-        return operation
+        eligible = {}
+        identities = self.db.game_identities.find({"server_id": server_key, "save_id": save_key})
+        for identity in identities:
+            discord_id = str(identity.get("discord_id") or "")
+            if not discord_id or not identity.get("game_player_id"):
+                continue
+            application = self.db.community_applications.find_one(
+                {"_id": discord_id, "state": "approved"})
+            if application:
+                eligible[discord_id] = identity
+
+        operations = {}
+        for discord_id in sorted(eligible):
+            try:
+                operation = self.authorization.assign(
+                    discord_id, server_key, save_key, shared_farm_id,
+                    "contractor", {shared_farm_id: SYSTEM_FARM_NAME},
+                    "shared-contractor-policy", allow_unapproved_identity=True,
+                    idempotent=True)
+                if operation:
+                    operations[discord_id] = operation
+            except ValueError:
+                # Identity and relationship checks are deliberately re-run by
+                # AuthorizationManager.  A malformed/ambiguous record must
+                # suppress this grant rather than guess an authority target.
+                continue
+
+        relationships = self.db.memberships.find({
+            "server_id": server_key, "save_id": save_key, "farm_id": shared_farm_id,
+            "desired_role": {"$in": ["contractor", "revoked"]}})
+        for relationship in relationships:
+            discord_id = str(relationship.get("discord_id") or "")
+            if discord_id in eligible or relationship.get("desired_role") == "revoked":
+                continue
+            try:
+                operation = self.authorization.revoke_contractor(
+                    discord_id, server_key, save_key, shared_farm_id,
+                    "shared-contractor-policy", idempotent=True)
+                if operation:
+                    operations[discord_id] = operation
+            except ValueError:
+                # Keep a malformed relationship visible for diagnosis; do not
+                # mutate an unknown farm/user relationship as a side effect.
+                continue
+        return operations
 
     def _repair_manager_authorizations(self, server_key, save_key):
         """Retry missing owner assignments during the existing Agent poll."""
@@ -247,24 +296,7 @@ class FarmLifecycle:
                 request.get("mapping_id"), request.get("farm_name"))
 
     def _repair_contractor_authorizations(self, server_key, save_key):
-        requests = self.db.farm_requests.find({
-            "server_key": server_key, "save_key": save_key,
-            "state": {"$in": ["active", "awaiting_manager", "manager_authorization_required"]},
-            "farm_id": {"$exists": True}}).sort("updated_at", 1).limit(50)
-        for request in list(requests):
-            try:
-                operation = self._ensure_contractor_authorization(
-                    request, server_key, save_key, request.get("farm_id"),
-                    request.get("approved_by") or "contractor-repair")
-                if operation:
-                    self.db.farm_requests.update_one({"_id": request.get("_id")}, {"$set": {
-                        "contractor_permission_operation_id": operation,
-                        "contractor_authorization_state": "pending",
-                        "updated_at": self._now()}})
-            except Exception:
-                # Keep the personal farm request authoritative and retry the
-                # independent shared-farm relationship on the next poll.
-                continue
+        self._reconcile_shared_contractor_authorizations(server_key, save_key)
 
     def available_fields(self, server_key, save_key):
         snapshot = self.latest_snapshot(server_key, save_key)

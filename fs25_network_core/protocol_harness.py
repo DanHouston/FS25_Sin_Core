@@ -43,6 +43,14 @@ class MailboxOperationHarness:
                 operation_type=root.get("operation_type", ""),
                 status="already_applied" if already_executed else status,
             )
+            # Permission receipts must retain their exact Central scope and
+            # revision.  This reference harness still does not emulate FS25;
+            # it only keeps the Agent/XML receipt contract realistic enough to
+            # exercise receipt-gated reconciliation.
+            for key in ("server_id", "save_id", "revision"):
+                if root.get(key) is not None:
+                    receipt.set(key, root.get(key))
+            receipt.set("receipt", "deterministic reference executor")
             ElementTree.ElementTree(receipt).write(
                 receipt_path, encoding="utf-8", xml_declaration=True)
             applied.append(operation_id)
