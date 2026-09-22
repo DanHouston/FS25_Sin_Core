@@ -8,7 +8,7 @@
     "real_passes": ["baseline", "deployment", "clean_startup", "map_acquisition", "player_identity", "activity_idle_afk", "normal_disconnect", "agent_recovery", "central_recovery", "jiN_durable_interactions", "cumulative_cold_restart"],
     "real_pass_with_findings": ["farm_authority", "reconnect", "fs25_runtime_generation"],
     "real_partial_or_failed": ["contract_map_orientation_and_context", "contract_scope", "autocomplete_resilience"],
-    "synthetic_only_or_live_deferred": ["positive_cross_farm_accept", "renderer_failure_fallback", "fresh_registration", "multi_server_isolation", "actual_farmland_parcel_geometry", "vanilla_reconnect_spawn_behavior", "authoritative_farmland_ownership_assignment", "shared_sin_harvest_contractor_authority"],
+    "synthetic_only_or_live_deferred": ["positive_cross_farm_accept", "renderer_failure_fallback", "fresh_registration", "multi_server_isolation", "actual_farmland_parcel_geometry", "vanilla_reconnect_spawn_behavior", "authoritative_farmland_ownership_assignment", "shared_sin_harvest_contractor_authority", "authoritative_fs25_money_and_loans", "authoritative_fs25_farm_deletion"],
     "findings": [
       "observed_farm_id was captured at connect rather than authoritative activity time",
       "personal farm authority and SiN Harvest contractor authority must coexist",

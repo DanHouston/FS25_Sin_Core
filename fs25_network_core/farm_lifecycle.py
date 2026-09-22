@@ -5,6 +5,7 @@ an FS25 numeric farm ID; IDs are learned from authenticated game receipts.
 """
 from datetime import datetime, timezone
 import hashlib
+from .world_generation import WorldGenerationRegistry
 
 
 SYSTEM_FARM_NAME = "SiN Harvest"
@@ -27,24 +28,42 @@ class FarmLifecycle:
             from .authorization import AuthorizationManager
             authorization = AuthorizationManager(database)
         self.authorization = authorization
+        self.worlds = WorldGenerationRegistry(database)
 
     @staticmethod
     def _now():
         return datetime.now(timezone.utc)
 
-    def _scope(self, server_key, save_key):
-        return {"server_key": str(server_key), "save_key": str(save_key)}
+    def current_world_id(self, server_key, save_key):
+        return self.worlds.active_id(server_key, save_key)
 
-    def latest_snapshot(self, server_key, save_key):
-        return self.db.server_snapshots.find_one(self._scope(server_key, save_key), sort=[("received_at", -1)])
+    def require_current_world(self, server_key, save_key, world_id):
+        return self.worlds.require_active(server_key, save_key, world_id)
+
+    def _scope(self, server_key, save_key, world_id=None):
+        scope = {"server_key": str(server_key), "save_key": str(save_key)}
+        active = str(world_id) if world_id else self.current_world_id(server_key, save_key)
+        if active:
+            scope["world_id"] = active
+        return scope
+
+    def latest_snapshot(self, server_key, save_key, world_id=None):
+        return self.db.server_snapshots.find_one(self._scope(server_key, save_key, world_id), sort=[("received_at", -1)])
 
     def record_snapshot(self, server_key, save_key, snapshot):
         if not isinstance(snapshot, dict) or snapshot.get("source") != "game":
             raise ValueError("game snapshot is required")
+        world_id = snapshot.get("world_id")
+        if world_id:
+            self.worlds.activate(server_key, save_key, world_id, evidence={
+                "map_id": snapshot.get("map_id"), "savegame_index": snapshot.get("savegame_index")})
         now = self._now()
         record = dict(snapshot)
-        record.update(self._scope(server_key, save_key), received_at=now)
-        self.db.server_snapshots.update_one(self._scope(server_key, save_key), {"$set": record}, upsert=True)
+        scope = self._scope(server_key, save_key, world_id)
+        record.update(scope, received_at=now)
+        self.db.server_snapshots.update_one(scope, {"$set": record}, upsert=True)
+        if world_id:
+            self.ensure_system_farm(server_key, save_key)
         return record
 
     def _operation(self, operation_id):
@@ -56,6 +75,9 @@ class FarmLifecycle:
                       server_key=server_key, save_key=save_key, payload=payload,
                       request_id=request_id, state="pending", attempts=0,
                       created_at=now, updated_at=now)
+        world_id = self.current_world_id(server_key, save_key)
+        if world_id:
+            values["world_id"] = world_id
         insert_values = dict(values)
         insert_values.pop("updated_at", None)
         self.db.farm_operations.update_one(
@@ -98,15 +120,18 @@ class FarmLifecycle:
                          if row.get("fs25_farm_id") is not None}
             if known_ids and known_ids != {matches[0]}:
                 return {"status": "reconciliation_required", "reason": "central and game farm IDs disagree"}
+            world_id = self.current_world_id(server_key, save_key)
             mapping_id = mappings[0].get("_id") if mappings and mappings[0].get("_id") else _operation_id(
-                "farm", server_key, save_key, "ensure-system-farm")
+                "farm", server_key, save_key, world_id or "legacy", "ensure-system-farm")
             now = self._now()
-            operation_id = _operation_id("ensure-system-farm", server_key, save_key)
+            operation_id = _operation_id("ensure-system-farm", server_key, save_key, world_id or "legacy")
             mapping_values = {"_id": mapping_id, "server_key": server_key, "save_key": save_key,
                               "canonical_name": SYSTEM_FARM_NAME, "farm_type": SYSTEM_FARM_TYPE,
                               "owner_discord_id": None, "source_request_id": None,
                               "state": "active", "operation_id": operation_id,
                               "fs25_farm_id": matches[0], "updated_at": now}
+            if world_id:
+                mapping_values["world_id"] = world_id
             self.db.sin_farms.update_one({"_id": mapping_id}, {
                 # Keep all fields in one operator to avoid MongoDB path
                 # conflicts when this adopts a record left by a failed receipt.
@@ -122,7 +147,8 @@ class FarmLifecycle:
             return {"status": "active", "adopted": True,
                     "mapping": mapping_values}
 
-        operation_id = _operation_id("ensure-system-farm", server_key, save_key)
+        world_id = self.current_world_id(server_key, save_key)
+        operation_id = _operation_id("ensure-system-farm", server_key, save_key, world_id or "legacy")
         existing_operation = self._operation(operation_id)
         if existing_operation and existing_operation.get("state") in {"succeeded", "reconciliation_required"}:
             return {"status": "reconciliation_required", "operation": existing_operation,
@@ -133,8 +159,13 @@ class FarmLifecycle:
                 "mapping": mappings[0] if len(mappings) == 1 else None}
 
     def ensure_for_server(self, server_key):
-        return [self.ensure_system_farm(server_key, row["save_key"])
-                for row in self.db.sin_saves.find({"server_key": server_key})]
+        results = []
+        for row in self.db.sin_saves.find({"server_key": server_key}):
+            if self.current_world_id(server_key, row["save_key"]):
+                results.append(self.ensure_system_farm(server_key, row["save_key"]))
+            else:
+                results.append({"status": "world_generation_required", "save_key": row["save_key"]})
+        return results
 
     def _manager_authorization_error(self, request_id, farm_id, mapping_id, error):
         """Keep a failed manager handoff explicitly recoverable.
@@ -165,12 +196,16 @@ class FarmLifecycle:
             membership_operation = self.authorization.assign(
                 request["discord_id"], server_key, save_key, int(farm_id),
                 "farm_manager", {int(farm_id): farm_name or ""},
-                request.get("approved_by") or "farm-provisioning",
+                request.get("approved_by") or "farm-provisioning", world_id=self.current_world_id(server_key, save_key),
                 allow_unapproved_identity=True, idempotent=True)
-            membership = self.db.memberships.find_one({
+            membership_query = {
                 "server_id": server_key, "save_id": save_key,
                 "discord_id": str(request["discord_id"]), "farm_id": int(farm_id),
-                "desired_role": "farm_manager"})
+                "desired_role": "farm_manager"}
+            world_id = self.current_world_id(server_key, save_key)
+            if world_id:
+                membership_query["world_id"] = world_id
+            membership = self.db.memberships.find_one(membership_query)
             state = "active" if isinstance(membership, dict) and membership.get("state") == "active" \
                 and membership.get("applied_role") == "farm_manager" else "awaiting_manager"
             values = {"state": state, "farm_id": int(farm_id), "mapping_id": mapping_id,
@@ -208,7 +243,7 @@ class FarmLifecycle:
     def _shared_system_farm(self, server_key, save_key):
         """Return one authoritative SiN Harvest mapping, or fail closed."""
         mappings = list(self.db.sin_farms.find({
-            "server_key": server_key, "save_key": save_key,
+            **self._scope(server_key, save_key),
             "farm_type": SYSTEM_FARM_TYPE, "canonical_name": SYSTEM_FARM_NAME,
             "state": "active", "fs25_farm_id": {"$exists": True}}))
         if len(mappings) != 1:
@@ -249,7 +284,7 @@ class FarmLifecycle:
                 operation = self.authorization.assign(
                     discord_id, server_key, save_key, shared_farm_id,
                     "contractor", {shared_farm_id: SYSTEM_FARM_NAME},
-                    "shared-contractor-policy", allow_unapproved_identity=True,
+                    "shared-contractor-policy", world_id=self.current_world_id(server_key, save_key), allow_unapproved_identity=True,
                     idempotent=True)
                 if operation:
                     operations[discord_id] = operation
@@ -259,8 +294,12 @@ class FarmLifecycle:
                 # suppress this grant rather than guess an authority target.
                 continue
 
+        membership_scope = {"server_id": server_key, "save_id": save_key, "farm_id": shared_farm_id}
+        world_id = self.current_world_id(server_key, save_key)
+        if world_id:
+            membership_scope["world_id"] = world_id
         relationships = self.db.memberships.find({
-            "server_id": server_key, "save_id": save_key, "farm_id": shared_farm_id,
+            **membership_scope,
             "desired_role": {"$in": ["contractor", "revoked"]}})
         for relationship in relationships:
             discord_id = str(relationship.get("discord_id") or "")
@@ -269,7 +308,7 @@ class FarmLifecycle:
             try:
                 operation = self.authorization.revoke_contractor(
                     discord_id, server_key, save_key, shared_farm_id,
-                    "shared-contractor-policy", idempotent=True)
+                    "shared-contractor-policy", world_id=world_id, idempotent=True)
                 if operation:
                     operations[discord_id] = operation
             except ValueError:
@@ -281,14 +320,14 @@ class FarmLifecycle:
     def _repair_manager_authorizations(self, server_key, save_key):
         """Retry missing owner assignments during the existing Agent poll."""
         requests = self.db.farm_requests.find({
-            "server_key": server_key, "save_key": save_key,
+            **self._scope(server_key, save_key),
             "state": {"$in": ["awaiting_manager", "manager_authorization_required"]},
             "farm_id": {"$exists": True}}).sort("updated_at", 1).limit(50)
         for request in list(requests):
             operation_id = request.get("operation_id")
             if operation_id:
                 operation = self.db.farm_operations.find_one({"_id": operation_id,
-                    "server_key": server_key, "save_key": save_key})
+                    **self._scope(server_key, save_key)})
                 if isinstance(operation, dict) and operation.get("state") != "succeeded":
                     continue
             self._ensure_manager_authorization(
@@ -320,11 +359,14 @@ class FarmLifecycle:
             raise ValueError("That starting field is not present on the current save")
         if owner != 0:
             raise ValueError("That starting field is no longer available")
-        request_id = hashlib.sha256(f"{server_key}|{save_key}|{discord_id}".encode()).hexdigest()
+        world_id = self.current_world_id(server_key, save_key)
+        request_id = hashlib.sha256(f"{server_key}|{save_key}|{world_id or 'legacy'}|{discord_id}".encode()).hexdigest()
         now = self._now()
         record = dict(_id=request_id, discord_id=str(discord_id), server_key=server_key, save_key=save_key,
                       farm_name=str(application["farm_name"]).strip(), starting_field=field_id,
                       state="pending", created_at=now, updated_at=now)
+        if world_id:
+            record["world_id"] = world_id
         self.db.farm_requests.update_one({"_id": request_id}, {"$setOnInsert": record}, upsert=True)
         return self.db.farm_requests.find_one({"_id": request_id})
 
@@ -332,14 +374,14 @@ class FarmLifecycle:
         return self.db.farm_requests.find_one({"discord_id": str(discord_id)}, sort=[("updated_at", -1), ("created_at", -1)])
 
     def requests(self, server_key, save_key):
-        return list(self.db.farm_requests.find({"server_key": server_key, "save_key": save_key,
+        return list(self.db.farm_requests.find({**self._scope(server_key, save_key),
             "state": {"$in": ["pending", "requested"]}}).sort("created_at", 1).limit(25))
 
     def reject_request(self, request_id, server_key, save_key, approved_by, reason):
         if not approved_by or not isinstance(reason, str) or not reason.strip() or len(reason) > 300:
             raise ValueError("A staff reviewer and reason (1-300 characters) are required")
-        result = self.db.farm_requests.update_one({"_id": request_id, "server_key": server_key,
-            "save_key": save_key, "state": {"$in": ["pending", "requested"]}}, {"$set": {
+        result = self.db.farm_requests.update_one({"_id": request_id, **self._scope(server_key, save_key),
+            "state": {"$in": ["pending", "requested"]}}, {"$set": {
                 "state": "rejected", "reviewed_by": str(approved_by), "reason": reason.strip(),
                 "reviewed_at": self._now(), "updated_at": self._now()}})
         if getattr(result, "modified_count", 1) != 1:
@@ -348,7 +390,7 @@ class FarmLifecycle:
     def approve_request(self, request_id, server_key, save_key, approved_by):
         if not approved_by:
             raise ValueError("An operator is required")
-        request = self.db.farm_requests.find_one({"_id": request_id, "server_key": server_key, "save_key": save_key})
+        request = self.db.farm_requests.find_one({"_id": request_id, **self._scope(server_key, save_key)})
         if not request:
             raise ValueError("Unknown farm request")
         if request.get("state") in {"provisioning", "awaiting_manager", "active"} and request.get("operation_id"):
@@ -365,7 +407,7 @@ class FarmLifecycle:
             raise ValueError("Requested farmland is not present on the current save")
         if fields[farmland_id] != 0:
             raise ValueError("Requested farmland is already owned")
-        operation_id = _operation_id("provision-farm", request_id)
+        operation_id = _operation_id("provision-farm", self.current_world_id(server_key, save_key) or "legacy", request_id)
         self._queue_operation(operation_id, "provision_farm", server_key, save_key,
                               {"farm_type": MEMBER_FARM_TYPE, "canonical_name": request["farm_name"],
                                "request_id": request_id, "farmland_id": farmland_id}, request_id=request_id)
@@ -404,17 +446,18 @@ class FarmLifecycle:
         if fields[farmland_id] not in {0, farm_id}:
             raise ValueError("Farmland is already owned; reassignment is denied")
         mapping = self.db.sin_farms.find_one({"_id": request.get("mapping_id"),
-            "server_key": server_key, "save_key": save_key, "fs25_farm_id": farm_id})
+            **self._scope(server_key, save_key), "fs25_farm_id": farm_id})
         if not mapping:
             raise ValueError("Destination farm is not confirmed by the authoritative farm receipt")
         attempt = int(request.get("land_attempt", 0)) + 1
-        operation_id = _operation_id("assign-farmland", request["_id"], farmland_id, attempt)
+        operation_id = _operation_id("assign-farmland", self.current_world_id(server_key, save_key) or "legacy",
+                                     request["_id"], farmland_id, attempt)
         self._queue_operation(operation_id, "assign_farmland", server_key, save_key, {
             "farmland_id": farmland_id, "farm_id": farm_id,
             "request_id": str(request["_id"]), "authorized_by": str(approved_by),
         }, request_id=request["_id"])
-        result = self.db.farm_requests.update_one({"_id": request["_id"], "server_key": server_key,
-            "save_key": save_key, "state": "land_pending"}, {"$set": {
+        result = self.db.farm_requests.update_one({"_id": request["_id"], **self._scope(server_key, save_key),
+            "state": "land_pending"}, {"$set": {
                 "state": "land_assigning", "land_operation_id": operation_id,
                 "assigned_farmland_id": farmland_id, "land_attempt": attempt,
                 "land_authorized_by": str(approved_by),
@@ -423,23 +466,31 @@ class FarmLifecycle:
             raise ValueError("Farm land state changed; retry after refreshing status")
         return operation_id
 
-    def operations_for(self, server_key, save_key):
+    def operations_for(self, server_key, save_key, world_id=None):
+        if world_id is not None:
+            self.require_current_world(server_key, save_key, world_id)
         # Registration/permission completion is not pushed from Discord to the
         # game server.  Reuse this existing Agent poll as the repair cadence for
         # a provisioned farm whose owner assignment is missing or incomplete.
         self._repair_manager_authorizations(server_key, save_key)
         self._repair_contractor_authorizations(server_key, save_key)
-        rows = list(self.db.farm_operations.find({"server_key": server_key, "save_key": save_key,
+        rows = list(self.db.farm_operations.find({**self._scope(server_key, save_key, world_id),
             "state": {"$in": ["pending", "dispatched"]}}).sort("created_at", 1).limit(50))
         for row in rows:
             self.db.farm_operations.update_one({"_id": row["_id"], "state": {"$in": ["pending", "dispatched"]}},
                 {"$set": {"state": "dispatched", "updated_at": self._now()}, "$inc": {"attempts": 1}})
         return rows
 
-    def accept_receipt(self, server_key, save_key, receipt):
+    def accept_receipt(self, server_key, save_key, receipt, world_id=None):
         if not isinstance(receipt, dict) or not receipt.get("operation_id"):
             raise ValueError("operation receipt is required")
-        operation = self.db.farm_operations.find_one({"_id": receipt["operation_id"], "server_key": server_key, "save_key": save_key})
+        expected_world_id = self.current_world_id(server_key, save_key)
+        if world_id is not None:
+            self.require_current_world(server_key, save_key, world_id)
+        if expected_world_id and str(receipt.get("world_id") or "") != expected_world_id:
+            raise ValueError("operation receipt world generation does not match current FS25 save")
+        operation = self.db.farm_operations.find_one({"_id": receipt["operation_id"],
+            **self._scope(server_key, save_key, world_id)})
         if not operation:
             raise ValueError("unknown farm operation")
         if operation.get("operation_type") == "assign_farmland":
@@ -466,10 +517,12 @@ class FarmLifecycle:
             # Provisioning only creates/adopts the named farm. Land is a
             # separate explicit, receipt-gated operation from land_pending.
             pass
-        mapping_id = _operation_id("farm", server_key, save_key, payload.get("request_id") or operation["operation_id"])
+        world_id = operation.get("world_id") or self.current_world_id(server_key, save_key)
+        mapping_id = _operation_id("farm", server_key, save_key, world_id or "legacy",
+                                   payload.get("request_id") or operation["operation_id"])
         if operation.get("operation_type") == "ensure_farm":
             existing_system = list(self.db.sin_farms.find({
-                "server_key": server_key, "save_key": save_key,
+                **self._scope(server_key, save_key, world_id),
                 "farm_type": SYSTEM_FARM_TYPE, "canonical_name": SYSTEM_FARM_NAME}))
             existing_ids = {int(row["fs25_farm_id"]) for row in existing_system
                             if row.get("fs25_farm_id") is not None}
@@ -493,6 +546,8 @@ class FarmLifecycle:
                    "state": "active" if operation["operation_type"] == "ensure_farm" else "provisioned",
                    "starting_farmland_id": payload.get("farmland_id"), "operation_id": operation["operation_id"],
                    "updated_at": self._now()}
+        if world_id:
+            mapping["world_id"] = world_id
         insert_mapping = dict(mapping)
         insert_mapping.pop("updated_at", None)
         self.db.sin_farms.update_one({"_id": mapping_id}, {"$setOnInsert": insert_mapping, "$set": {
@@ -535,7 +590,8 @@ class FarmLifecycle:
             expected_farmland = expected_farm = None
         receipt_scope_matches = (
             (receipt.get("server_id") is None or str(receipt.get("server_id")) == str(server_key))
-            and (receipt.get("save_id") is None or str(receipt.get("save_id")) == str(save_key)))
+            and (receipt.get("save_id") is None or str(receipt.get("save_id")) == str(save_key))
+            and (not operation.get("world_id") or str(receipt.get("world_id") or "") == str(operation["world_id"])))
         valid = success and farmland_id == expected_farmland and farm_id == expected_farm \
             and owner_after == expected_farm and owner_before is not None and receipt_scope_matches
         if not valid:
@@ -551,7 +607,7 @@ class FarmLifecycle:
         if operation.get("state") == "succeeded":
             return operation
         request = self.db.farm_requests.find_one({"_id": payload.get("request_id"),
-            "server_key": server_key, "save_key": save_key, "state": "land_assigning"})
+            **self._scope(server_key, save_key, operation.get("world_id")), "state": "land_assigning"})
         if not request:
             self.db.farm_operations.update_one({"_id": operation["_id"]}, {"$set": {
                 "state": "reconciliation_required", "receipt": receipt, "updated_at": self._now()}})

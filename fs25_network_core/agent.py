@@ -156,6 +156,13 @@ class PairingAgent:
             raise ValueError("runtime FS25 save ID is unavailable")
         return save_id
 
+    def _runtime_world_id(self):
+        root = ElementTree.parse(self.directory / "snapshot.xml").getroot()
+        world_id = root.get("worldId") if root.tag == "networkLocal" else None
+        if not world_id:
+            raise ValueError("authoritative FS25 world generation is unavailable")
+        return world_id
+
     def _get_clock_policy(self, server_key, credential, fs25_save_id):
         url = self.backend_root + "/api/server/clock?fs25_save_id=" + quote(str(fs25_save_id), safe="")
         request = Request(url, headers={"X-SiN-Server-Key": server_key,
@@ -165,8 +172,9 @@ class PairingAgent:
                 raise RuntimeError("clock API rejected request")
             return json.loads(response.read().decode("utf-8"))
 
-    def _get_operations(self, server_key, credential, fs25_save_id):
-        url = self.operations_url + "?fs25_save_id=" + quote(str(fs25_save_id), safe="")
+    def _get_operations(self, server_key, credential, fs25_save_id, world_id):
+        url = (self.operations_url + "?fs25_save_id=" + quote(str(fs25_save_id), safe="")
+               + "&world_id=" + quote(str(world_id), safe=""))
         request = Request(url, headers={"X-SiN-Server-Key": server_key,
                                         "Authorization": "Bearer " + credential}, method="GET")
         with self.opener(request, timeout=10) as response:
@@ -177,8 +185,8 @@ class PairingAgent:
             raise ValueError("operation API returned an invalid response")
         return result["operations"]
 
-    def _post_receipt(self, server_key, credential, fs25_save_id, receipt):
-        body = json.dumps({"fs25_save_id": str(fs25_save_id), "receipt": receipt}).encode("utf-8")
+    def _post_receipt(self, server_key, credential, fs25_save_id, world_id, receipt):
+        body = json.dumps({"fs25_save_id": str(fs25_save_id), "world_id": str(world_id), "receipt": receipt}).encode("utf-8")
         request = Request(self.receipts_url, data=body,
                           headers={"Content-Type": "application/json", "X-SiN-Server-Key": server_key,
                                    "Authorization": "Bearer " + credential}, method="POST")
@@ -208,6 +216,7 @@ class PairingAgent:
         return {"source": "game", "session": root.get("session", ""),
                 "sequence": int(root.get("sequence", "0")),
                 "savegame_index": int(root.get("savegameIndex", "0")),
+                "world_id": root.get("worldId", ""), "map_id": root.get("mapId", ""),
                 "farms": farms, "players": players, "farmlands": farmlands}
 
     def process_operations_once(self):
@@ -216,7 +225,8 @@ class PairingAgent:
         try:
             server_key, credential = self._binding()
             fs25_save_id = self._runtime_save_id()
-            operations = self._get_operations(server_key, credential, fs25_save_id)
+            world_id = self._runtime_world_id()
+            operations = self._get_operations(server_key, credential, fs25_save_id, world_id)
         except (ElementTree.ParseError, ValueError, OSError, HTTPError, URLError, TimeoutError, RuntimeError, json.JSONDecodeError):
             return []
         delivered = []
@@ -234,6 +244,7 @@ class PairingAgent:
             if not destination.exists():
                 values = {"operation_id": operation_id, "operation_type": operation.get("operation_type", ""),
                           "server_id": server_key, "save_id": operation.get("save_key", ""),
+                          "world_id": world_id,
                           **{str(key): value for key, value in payload.items()}}
                 root_name = "permissionCommand" if operation.get("operation_type") == "permission" else "networkLocalCommand"
                 root = ElementTree.Element(root_name, schemaVersion="1",
@@ -261,6 +272,7 @@ class PairingAgent:
         try:
             server_key, credential = self._binding()
             fs25_save_id = self._runtime_save_id()
+            world_id = self._runtime_world_id()
         except (ElementTree.ParseError, ValueError, OSError):
             return []
         receipts = []
@@ -275,7 +287,7 @@ class PairingAgent:
                 receipt = dict(root.attrib)
                 receipt["result"] = {key: value for key, value in receipt.items()
                                       if key not in {"operation_id", "operation_type", "server_id", "save_id", "status", "receipt"}}
-                self._post_receipt(server_key, credential, fs25_save_id, receipt)
+                self._post_receipt(server_key, credential, fs25_save_id, world_id, receipt)
                 path.unlink()
                 receipts.append(path.name)
             except (ElementTree.ParseError, ValueError):
@@ -292,7 +304,9 @@ class PairingAgent:
         try:
             server_key, credential = self._binding()
             fs25_save_id = self._runtime_save_id()
-            url = self.manager_authority_url + "?fs25_save_id=" + quote(str(fs25_save_id), safe="")
+            world_id = self._runtime_world_id()
+            url = (self.manager_authority_url + "?fs25_save_id=" + quote(str(fs25_save_id), safe="")
+                   + "&world_id=" + quote(str(world_id), safe=""))
             request = Request(url, headers={"X-SiN-Server-Key": server_key,
                                             "Authorization": "Bearer " + credential}, method="GET")
             with self.opener(request, timeout=10) as response:
@@ -305,7 +319,7 @@ class PairingAgent:
             contractors = payload.get("contractors", []) if isinstance(payload, dict) else []
             if not isinstance(contractors, list):
                 raise ValueError("contractor authority API returned an invalid response")
-            root = ElementTree.Element("managerAuthority", schemaVersion="1")
+            root = ElementTree.Element("managerAuthority", schemaVersion="1", worldId=str(world_id))
             for manager in managers:
                 if isinstance(manager, dict) and manager.get("game_player_id") is not None:
                     ElementTree.SubElement(root, "manager", gamePlayerId=str(manager["game_player_id"]),

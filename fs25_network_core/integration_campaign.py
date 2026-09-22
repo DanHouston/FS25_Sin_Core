@@ -641,7 +641,7 @@ def _write_binding_and_snapshot(root: Path, server_key="sin-campaign",
         encoding="utf-8")
     (root / "snapshot.xml").write_text(
         f'<networkLocal source="game" session="campaign-session" sequence="1" '
-        f'savegameIndex="{save_id}"><farms><farm farmId="2" name="Campaign Farm"/>'
+        f'savegameIndex="{save_id}" worldId="campaign-world-a"><farms><farm farmId="2" name="Campaign Farm"/>'
         '</farms><players><player uniqueId="stable-player" userId="7" '
         'name="Campaign Player" farmId="2" connected="true"/></players></networkLocal>',
         encoding="utf-8")

@@ -56,12 +56,66 @@ corresponding live evidence: `registration`, `control_plane_backlog`,
 scenarios used to implement them. Release builds copy both that manifest and the
 secret-free `integration-campaign.json` into the release directory.
 
+## Farm economy capability gate
+
+The source-backed boundary for farm cash, loans, parcel pricing, and farm
+deletion is recorded in [farm-economy-capability-audit.md](farm-economy-capability-audit.md).
+Do not enable starting cash/loans, FS25 money administration, cash-to-bank
+movement, or farm deletion until its dedicated-save runtime probes establish
+the exact FS25 APIs, replication, persistence, and read-after-write evidence.
+The roster’s Farm 14 anomaly is a captured runtime-farm record with an empty
+name; it remains an investigation item, not an authorization to mutate it.
+
 New mod runtimes put the final emitted minute sequence on disconnect. Central
 returns a retryable response until all minutes through that watermark are
 committed, then emits one durable summary containing duration, active, idle,
 and AFK totals. Legacy disconnects without a watermark retain the compatible
 policy of closing from minutes already committed; they should be upgraded when
 ordering guarantees are required.
+
+## FS25 world-generation boundary — Hobo's Hollow live gate
+
+`server_key` and `save_key` are endpoint selectors, not an FS25 world
+identity. The server mod now creates `FS25_SiN_Server_world.xml` beside the
+actual `missionInfo.savegameDirectory` files, with one opaque marker. It reads
+the marker unchanged on normal restart; a replacement/fresh save has no marker
+and receives a new marker. Restoring a copied save restores that save's marker.
+This is a SiN-managed marker, not a claimed GIANTS save UUID. Its location and
+`missionInfo.savegameDirectory` persistence are **LIVE VALIDATION REQUIRED**.
+
+Until a snapshot bearing that marker reaches Central, every world-bound action
+is fail-closed. Central archives legacy/no-marker rows and prior marker rows;
+they remain audit history but cannot be served as current farms, farmland,
+permissions, operations, receipts, or map state. Network identity and the
+central ledger are deliberately not deleted. FS25 numeric IDs are therefore
+only meaningful as `(server_key, save_key, world_id, numeric_id)`.
+
+Use the existing Hobo's Hollow replacement as the first non-mutating proof:
+
+1. Deploy the artifact and restart FS25. Run `sinWorld` and retain its masked
+   marker plus the startup log line showing the save marker was read or created.
+2. Allow the Agent to publish `snapshot.xml`; confirm its `worldId` equals
+   `sinWorld`. Central's `world_generations` row for
+   `{server_key:"sin-fs25-01", save_key:"sin-fs25-main", state:"active"}`
+   must contain that marker. (This is an operator evidence query, not a request
+   to hand-edit Mongo.)
+3. Run `/farm_roster` and `/farmland_status 22`. With the stated empty Hobo's
+   Hollow precondition, neither historical SiN Harvest/Repton Does nor the
+   Courtright Farm 2/Farmland 22 relationship may appear.
+4. Retain Central/Agent logs for any old pending operation. It must be marked
+   `world_superseded` or rejected because its command/receipt marker differs;
+   do not reissue it.
+5. Only after those proofs, validate fresh onboarding. The game must create or
+   adopt the requested farm, assign the requested farmland with owner readback,
+   and then issue personal manager authority. Establish a new SiN Harvest map
+   explicitly; no old Farm 1 mapping may be adopted.
+
+Do not test starting cash, loans, player positioning, deletion/reset, money
+administration, deposits, or withdrawals on Hobo's Hollow. Their GIANTS
+capability status remains live-deferred. In particular, both bank bridge
+directions require the explicit `fs25_money_bridge_enabled` capability after
+receipt-gated debit/credit, read-back, replication, and restart tests prove the
+target build; the old `withdrawals_enabled` flag is not sufficient.
 
 ## One deployment/restart group
 

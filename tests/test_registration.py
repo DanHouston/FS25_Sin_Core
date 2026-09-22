@@ -209,6 +209,18 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("processContractorRevocationCommand", source)
         self.assertIn("revokeAuthorizedContractorState", source)
         self.assertIn("refusing to revoke contractor permissions from a farm manager", source)
+
+    def test_server_runtime_exposes_read_only_economy_capability_probe(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('addConsoleCommand("sinEconomy"', source)
+        self.assertIn("function FS25SiNServer:consoleCommandEconomy", source)
+        probe = source[source.index("function FS25SiNServer:consoleCommandEconomy"):]
+        probe = probe[:probe.index("function FS25SiNServer:consumeCommandFile")]
+        self.assertIn('observe("getBalance")', probe)
+        self.assertIn('observe("getLoan")', probe)
+        self.assertIn("read-only probe only", probe)
         self.assertIn("self.registrationWarning = nil", source)
         self.assertIn("self.registrationRequired = false", source)
         self.assertIn("self.registrationCode = nil", source)

@@ -291,14 +291,14 @@ class AuthorizationManager:
             raise ValueError("Request is unknown or already reviewed")
 
     def assign(self, discord_id, server_id, save_id, farm_id, role, farms, approved_by,
-               session=None, allow_unapproved_identity=False, idempotent=False):
+               session=None, allow_unapproved_identity=False, idempotent=False, world_id=None):
         """Called only after the Discord/operator boundary authorizes approved_by."""
         if role not in ROLES or type(farm_id) is not int or farm_id <= 0 or not approved_by:
             raise ValueError("Invalid farm, role, or approver")
         if farm_id not in farms:
             raise ValueError("Farm is absent from the server snapshot")
         user = str(discord_id)
-        relationship_id = key(server_id, save_id, user, farm_id)
+        relationship_id = key(server_id, save_id, world_id or "legacy", user, farm_id)
         operation_id = str(uuid.uuid4())
 
         def assign(session):
@@ -311,6 +311,8 @@ class AuthorizationManager:
                 raise ValueError("A registered game identity is required before manager authority can be assigned")
             relationship_query = {"server_id": server_id, "save_id": save_id,
                                   "discord_id": user, "farm_id": farm_id}
+            if world_id:
+                relationship_query["world_id"] = str(world_id)
             old = self.db.memberships.find_one(relationship_query, session=session)
             # Read the pre-v0.1.25 personal-membership key during migration so
             # a manager relationship is repaired in place instead of being
@@ -337,7 +339,8 @@ class AuthorizationManager:
                                 server_id=server_id, save_id=save_id,
                                 game_player_id=identity["game_player_id"], farm_id=farm_id,
                                 role=role, revision=old["revision"], state="pending",
-                                approved_by=str(approved_by), created_at=datetime.now(timezone.utc))},
+                                approved_by=str(approved_by), created_at=datetime.now(timezone.utc),
+                                **({"world_id": str(world_id)} if world_id else {}))},
                             upsert=True, session=session)
                     return existing_operation_id
                 if old.get("state") == "active" and old.get("applied_role") == role:
@@ -351,16 +354,21 @@ class AuthorizationManager:
                           game_player_id=identity["game_player_id"], farm_id=farm_id,
                           farm_name=farms[farm_id], desired_role=role, applied_role=old.get("applied_role") if old else None,
                           revision=revision, state="pending", operation_id=operation_id, approved_by=str(approved_by))
+            if world_id:
+                record["world_id"] = str(world_id)
             self.db.memberships.replace_one({"_id": membership_id}, record, upsert=True, session=session)
-            self.db.permission_jobs.insert_one(dict(_id=operation_id, membership_id=membership_id,
+            job = dict(_id=operation_id, membership_id=membership_id,
                 server_id=server_id, save_id=save_id, game_player_id=identity["game_player_id"],
                 farm_id=farm_id, role=role, revision=revision, state="pending",
-                approved_by=str(approved_by), created_at=datetime.now(timezone.utc)), session=session)
+                approved_by=str(approved_by), created_at=datetime.now(timezone.utc))
+            if world_id:
+                job["world_id"] = str(world_id)
+            self.db.permission_jobs.insert_one(job, session=session)
             return operation_id
         return assign(session) if session is not None else self.database.atomic(assign)
 
     def revoke_contractor(self, discord_id, server_id, save_id, farm_id, approved_by,
-                          session=None, idempotent=True):
+                          session=None, idempotent=True, world_id=None):
         """Durably remove a previously derived shared-farm contractor grant.
 
         This is deliberately narrower than a general farm-role editor.  The
@@ -373,9 +381,12 @@ class AuthorizationManager:
         user = str(discord_id)
 
         def revoke(session):
-            relationship = self.db.memberships.find_one({
+            relationship_query = {
                 "server_id": server_id, "save_id": save_id,
-                "discord_id": user, "farm_id": farm_id}, session=session)
+                "discord_id": user, "farm_id": farm_id}
+            if world_id:
+                relationship_query["world_id"] = str(world_id)
+            relationship = self.db.memberships.find_one(relationship_query, session=session)
             if not relationship:
                 return None
             if relationship.get("desired_role") not in {"contractor", "revoked"} \
@@ -403,23 +414,31 @@ class AuthorizationManager:
                           farm_id=farm_id, desired_role="revoked", revision=revision,
                           state="pending", operation_id=operation_id,
                           approved_by=str(approved_by))
+            if world_id:
+                record["world_id"] = str(world_id)
             self.db.memberships.replace_one({"_id": membership_id}, record, upsert=True, session=session)
-            self.db.permission_jobs.insert_one(dict(
+            job = dict(
                 _id=operation_id, membership_id=membership_id, server_id=server_id,
                 save_id=save_id, game_player_id=game_player_id, farm_id=farm_id,
                 role="revoked", revision=revision, state="pending",
-                approved_by=str(approved_by), created_at=datetime.now(timezone.utc)), session=session)
+                approved_by=str(approved_by), created_at=datetime.now(timezone.utc))
+            if world_id:
+                job["world_id"] = str(world_id)
+            self.db.permission_jobs.insert_one(job, session=session)
             return operation_id
         return revoke(session) if session is not None else self.database.atomic(revoke)
 
-    def acknowledge(self, operation_id, authenticated_server_id, save_id, revision, receipt):
+    def acknowledge(self, operation_id, authenticated_server_id, save_id, revision, receipt, world_id=None):
         """Only after the mod confirms the exact job was applied and persisted."""
         if not receipt:
             raise ValueError("A durable mod receipt is required")
 
         def acknowledge(session):
-            job = self.db.permission_jobs.find_one({"_id": operation_id, "server_id": authenticated_server_id,
-                                                   "save_id": save_id, "revision": revision}, session=session)
+            query = {"_id": operation_id, "server_id": authenticated_server_id,
+                     "save_id": save_id, "revision": revision}
+            if world_id:
+                query["world_id"] = str(world_id)
+            job = self.db.permission_jobs.find_one(query, session=session)
             if not job:
                 raise ValueError("Unknown operation or wrong server/save/revision")
             if job["state"] == "applied":

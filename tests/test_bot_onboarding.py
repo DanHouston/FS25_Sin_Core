@@ -4,7 +4,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from discord import app_commands
 
-from fs25_network_core.bot_frontend import CommunityEventView, ContractView, NetworkBot, player_choice_label
+from fs25_network_core.bot_frontend import (CommunityEventView, ContractView, NetworkBot,
+                                            format_farm_roster, player_choice_label)
 from fs25_network_core.channel_policy import COMMAND_CHANNELS
 from fs25_network_core.map_service import MapUnavailable
 
@@ -152,3 +153,18 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
     async def test_player_picker_label_identifies_nickname_and_stable_id(self):
         self.assertEqual(player_choice_label("steam-123", "Repton"),
                          "Nickname: Repton | FS25 player ID: steam-123")
+
+    async def test_farm_roster_is_one_human_readable_page_without_raw_player_dicts(self):
+        pages = format_farm_roster("sin-test-01", "save-1", {
+            "farms": {"1": "SiN Harvest", "2": "Repton Does", "14": ""},
+            "players": {"hiIe5r-stable-id": {"name": "Repton | Repton Does",
+                                                  "user_id": "2", "farm_id": 2,
+                                                  "connected": True}},
+        })
+        self.assertEqual(len(pages), 1)
+        page = pages[0]
+        self.assertIn("Farm 1 — SiN Harvest", page)
+        self.assertIn("Farm 2 — Repton Does", page)
+        self.assertIn("Farm 14 — ⚠ Unnamed / cannot approve", page)
+        self.assertIn("Repton | Repton Does\nFarm: 2 — Repton Does\nFS25 ID: hiIe5r-st…", page)
+        self.assertNotIn("{'name'", page)

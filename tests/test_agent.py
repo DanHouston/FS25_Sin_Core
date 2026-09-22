@@ -324,7 +324,7 @@ class AgentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             (root / "serverBinding.xml").write_text('<serverBinding serverKey="server" credential="secret"/>', encoding="utf-8")
-            (root / "snapshot.xml").write_text('<networkLocal source="game" savegameIndex="1"/>', encoding="utf-8")
+            (root / "snapshot.xml").write_text('<networkLocal source="game" savegameIndex="1" worldId="test-world"/>', encoding="utf-8")
             agent = PairingAgent(root, "https://central", opener)
             self.assertEqual(agent.process_operations_once(), ["op-1"])
             command = root / "permission-commands/op-1.xml"
@@ -344,7 +344,7 @@ class AgentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             (root / "serverBinding.xml").write_text('<serverBinding serverKey="server" credential="secret"/>', encoding="utf-8")
-            (root / "snapshot.xml").write_text('<networkLocal source="game" savegameIndex="1"/>', encoding="utf-8")
+            (root / "snapshot.xml").write_text('<networkLocal source="game" savegameIndex="1" worldId="test-world"/>', encoding="utf-8")
             receipt_dir = root / "permission-receipts"
             receipt_dir.mkdir()
             (receipt_dir / "already-acked.xml").write_text(
@@ -386,7 +386,7 @@ class AgentTests(unittest.TestCase):
             (root / "serverBinding.xml").write_text(
                 '<serverBinding serverKey="server" credential="secret"/>', encoding="utf-8")
             (root / "snapshot.xml").write_text(
-                '<networkLocal source="game" savegameIndex="1"/>', encoding="utf-8")
+                '<networkLocal source="game" savegameIndex="1" worldId="test-world"/>', encoding="utf-8")
             agent = PairingAgent(root, "https://central", opener)
             self.assertEqual(agent.process_operations_once(), ["op-retry"])
             self.assertEqual(replace_attempts["manifest"], 3)
@@ -424,7 +424,7 @@ class AgentTests(unittest.TestCase):
             (root / "serverBinding.xml").write_text(
                 '<serverBinding serverKey="server" credential="secret"/>', encoding="utf-8")
             (root / "snapshot.xml").write_text(
-                '<networkLocal source="game" savegameIndex="1"/>', encoding="utf-8")
+                '<networkLocal source="game" savegameIndex="1" worldId="test-world"/>', encoding="utf-8")
             destination = root / "permission-commands/manifest.xml"
             destination.parent.mkdir(parents=True)
             destination.write_text("old", encoding="utf-8")
@@ -452,7 +452,7 @@ class AgentTests(unittest.TestCase):
             (root / "serverBinding.xml").write_text(
                 '<serverBinding serverKey="server" credential="secret"/>', encoding="utf-8")
             (root / "snapshot.xml").write_text(
-                '<networkLocal source="game" savegameIndex="1"/>', encoding="utf-8")
+                '<networkLocal source="game" savegameIndex="1" worldId="test-world"/>', encoding="utf-8")
             receipts = root / "permission-receipts"
             receipts.mkdir()
             receipt = receipts / "farm-op.xml"
@@ -515,7 +515,7 @@ class AgentTests(unittest.TestCase):
             (root / "serverBinding.xml").write_text(
                 '<serverBinding serverKey="server" credential="secret"/>', encoding="utf-8")
             (root / "snapshot.xml").write_text(
-                '<networkLocal savegameIndex="1"/>', encoding="utf-8")
+                '<networkLocal savegameIndex="1" worldId="test-world"/>', encoding="utf-8")
             agent = PairingAgent(root, "https://central", MagicMock(return_value=response))
             self.assertTrue(agent.process_manager_authority_once())
             authority = (root / "manager-authority.xml").read_text(encoding="utf-8")

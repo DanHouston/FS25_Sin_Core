@@ -42,6 +42,51 @@ function FS25SiNServer:initializeRuntimeGeneration()
     return true
 end
 
+-- The profile-level mailbox survives a replacement save, so it is explicitly
+-- not a world identity.  Store an opaque SiN marker beside FS25's own save
+-- files.  It survives an ordinary restart of that save, while a replacement
+-- save has no marker and receives a different value before Central accepts
+-- any game-scoped command or authority material.
+function FS25SiNServer:initializeWorldIdentity()
+    local info = g_currentMission ~= nil and g_currentMission.missionInfo or nil
+    local saveDirectory = info ~= nil and info.savegameDirectory or nil
+    if saveDirectory == nil or tostring(saveDirectory) == "" then
+        self.worldIdentityReady = false
+        Logging.error("[SiN World] FS25 savegameDirectory is unavailable; refusing world-scoped operations")
+        return false
+    end
+    local separator = string.sub(tostring(saveDirectory), -1)
+    if separator ~= "/" and separator ~= "\\" then saveDirectory = tostring(saveDirectory) .. "/" end
+    local path = tostring(saveDirectory) .. "FS25_SiN_Server_world.xml"
+    local worldId = nil
+    if fileExists(path) and XMLFile ~= nil and XMLFile.load ~= nil then
+        local loaded = XMLFile.load("networkLocalWorldIdentity", path)
+        worldId = loaded ~= nil and loaded:getString("sinWorldIdentity#worldId") or nil
+        if loaded ~= nil then loaded:delete() end
+    end
+    if worldId == nil or tostring(worldId) == "" then
+        if XMLFile == nil or XMLFile.create == nil then
+            self.worldIdentityReady = false
+            return false
+        end
+        -- This is an opaque creation nonce, not a timestamp-derived identity:
+        -- after first creation the persisted value is always read verbatim.
+        local tick = getTime ~= nil and tostring(getTime()) or "0"
+        worldId = "sin-world-" .. tostring(getDate("%Y%m%d%H%M%S")) .. "-" .. tick
+            .. "-" .. tostring(math.random(100000, 999999))
+        local xml = XMLFile.create("networkLocalWorldIdentity", path, "sinWorldIdentity")
+        if xml == nil then self.worldIdentityReady = false; return false end
+        xml:setString("sinWorldIdentity#worldId", worldId)
+        xml:setInt("sinWorldIdentity#schemaVersion", 1)
+        local saved = xml:save(); xml:delete()
+        if saved ~= true then self.worldIdentityReady = false; return false end
+        Logging.info("[SiN World] initialized FS25-save marker=%s", self:shortIdentity(worldId))
+    end
+    self.worldId = tostring(worldId)
+    self.worldIdentityReady = true
+    return true
+end
+
 function FS25SiNServer:shortIdentity(value)
     local text = tostring(value or "")
     return string.len(text) > 8 and string.sub(text, 1, 8) .. "..." or text
@@ -67,6 +112,7 @@ function FS25SiNServer:loadMap()
     createFolder(self.registrationRequestDirectory)
     createFolder(self.registrationResponseDirectory)
     self:initializeRuntimeGeneration()
+    self:initializeWorldIdentity()
     self.bindingPath = self.directory .. "serverBinding.xml"
     self:loadServerBinding()
     self.systemFarmName = nil
@@ -106,6 +152,8 @@ function FS25SiNServer:loadMap()
     addConsoleCommand("sinPermissions", "Report local FS25 farm permission state", "consoleCommandPermissions", self)
     addConsoleCommand("sinSelfTest", "Report read-only SiN runtime integration checks", "consoleCommandSelfTest", self)
     addConsoleCommand("sinFarmland", "Report authoritative owner for a farmland ID", "consoleCommandFarmland", self)
+    addConsoleCommand("sinEconomy", "Read-only FS25 farm money, loan, and farmland-price capability probe", "consoleCommandEconomy", self)
+    addConsoleCommand("sinWorld", "Report the current FS25 save-backed SiN world identity", "consoleCommandWorld", self)
     addConsoleCommand("sinPair", "Pair this server with a SiN pairing code", "consoleCommandPair", self)
     if g_messageCenter ~= nil and MessageType ~= nil and MessageType.PLAYER_FARM_CHANGED ~= nil then
         g_messageCenter:subscribe(MessageType.PLAYER_FARM_CHANGED, self.onPlayerFarmChanged, self)
@@ -274,6 +322,12 @@ function FS25SiNServer:loadManagerAuthority()
     local authority = fileExists(path) and XMLFile.load("networkLocalAuthority", path) or nil
     local authorized, contractors = {}, {}
     if authority == nil then return authorized, contractors end
+    if self.worldIdentityReady ~= true or self.worldId == nil
+        or tostring(authority:getString("managerAuthority#worldId") or "") ~= tostring(self.worldId) then
+        Logging.warning("[SiN Authorization] ignoring authority XML for a different or unavailable FS25 world")
+        authority:delete()
+        return authorized, contractors
+    end
     local index = 0
     while true do
         local key = string.format("managerAuthority.manager(%d)", index)
@@ -1226,7 +1280,7 @@ end
 
 function FS25SiNServer:emitServerEvent(eventType, values, requestedEventId)
     if self.serverKey == nil or self.serverCredential == nil or self.eventDirectory == nil
-        or self.runtimeIdentityReady ~= true then return false end
+        or self.runtimeIdentityReady ~= true or self.worldIdentityReady ~= true or self.worldId == nil then return false end
     local eventId = requestedEventId
     if eventId == nil then
         self.eventSequence = self.eventSequence + 1
@@ -1243,6 +1297,7 @@ function FS25SiNServer:emitServerEvent(eventType, values, requestedEventId)
     xml:setString("serverEvent#server_key", self.serverKey)
     xml:setString("serverEvent#server_credential", self.serverCredential)
     xml:setString("serverEvent#save_id", tostring(g_currentMission.missionInfo.savegameIndex or 0))
+    xml:setString("serverEvent#world_id", tostring(self.worldId))
     for key, value in pairs(values or {}) do xml:setString("serverEvent#" .. tostring(key), tostring(value)) end
     xml:save(); xml:delete()
     self.eventSeen[eventId] = true
@@ -1313,6 +1368,8 @@ function FS25SiNServer:processMapGeometryExport()
     xml:setString("serverEvent#server_key", self.serverKey)
     xml:setString("serverEvent#server_credential", self.serverCredential)
     xml:setString("serverEvent#save_id", tostring(mission.missionInfo.savegameIndex or 0))
+    if self.worldIdentityReady ~= true or self.worldId == nil then xml:delete(); return false end
+    xml:setString("serverEvent#world_id", tostring(self.worldId))
     xml:setInt("serverEvent#schema_version", 1)
     xml:setString("serverEvent#map_id", mapId)
     xml:setString("serverEvent#map_title", mapTitle)
@@ -1629,6 +1686,51 @@ function FS25SiNServer:consoleCommandFarmland(farmlandId)
     return result
 end
 
+function FS25SiNServer:consoleCommandWorld()
+    if self.worldIdentityReady ~= true or self.worldId == nil then
+        return "SiN world identity is unavailable; world-scoped operations are fail-closed"
+    end
+    local result = string.format("[SiN World] server=%s save=%s worldId=%s",
+        tostring(self.serverKey), tostring(g_currentMission ~= nil and g_currentMission.missionInfo ~= nil
+            and g_currentMission.missionInfo.savegameIndex), tostring(self.worldId))
+    Logging.info("%s", result)
+    return result
+end
+
+-- This probe is intentionally read-only. It records the exact target-runtime
+-- method availability and observed values before SiN can safely add an
+-- economic mutation adapter. A successful method lookup is not permission to
+-- call addMoney, alter a loan, or delete a farm.
+function FS25SiNServer:consoleCommandEconomy(farmId, farmlandId)
+    local parsedFarmId = tonumber(farmId)
+    if parsedFarmId == nil or parsedFarmId <= 0 or math.floor(parsedFarmId) ~= parsedFarmId then
+        return "Usage: sinEconomy <positive FS25 farm ID> [positive farmland ID]"
+    end
+    if g_currentMission == nil or not g_currentMission:getIsServer() or g_farmManager == nil then
+        return "SiN economy diagnostics require the authoritative server farm manager"
+    end
+    local farm = g_farmManager:getFarmById(parsedFarmId)
+    if farm == nil then return "Unknown FS25 farm ID: " .. tostring(parsedFarmId) end
+    local function observe(methodName)
+        local method = farm[methodName]
+        if type(method) ~= "function" then return "unavailable" end
+        local ok, value = pcall(method, farm)
+        return ok and tostring(value) or "read_failed"
+    end
+    local price = "not_requested"
+    if farmlandId ~= nil then
+        local parsedFarmlandId = tonumber(farmlandId)
+        if parsedFarmlandId == nil or parsedFarmlandId <= 0 or math.floor(parsedFarmlandId) ~= parsedFarmlandId then
+            return "Farmland ID must be a positive integer"
+        end
+        local farmland = g_farmlandManager ~= nil and g_farmlandManager:getFarmlandById(parsedFarmlandId) or nil
+        price = farmland ~= nil and tostring(farmland.price) or "unavailable"
+    end
+    return string.format("[SiN Economy] farm=%d balance=%s loan=%s farmChangeBalance=%s missionAddMoney=%s farmManagerRemoveFarm=%s farmlandPrice=%s; read-only probe only",
+        parsedFarmId, observe("getBalance"), observe("getLoan"), tostring(type(farm.changeBalance) == "function"),
+        tostring(type(g_currentMission.addMoney) == "function"), tostring(type(g_farmManager.removeFarm) == "function"), price)
+end
+
 function FS25SiNServer:saveReceiptAndConsume(receipt, command, operationId)
     if receipt == nil then return false end
     local receiptPath = self.receiptDirectory .. tostring(operationId) .. ".xml"
@@ -1638,6 +1740,26 @@ function FS25SiNServer:saveReceiptAndConsume(receipt, command, operationId)
     if command ~= nil then command:delete() end
     self:consumeCommandFile(operationId)
     return true
+end
+
+function FS25SiNServer:commandWorldId(command)
+    return command:getString("networkLocalCommand#world_id") or command:getString("permissionCommand#world_id")
+end
+
+function FS25SiNServer:rejectWrongWorldCommand(command, operationId)
+    local receipt = XMLFile.create("networkLocalWorldReceipt", self.receiptDirectory .. operationId .. ".xml", "networkLocalReceipt")
+    if receipt == nil then return end
+    receipt:setString("networkLocalReceipt#operation_id", operationId)
+    receipt:setString("networkLocalReceipt#operation_type", command:getString("networkLocalCommand#operation_type")
+        or command:getString("permissionCommand#operation_type") or "permission")
+    receipt:setString("networkLocalReceipt#server_id", command:getString("networkLocalCommand#server_id")
+        or command:getString("permissionCommand#server_id") or "")
+    receipt:setString("networkLocalReceipt#save_id", command:getString("networkLocalCommand#save_id")
+        or command:getString("permissionCommand#save_id") or "")
+    receipt:setString("networkLocalReceipt#world_id", tostring(self:commandWorldId(command) or ""))
+    receipt:setString("networkLocalReceipt#status", "rejected")
+    receipt:setString("networkLocalReceipt#receipt", "REJECTED: command world generation does not match this FS25 save")
+    self:saveReceiptAndConsume(receipt, command, operationId)
 end
 
 function FS25SiNServer:processPermissionCommands()
@@ -1657,6 +1779,11 @@ function FS25SiNServer:processPermissionCommands()
         local receiptPath = self.receiptDirectory .. operationId .. ".xml"
         local command = XMLFile.load("networkLocalCommand", commandPath)
         if command ~= nil and not fileExists(receiptPath) then
+            if self.worldIdentityReady ~= true or self.worldId == nil
+                or tostring(self:commandWorldId(command) or "") ~= tostring(self.worldId) then
+                self:rejectWrongWorldCommand(command, operationId)
+                goto continue
+            end
             local operationType = command:getString("networkLocalCommand#operation_type")
             if operationType == "ensure_farm" or operationType == "provision_farm" then
                 self:processFarmProvisionCommand(command, operationId, operationType)
@@ -1703,6 +1830,7 @@ function FS25SiNServer:processPermissionCommands()
             command:delete()
             self:consumeCommandFile(operationId)
         end
+        ::continue::
         index = index + 1
     end
     manifest:delete()
@@ -2165,6 +2293,12 @@ function FS25SiNServer:exportSnapshot()
     xml:setInt("networkLocal#sequence", self.sequence)
     local info = g_currentMission.missionInfo
     xml:setInt("networkLocal#savegameIndex", (info and info.savegameIndex) or 0)
+    if self.worldIdentityReady ~= true or self.worldId == nil then
+        xml:delete()
+        error("FS25 save-backed world identity unavailable")
+    end
+    xml:setString("networkLocal#worldId", tostring(self.worldId))
+    xml:setString("networkLocal#mapId", tostring(info and (info.mapId or info.mapFilename or info.mapXMLFilename) or ""))
     local index = 0
     -- Farm IDs are bounded for this initial local probe; skip spectator/NPC farms.
     for farmId = 1, 254 do
@@ -2230,6 +2364,8 @@ function FS25SiNServer:deleteMap()
     removeConsoleCommand("sinPermissions")
     removeConsoleCommand("sinSelfTest")
     removeConsoleCommand("sinFarmland")
+    removeConsoleCommand("sinEconomy")
+    removeConsoleCommand("sinWorld")
     if g_messageCenter ~= nil and MessageType ~= nil and MessageType.PLAYER_FARM_CHANGED ~= nil then
         g_messageCenter:unsubscribe(MessageType.PLAYER_FARM_CHANGED, self)
     end

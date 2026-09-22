@@ -32,6 +32,70 @@ def player_choice_label(player_id, nickname):
     return f"Nickname: {nickname or 'Unnamed player'} | FS25 player ID: {player_id}"
 
 
+def format_farm_roster(server_key, save_key, snapshot, page_limit=1900):
+    """Render one human-readable, bounded staff roster from a game snapshot.
+
+    Snapshot player values are normalized by the Agent as dictionaries, but
+    older local scraper fixtures use a plain display-name string.  Formatting
+    belongs here rather than in the command callback so an untrusted snapshot
+    can never leak a raw Python representation into Discord.
+    """
+    if not isinstance(snapshot, dict):
+        raise ValueError("A game snapshot is required")
+    farms = snapshot.get("farms") or {}
+    players = snapshot.get("players") or {}
+
+    def farm_sort_key(item):
+        try:
+            return int(item[0])
+        except (TypeError, ValueError):
+            return 1_000_000
+
+    farm_names = {}
+    farm_rows = []
+    for farm_id, raw_name in sorted(farms.items(), key=farm_sort_key):
+        try:
+            farm_number = int(farm_id)
+        except (TypeError, ValueError):
+            continue
+        name = str(raw_name or "").strip()
+        farm_names[farm_number] = name
+        farm_rows.append(f"Farm {farm_number} — {name}" if name
+                         else f"Farm {farm_number} — ⚠ Unnamed / cannot approve")
+
+    player_rows = []
+    for player_id, raw_player in sorted(players.items(), key=lambda item: str(item[0])):
+        details = raw_player if isinstance(raw_player, dict) else {"name": raw_player}
+        name = str(details.get("name") or "Unnamed player").strip() or "Unnamed player"
+        try:
+            farm_id = int(details.get("farm_id", 0) or 0)
+        except (TypeError, ValueError):
+            farm_id = 0
+        farm_name = farm_names.get(farm_id, "")
+        association = (f"Farm: {farm_id} — {farm_name}" if farm_name
+                       else f"Farm: {farm_id} — ⚠ Unknown or unnamed")
+        stable_id = str(player_id)
+        short_id = stable_id if len(stable_id) <= 12 else stable_id[:9] + "…"
+        player_rows.extend((name, association, f"FS25 ID: {short_id}"))
+
+    sections = [f"SiN Farm Roster — {server_key} / {save_key}", "", "FARMS"]
+    sections.extend(farm_rows or ["No farms reported."])
+    sections.extend(("", "CONNECTED PLAYERS"))
+    sections.extend(player_rows or ["No connected players reported."])
+    pages, current = [], []
+    current_size = 0
+    for line in sections:
+        additional = len(line) + (1 if current else 0)
+        if current and current_size + additional > page_limit:
+            pages.append("\n".join(current))
+            current, current_size = [], 0
+        current.append(line)
+        current_size += len(line) + (1 if len(current) > 1 else 0)
+    if current:
+        pages.append("\n".join(current))
+    return pages
+
+
 def approved_nickname(player_name, farm_name):
     return f"{player_name or 'Player'} | {farm_name}"[:32]
 
@@ -464,10 +528,11 @@ class NetworkBot(discord.Client):
             if not snapshot:
                 raise ValueError("No current game snapshot is available")
             await asyncio.to_thread(auth_for(server).observe_players, server, save_key, snapshot)
-            rows = [f"Farm {farm_id}: {name or '(unnamed; cannot approve)'}" for farm_id, name in snapshot["farms"].items()]
-            rows += [f"Player ID: {player_id} | name: {name}" for player_id, name in snapshot["players"].items()]
-            for row in rows or ["No farms or players reported."]:
-                await interaction.followup.send(row[:1900], ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+            pages = format_farm_roster(server, save_key, snapshot)
+            for page_number, page in enumerate(pages, start=1):
+                suffix = f"\n\nPage {page_number}/{len(pages)}" if len(pages) > 1 else ""
+                await interaction.followup.send(page + suffix, ephemeral=True,
+                                              allowed_mentions=discord.AllowedMentions.none())
 
         @farm_roster.autocomplete("server")
         async def farm_roster_server_autocomplete(interaction: discord.Interaction, current: str):
@@ -629,8 +694,17 @@ class NetworkBot(discord.Client):
                           amount: app_commands.Range[int, 1, 1_000_000_000]):
             context = await asyncio.to_thread(self.resolve_identity_context, str(interaction.user.id), None, "reconcile")
             server_key, save_key = context["server_key"], context["save_key"]
+            # The deployed mod deliberately has no verified authoritative
+            # money-debit adapter yet.  Queueing a deposit anyway would create
+            # an indefinitely pending distributed-money operation, so deposits
+            # use the same explicit live capability gate as withdrawals.
+            if not self.fs25_money_bridge_enabled(server_key):
+                await interaction.response.send_message(
+                    "Deposits are disabled because no verified FS25 money-debit adapter is enabled for this server.",
+                    ephemeral=True)
+                return
             state = await asyncio.to_thread(self.bank.request_deposit, str(interaction.id),
-                                            str(interaction.user.id), server_key, save_key, amount)
+                                             str(interaction.user.id), server_key, save_key, amount)
             await interaction.response.send_message(
                 f"Deposit is {state} for the selected game context. The game-side debit must be confirmed before your balance changes.",
                 ephemeral=True)
@@ -642,7 +716,7 @@ class NetworkBot(discord.Client):
             context = await asyncio.to_thread(self.resolve_identity_context, str(interaction.user.id), None, "reconcile")
             server_key, save_key = context["server_key"], context["save_key"]
             config = None
-            if not self.withdrawals_enabled(server_key, config):
+            if not self.fs25_money_bridge_enabled(server_key, config):
                 await interaction.response.send_message(
                     "Withdrawals are disabled because no verified FS25 money-delivery adapter is enabled for this server.",
                     ephemeral=True)
@@ -1026,6 +1100,18 @@ class NetworkBot(discord.Client):
         if "withdrawals_enabled" in record:
             return bool(record.get("withdrawals_enabled"))
         return bool((config or self.servers.get(server_key) or {}).get("withdrawals_enabled", False))
+
+    def fs25_money_bridge_enabled(self, server_key, config=None):
+        """True only after both directions have a verified FS25 adapter.
+
+        The historical ``withdrawals_enabled`` switch proves neither an FS25
+        debit nor a save-backed, receipt-gated bridge.  It is deliberately
+        insufficient for either banking command.
+        """
+        record = self.server_registry.info(server_key) or {}
+        if "fs25_money_bridge_enabled" in record:
+            return bool(record.get("fs25_money_bridge_enabled"))
+        return bool((config or self.servers.get(server_key) or {}).get("fs25_money_bridge_enabled", False))
 
     @staticmethod
     def contract_card_text(record):

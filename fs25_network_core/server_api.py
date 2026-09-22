@@ -54,6 +54,7 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
             return
         query = parse_qs(urlsplit(self.path).query)
         fs25_save_id = query.get("fs25_save_id", [None])[0]
+        world_id = query.get("world_id", [None])[0]
         server_key = self.headers.get("X-SiN-Server-Key")
         credential = self.headers.get("Authorization", "")
         if credential.startswith("Bearer "):
@@ -69,9 +70,11 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
         try:
             save_key = self.event_processor.registry.resolve_save(record["server_key"], fs25_save_id)
             if path == OPERATIONS_PATH:
-                operations = self.farm_lifecycle.operations_for(record["server_key"], save_key)
+                self.farm_lifecycle.require_current_world(record["server_key"], save_key, world_id)
+                operations = self.farm_lifecycle.operations_for(record["server_key"], save_key, world_id)
                 permission_jobs = list(self.event_processor.authorization.db.permission_jobs.find({
                     "server_id": record["server_key"], "save_id": save_key,
+                    "world_id": str(world_id),
                     "state": "pending"}).sort("created_at", 1).limit(50))
                 for job in permission_jobs:
                     operations.append({"operation_id": job["_id"], "operation_type": "permission",
@@ -84,8 +87,10 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
                 _json_response(self, 200, {"operations": safe, "save_key": save_key})
                 return
             if path == "/api/server/manager-authority":
+                self.farm_lifecycle.require_current_world(record["server_key"], save_key, world_id)
                 relationships = self.event_processor.authorization.db.memberships.find({
                     "server_id": record["server_key"], "save_id": save_key,
+                    "world_id": str(world_id),
                     # A pending manager assignment is already a persisted SiN
                     # authorization created only after the game confirmed the
                     # exact farm and starting farmland.  The game must receive
@@ -201,6 +206,8 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
             return
         try:
             snapshot = payload.get("snapshot")
+            if not isinstance(snapshot, dict) or not snapshot.get("world_id"):
+                raise ValueError("authoritative world generation is required")
             result = self.farm_lifecycle.record_snapshot(record["server_key"], save_key, snapshot)
         except ValueError:
             _json_response(self, 400, {"error": "invalid_snapshot"})
@@ -215,11 +222,15 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
             receipt = payload.get("receipt")
             if not isinstance(receipt, dict):
                 raise ValueError("operation receipt is required")
+            world_id = payload.get("world_id")
+            self.farm_lifecycle.require_current_world(record["server_key"], save_key, world_id)
+            if str(receipt.get("world_id") or "") != str(world_id):
+                raise ValueError("operation receipt world generation does not match runtime")
             if receipt.get("operation_type") == "assign_farmland":
                 # Farmland assignment is a FarmLifecycle operation.  Its
                 # receipt includes the FS25 owner read-back; do not route it
                 # through the legacy land_operations compatibility path.
-                result = self.farm_lifecycle.accept_receipt(record["server_key"], save_key, receipt)
+                result = self.farm_lifecycle.accept_receipt(record["server_key"], save_key, receipt, world_id)
             elif receipt.get("operation_type") in {"vehicle_transfer", "product_transfer"}:
                 result = self.event_processor.transfers.accept_receipt(
                     receipt["transfer_id"], receipt, record["server_key"], save_key)
@@ -242,10 +253,10 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
             elif receipt.get("revision") is not None and receipt.get("operation_type") not in {"ensure_farm", "provision_farm"}:
                 result = self.event_processor.authorization.acknowledge(
                     receipt["operation_id"], record["server_key"], save_key,
-                    int(receipt["revision"]), receipt.get("receipt"))
+                    int(receipt["revision"]), receipt.get("receipt"), world_id)
                 result = {"operation_id": receipt["operation_id"], "state": result}
             else:
-                result = self.farm_lifecycle.accept_receipt(record["server_key"], save_key, receipt)
+                result = self.farm_lifecycle.accept_receipt(record["server_key"], save_key, receipt, world_id)
         except PermissionError:
             _json_response(self, 401, {"error": "invalid_server_authentication"})
             return
