@@ -92,12 +92,13 @@ only meaningful as `(server_key, save_key, world_id, numeric_id)`.
 
 Use the existing Hobo's Hollow replacement as the first non-mutating proof:
 
-1. Deploy the artifact and restart FS25. Run `sinWorld` and retain its masked
-   marker plus the startup log line showing the save marker was read or created.
-2. Allow the Agent to publish `snapshot.xml`; confirm its `worldId` equals
-   `sinWorld`. Central's `world_generations` row for
+1. Deploy the artifact and restart FS25. Retain the Agent-visible
+   `snapshot.xml` `worldId` and the server service log line showing the save
+   marker was read or created. This procedure does not require a dedicated
+   server console.
+2. Confirm the Agent snapshot marker is accepted by Central. Central's `world_generations` row for
    `{server_key:"sin-fs25-01", save_key:"sin-fs25-main", state:"active"}`
-   must contain that marker. (This is an operator evidence query, not a request
+   must contain the exact `snapshot.xml` marker. (This is an operator evidence query, not a request
    to hand-edit Mongo.)
 3. Run `/farm_roster` and `/farmland_status 22`. With the stated empty Hobo's
    Hollow precondition, neither historical SiN Harvest/Repton Does nor the
