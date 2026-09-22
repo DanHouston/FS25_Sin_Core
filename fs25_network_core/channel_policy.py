@@ -12,7 +12,6 @@ COMMAND_CHANNELS = {
     "farm_requests": "farm_approvals",
     "farm_roster": "farm_approvals",
     "farm_approve": "farm_approvals",
-    "farmland_assign": "farm_approvals",
     "farmland_status": "farm_approvals",
     "farm_reject": "farm_approvals",
     "farm_status": "link_account",

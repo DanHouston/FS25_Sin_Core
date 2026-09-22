@@ -5,7 +5,6 @@ an FS25 numeric farm ID; IDs are learned from authenticated game receipts.
 """
 from datetime import datetime, timezone
 import hashlib
-import uuid
 
 
 SYSTEM_FARM_NAME = "SiN Harvest"
@@ -322,24 +321,29 @@ class FarmLifecycle:
             raise ValueError("Unknown farm request")
         if request.get("state") in {"provisioning", "awaiting_manager", "active"} and request.get("operation_id"):
             return request["operation_id"]
+        if request.get("state") == "land_assigning" and request.get("land_operation_id"):
+            return request["land_operation_id"]
+        if request.get("state") == "land_pending":
+            return self._queue_requested_farmland(request, server_key, save_key, approved_by)
         if request.get("state") not in {"pending", "requested"}:
             raise ValueError("Farm request is already reviewed")
+        farmland_id = int(request["starting_field"])
+        fields = self.available_fields(server_key, save_key)
+        if farmland_id not in fields:
+            raise ValueError("Requested farmland is not present on the current save")
+        if fields[farmland_id] != 0:
+            raise ValueError("Requested farmland is already owned")
         operation_id = _operation_id("provision-farm", request_id)
         self._queue_operation(operation_id, "provision_farm", server_key, save_key,
                               {"farm_type": MEMBER_FARM_TYPE, "canonical_name": request["farm_name"],
-                               "request_id": request_id}, request_id=request_id)
+                               "request_id": request_id, "farmland_id": farmland_id}, request_id=request_id)
         self.db.farm_requests.update_one({"_id": request_id, "state": {"$in": ["pending", "requested"]}}, {"$set": {
             "state": "provisioning", "operation_id": operation_id, "approved_by": str(approved_by),
             "approved_at": self._now(), "updated_at": self._now()}})
         return operation_id
 
-    def land_pending_requests(self, server_key, save_key):
-        """Return provisioned farms awaiting one explicit staff land decision."""
-        return list(self.db.farm_requests.find({"server_key": server_key, "save_key": save_key,
-            "state": "land_pending", "farm_id": {"$exists": True}}).sort("updated_at", 1).limit(25))
-
-    def assign_farmland(self, request_id, server_key, save_key, farmland_id, approved_by):
-        """Queue one operator-authorized, unowned-farmland assignment.
+    def _queue_requested_farmland(self, request, server_key, save_key, approved_by):
+        """Queue the farmland selected in the original approved request.
 
         The current snapshot is only a preflight guard. The FS25 runtime reads
         ownership again immediately before mutation and supplies the decisive
@@ -348,21 +352,16 @@ class FarmLifecycle:
         if not approved_by:
             raise ValueError("An operator is required to assign farmland")
         try:
-            farmland_id = int(farmland_id)
+            farmland_id = int(request.get("starting_field"))
         except (TypeError, ValueError):
-            raise ValueError("Farmland ID must be a positive FS25 farmland ID") from None
+            raise ValueError("Farm request has no valid selected farmland ID") from None
         if farmland_id <= 0:
             raise ValueError("Farmland ID must be a positive FS25 farmland ID")
-        request = self.db.farm_requests.find_one({"_id": request_id, "server_key": server_key,
-            "save_key": save_key})
-        if not request:
-            raise ValueError("Unknown farm request for this server/save")
         if request.get("state") == "land_assigning":
             if int(request.get("assigned_farmland_id", 0)) == farmland_id and request.get("land_operation_id"):
                 return request["land_operation_id"]
-            raise ValueError("A different farmland assignment is already pending for this farm")
         if request.get("state") != "land_pending":
-            raise ValueError("Farm is not awaiting an explicit farmland assignment")
+            raise ValueError("Farm is not awaiting ownership assignment")
         try:
             farm_id = int(request.get("farm_id"))
         except (TypeError, ValueError):
@@ -370,21 +369,23 @@ class FarmLifecycle:
         fields = self.available_fields(server_key, save_key)
         if farmland_id not in fields:
             raise ValueError("Farmland ID is not present on the current save")
-        if fields[farmland_id] != 0:
+        if fields[farmland_id] not in {0, farm_id}:
             raise ValueError("Farmland is already owned; reassignment is denied")
-        snapshot = self.latest_snapshot(server_key, save_key) or {}
-        farms = snapshot.get("farms") or {}
-        if str(farm_id) not in {str(key) for key in farms}:
-            raise ValueError("Destination farm is absent from the current authoritative snapshot")
-        operation_id = str(uuid.uuid4())
+        mapping = self.db.sin_farms.find_one({"_id": request.get("mapping_id"),
+            "server_key": server_key, "save_key": save_key, "fs25_farm_id": farm_id})
+        if not mapping:
+            raise ValueError("Destination farm is not confirmed by the authoritative farm receipt")
+        attempt = int(request.get("land_attempt", 0)) + 1
+        operation_id = _operation_id("assign-farmland", request["_id"], farmland_id, attempt)
         self._queue_operation(operation_id, "assign_farmland", server_key, save_key, {
             "farmland_id": farmland_id, "farm_id": farm_id,
-            "request_id": str(request_id), "authorized_by": str(approved_by),
-        }, request_id=request_id)
-        result = self.db.farm_requests.update_one({"_id": request_id, "server_key": server_key,
+            "request_id": str(request["_id"]), "authorized_by": str(approved_by),
+        }, request_id=request["_id"])
+        result = self.db.farm_requests.update_one({"_id": request["_id"], "server_key": server_key,
             "save_key": save_key, "state": "land_pending"}, {"$set": {
                 "state": "land_assigning", "land_operation_id": operation_id,
-                "assigned_farmland_id": farmland_id, "land_authorized_by": str(approved_by),
+                "assigned_farmland_id": farmland_id, "land_attempt": attempt,
+                "land_authorized_by": str(approved_by),
                 "land_assignment_requested_at": self._now(), "updated_at": self._now()}})
         if getattr(result, "modified_count", 1) != 1:
             raise ValueError("Farm land state changed; retry after refreshing status")
@@ -415,7 +416,7 @@ class FarmLifecycle:
             request_id = (operation.get("payload") or {}).get("request_id")
             if request_id and operation.get("operation_type") == "provision_farm":
                 request = self.db.farm_requests.find_one({"_id": request_id})
-                if isinstance(request, dict) and request.get("farm_id") is not None:
+                if isinstance(request, dict) and request.get("land_confirmed") and request.get("farm_id") is not None:
                     self._ensure_manager_authorization(
                         request, server_key, save_key, request["farm_id"],
                         request.get("mapping_id"), (operation.get("payload") or {}).get("canonical_name"))
@@ -473,6 +474,15 @@ class FarmLifecycle:
                 self.db.farm_requests.update_one({"_id": request_id, "state": "provisioning"}, {"$set": {
                     "state": "land_pending", "farm_id": farm_id, "mapping_id": mapping_id,
                     "land_confirmed": False, "updated_at": self._now()}})
+                pending_request = dict(request, state="land_pending", farm_id=farm_id, mapping_id=mapping_id)
+                try:
+                    self._queue_requested_farmland(pending_request, server_key, save_key,
+                                                   request.get("approved_by") or "farm-approval")
+                except ValueError as error:
+                    # The farm exists, but ownership cannot advance until a
+                    # current scoped snapshot makes the selected land safe.
+                    self.db.farm_requests.update_one({"_id": request_id, "state": "land_pending"}, {"$set": {
+                        "land_failure_reason": str(error)[:300], "updated_at": self._now()}})
         return self._operation(operation["_id"])
 
     def _accept_farmland_receipt(self, operation, server_key, save_key, receipt):

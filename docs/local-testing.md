@@ -399,10 +399,12 @@ Pairing remains valid if this operation is pending while FS25 is offline.
 An approved member then runs `/farm_request` with the friendly server and an
 available starting field. Staff reviews the request and runs `/farm_approve`.
 Confirm the Agent delivers `provision_farm`, FS25_SiN_Server creates/adopts the
-named farm, refuses an already-owned field, and returns a receipt proving both
-farm and field ownership. The requester remains non-manager until the separate
-manager permission receipt is applied. `/farm_status` should progress from
-`provisioning` to `awaiting_manager` to `active`; registration, approval, farm
+named farm, then Central automatically delivers `assign_farmland` for the
+field stored by `/farm_request`. The ownership receipt must prove read-back
+owner; an already-owned foreign field is refused. The requester remains
+non-manager until the ownership and separate manager-permission receipts are
+applied. `/farm_status` should progress from `provisioning` through pending
+ownership to `awaiting_manager` and `active`; registration, approval, farm
 creation, field ownership, and manager authority remain separate records.
 
 If any game mutation may have occurred without a trustworthy receipt, stop

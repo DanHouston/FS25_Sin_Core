@@ -22,6 +22,7 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         commands = self.bot.tree.get_commands()
         self.assertEqual({command.name for command in commands}, set(COMMAND_CHANNELS))
         self.assertIsNone(self.bot.tree.get_command("link"))
+        self.assertIsNone(self.bot.tree.get_command("farmland_assign"))
         for command in commands:
             if command.name == "activity_status":
                 # This command has two policies: self-service is allowed in

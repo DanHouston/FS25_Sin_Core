@@ -812,10 +812,15 @@ def _semantic_farmland_ownership(root: Path) -> Mapping[str, object]:
         "source": "game", "farmlands": {"22": 0}, "farms": {"2": "Campaign Farm"}})
     database.db.farm_requests.insert_one({"_id": "campaign-land-request", "discord_id": "campaign-player",
         "server_key": "sin-campaign", "save_key": "campaign-save", "farm_name": "Campaign Farm",
-        "farm_id": 2, "mapping_id": "campaign-farm", "state": "land_pending"})
-    operation_id = lifecycle.assign_farmland("campaign-land-request", "sin-campaign", "campaign-save", 22, "staff")
-    duplicate_operation_id = lifecycle.assign_farmland(
-        "campaign-land-request", "sin-campaign", "campaign-save", 22, "staff")
+        "starting_field": 22, "state": "pending"})
+    provision_id = lifecycle.approve_request("campaign-land-request", "sin-campaign", "campaign-save", "staff")
+    lifecycle.accept_receipt("sin-campaign", "campaign-save", {"operation_id": provision_id,
+        "operation_type": "provision_farm", "status": "applied", "farm_id": 2,
+        "receipt": "farm_exists_or_created"})
+    pending_request = database.db.farm_requests.find_one({"_id": "campaign-land-request"})
+    operation_id = pending_request["land_operation_id"]
+    duplicate_operation_id = lifecycle.approve_request(
+        "campaign-land-request", "sin-campaign", "campaign-save", "staff")
     _write_binding_and_snapshot(root)
     central = _FarmlandLifecycleCentral(lifecycle)
     agent = PairingAgent(root, "http://offline", central)

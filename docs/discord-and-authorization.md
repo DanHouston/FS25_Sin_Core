@@ -17,12 +17,12 @@ Member farm requests use the approved application's farm name and a numeric
 starting farmland ID. `/farm_request` stores the friendly server selection and
 field choice; it never creates a farm or grants authority. Staff uses
 `/farm_approve` to queue a `provision_farm` operation. FS25_SiN_Server creates or
-adopts the exact named farm, and its receipt moves the request to `land_pending`;
-that operation does not assign land or manager authority. A staff operator must
-then explicitly select an unowned farmland with `/farmland_assign`. The server
-reads the current owner, invokes the GIANTS ownership mutation only for an
-unowned parcel, and reads the owner back. Only a scoped receipt whose observed
-owner equals the requested farm can queue the requester's manager permission.
+adopts the exact named farm, then its receipt automatically queues ownership of
+the farmland selected in `/farm_request`. The server reads the current owner,
+invokes the GIANTS ownership mutation only for an unowned parcel, and reads the
+owner back. Only a scoped receipt whose observed owner equals the requested farm
+can queue the requester's manager permission. Staff never re-enters the
+farmland ID during approval.
 Already-target land is an idempotent non-mutating success; foreign ownership is
 denied. See [farmland-ownership.md](farmland-ownership.md) for the command,
 receipt, recovery, and required live validation details.
@@ -175,14 +175,14 @@ change the save.
 
 After `/farm_approve`, the backend writes an idempotent
 `operation_type=provision_farm` command into the existing permission mailbox.
-The trusted mod validates or creates the exact named farm and farmland state, calls the verified
-`g_farmlandManager:setLandOwnership(farmlandId, farmId)` API only for
-unowned land, broadcasts `FarmlandStateEvent` to replicate the change, verifies
-the resulting authoritative owner, and writes a matching receipt.
+Its successful farm receipt automatically writes the associated
+`assign_farmland` command using the request's stored farmland ID. The trusted
+mod validates the exact named farm and farmland state, calls the verified
+`g_farmlandManager:setLandOwnership(farmlandId, farmId)` API only for unowned
+land, reads the resulting authoritative owner, and writes a matching receipt.
 Already-owned target land is acknowledged idempotently; land owned by another
-farm is rejected and never transferred. The older `assign_farmland` operation
-remains supported for compatible existing records. Authorization remains
-pending until the authoritative farm and manager receipts are processed.
+farm is rejected and never transferred. Authorization remains pending until
+the authoritative farm, ownership, and manager receipts are processed.
 
 ## Records and transaction behavior
 

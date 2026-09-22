@@ -74,7 +74,7 @@
     {
       "id": "giants-farmland-ownership-assignment",
       "what": "Authoritative FarmlandManager setLandOwnership and owner read-after-write",
-      "procedure": "On a safe unowned farmland, record sinFarmland before/after, submit one staff /farmland_assign request, verify the FS25 UI and durable receipt, retry idempotently, then save/restart and recheck.",
+      "procedure": "On a safe unowned farmland selected in /farm_request, record sinFarmland before/after, approve the request with /farm_approve, verify the FS25 UI and durable receipt, retry approval idempotently, then save/restart and recheck.",
       "success": "The post-call runtime owner, receipt owner, Central state, UI, and post-restart owner all equal the selected target farm; an equivalent retry is non-mutating.",
       "failure": "Keep the operation/reason/receipt for diagnosis; do not advance manager authority or label the capability live-proven."
     },

@@ -43,13 +43,14 @@ class FarmLifecycleTests(unittest.TestCase):
         self.db.farm_requests.find_one.return_value = {
             "_id": "request", "state": "pending", "server_key": "server", "save_key": "save",
             "farm_name": "Repton Does", "starting_field": 12, "discord_id": "discord"}
+        self.db.server_snapshots.find_one.return_value = {"farmlands": {"12": 0}}
         operation = self.lifecycle.approve_request("request", "server", "save", "staff")
         self.assertTrue(operation)
         values = self.db.farm_operations.update_one.call_args.args[1]["$setOnInsert"]
         self.assertEqual(values["operation_type"], "provision_farm")
-        self.assertNotIn("farmland_id", values["payload"])
+        self.assertEqual(values["payload"]["farmland_id"], 12)
 
-    def test_successful_provision_receipt_persists_actual_farm_and_waits_for_explicit_land_decision(self):
+    def test_successful_provision_receipt_persists_actual_farm_before_land_reconciliation(self):
         operation = {"_id": "op", "operation_id": "op", "operation_type": "provision_farm",
                      "state": "dispatched", "payload": {"request_id": "request",
                      "farm_type": "member", "canonical_name": "Repton Does"}}
@@ -148,7 +149,7 @@ class FarmLifecycleTests(unittest.TestCase):
         self.db.farm_operations.find_one.return_value = operation
         self.db.farm_requests.find_one.return_value = {"_id": "request", "discord_id": "discord",
             "state": "awaiting_manager", "farm_id": 2, "mapping_id": "mapping",
-            "approved_by": "staff", "farm_name": "Member farm"}
+            "approved_by": "staff", "farm_name": "Member farm", "land_confirmed": True}
         self.lifecycle.authorization.assign.return_value = "manager-op"
 
         result = self.lifecycle.accept_receipt("server", "save", {
@@ -237,11 +238,37 @@ class FarmlandAssignmentLifecycleTests(unittest.TestCase):
             "farmlands": {"12": 0, "13": 9}, "farms": {"2": "Repton Does", "9": "Other Farm"}})
         self.db.farm_requests.insert_one({"_id": "request", "discord_id": "discord", "farm_name": "Repton Does",
             "server_key": "server", "save_key": "save", "farm_id": 2, "mapping_id": "mapping",
-            "approved_by": "staff", "state": "land_pending"})
+            "approved_by": "staff", "starting_field": 12, "state": "land_pending"})
+        self.db.sin_farms.insert_one({"_id": "mapping", "server_key": "server", "save_key": "save",
+            "fs25_farm_id": 2, "canonical_name": "Repton Does"})
 
-    def test_unowned_land_assignment_is_scoped_idempotent_and_receipt_gated(self):
-        operation_id = self.lifecycle.assign_farmland("request", "server", "save", 12, "staff")
-        self.assertEqual(operation_id, self.lifecycle.assign_farmland("request", "server", "save", 12, "staff"))
+    def test_approval_provisions_then_automatically_uses_requested_farmland(self):
+        self.db.farm_requests.update_one({"_id": "request"}, {"$set": {
+            "state": "pending", "farm_id": None, "mapping_id": None}})
+        provision_id = self.lifecycle.approve_request("request", "server", "save", "staff")
+        provision = self.db.farm_operations.find_one({"_id": provision_id})
+        self.assertEqual(provision["payload"]["farmland_id"], 12)
+
+        self.lifecycle.accept_receipt("server", "save", {"operation_id": provision_id,
+            "operation_type": "provision_farm", "status": "applied", "farm_id": 2,
+            "receipt": "farm_exists_or_created"})
+        request = self.db.farm_requests.find_one({"_id": "request"})
+        self.assertEqual(request["state"], "land_assigning")
+        self.assertEqual(request["assigned_farmland_id"], 12)
+        self.assertEqual(self.authorization.assign.call_count, 0)
+        land = self.db.farm_operations.find_one({"_id": request["land_operation_id"]})
+        self.assertEqual((land["operation_type"], land["server_key"], land["save_key"]),
+                         ("assign_farmland", "server", "save"))
+        self.assertEqual(land["payload"], {"farmland_id": 12, "farm_id": 2,
+                          "request_id": "request", "authorized_by": "staff"})
+
+        # No land receipt means no completed approval or manager authority.
+        self.assertEqual(self.db.farm_requests.find_one({"_id": "request"})["state"], "land_assigning")
+        self.assertEqual(self.authorization.assign.call_count, 0)
+
+    def test_approval_automatically_queues_requested_land_and_is_receipt_gated(self):
+        operation_id = self.lifecycle.approve_request("request", "server", "save", "staff")
+        self.assertEqual(operation_id, self.lifecycle.approve_request("request", "server", "save", "staff"))
         operation = self.db.farm_operations.find_one({"_id": operation_id})
         self.assertEqual(operation["payload"]["farmland_id"], 12)
         self.assertEqual(operation["payload"]["farm_id"], 2)
@@ -261,29 +288,27 @@ class FarmlandAssignmentLifecycleTests(unittest.TestCase):
         self.assertEqual(duplicate["state"], "succeeded")
         self.assertEqual(self.authorization.assign.call_count, 1)
 
-    def test_invalid_or_occupied_or_wrong_scope_land_fails_closed_before_queueing(self):
+    def test_selected_invalid_or_occupied_or_wrong_scope_land_fails_closed_before_queueing(self):
         for farmland_id, message in ((99, "not present"), (13, "already owned"), (0, "positive")):
+            self.db.farm_requests.update_one({"_id": "request"}, {"$set": {"starting_field": farmland_id}})
             with self.subTest(farmland_id=farmland_id), self.assertRaisesRegex(ValueError, message):
-                self.lifecycle.assign_farmland("request", "server", "save", farmland_id, "staff")
+                self.lifecycle.approve_request("request", "server", "save", "staff")
         with self.assertRaisesRegex(ValueError, "Unknown farm request"):
-            self.lifecycle.assign_farmland("request", "server", "other-save", 12, "staff")
+            self.lifecycle.approve_request("request", "server", "other-save", "staff")
         with self.assertRaisesRegex(ValueError, "operator"):
-            self.lifecycle.assign_farmland("request", "server", "save", 12, "")
+            self.lifecycle.approve_request("request", "server", "save", "")
 
-    def test_missing_destination_farm_and_conflicting_assignment_fail_closed(self):
-        self.db.server_snapshots.update_one({"server_key": "server", "save_key": "save"},
-            {"$set": {"farms": {"9": "Other Farm"}}})
-        with self.assertRaisesRegex(ValueError, "Destination farm"):
-            self.lifecycle.assign_farmland("request", "server", "save", 12, "staff")
-        self.db.server_snapshots.update_one({"server_key": "server", "save_key": "save"},
-            {"$set": {"farms": {"2": "Repton Does", "9": "Other Farm"}}})
-        operation_id = self.lifecycle.assign_farmland("request", "server", "save", 12, "staff")
-        with self.assertRaisesRegex(ValueError, "different farmland"):
-            self.lifecycle.assign_farmland("request", "server", "save", 13, "staff")
-        self.assertTrue(operation_id)
+    def test_unconfirmed_destination_farm_and_duplicate_approval_fail_closed_or_idempotent(self):
+        self.db.farm_requests.update_one({"_id": "request"}, {"$set": {"starting_field": 12}})
+        self.db.sin_farms.update_one({"_id": "mapping"}, {"$set": {"fs25_farm_id": 9}})
+        with self.assertRaisesRegex(ValueError, "Destination farm is not confirmed"):
+            self.lifecycle.approve_request("request", "server", "save", "staff")
+        self.db.sin_farms.update_one({"_id": "mapping"}, {"$set": {"fs25_farm_id": 2}})
+        operation_id = self.lifecycle.approve_request("request", "server", "save", "staff")
+        self.assertEqual(operation_id, self.lifecycle.approve_request("request", "server", "save", "staff"))
 
     def test_already_satisfied_is_success_but_mismatch_or_foreign_scope_is_not(self):
-        operation_id = self.lifecycle.assign_farmland("request", "server", "save", 12, "staff")
+        operation_id = self.lifecycle.approve_request("request", "server", "save", "staff")
         result = self.lifecycle.accept_receipt("server", "save", {"operation_id": operation_id,
             "operation_type": "assign_farmland", "server_id": "server", "save_id": "save",
             "status": "already_satisfied", "farmland_id": 12, "farm_id": 2,
@@ -292,7 +317,7 @@ class FarmlandAssignmentLifecycleTests(unittest.TestCase):
         self.assertEqual(result["state"], "succeeded")
 
         self.db.farm_requests.update_one({"_id": "request"}, {"$set": {"state": "land_pending"}})
-        mismatch_id = self.lifecycle.assign_farmland("request", "server", "save", 12, "staff")
+        mismatch_id = self.lifecycle.approve_request("request", "server", "save", "staff")
         mismatch = self.lifecycle.accept_receipt("server", "save", {"operation_id": mismatch_id,
             "operation_type": "assign_farmland", "server_id": "other-server", "save_id": "save",
             "status": "applied", "farmland_id": 12, "farm_id": 2,

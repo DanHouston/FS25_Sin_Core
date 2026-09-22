@@ -7,23 +7,19 @@ farmland IDs and fewer field geometries; a field is not a farmland parcel.
 
 ## Lifecycle and authority
 
-`/farm_approve` now only creates or adopts the approved farm. Its successful
-FS25 receipt moves the request to `land_pending`; it grants no manager role.
-An operator then makes one explicit decision with:
+The member selects the requested farmland in `/farm_request`; the numeric ID is
+persisted with the pending server/save-scoped request. Staff then runs only
+`/farm_approve server:<server> member:<requester>`. Approval first creates or
+adopts the requested FS25 farm. Its receipt automatically queues ownership of
+the farmland already selected by the member; staff never re-enters an ID.
 
-```text
-/farmland_assign server:<server> member:<land-pending requester> farmland_id:<ID>
-```
-
-The command is limited to the configured staff/operator boundary, resolves the
-requester's stable identity and persisted FS25 farm ID server-side, and records
-the operator ID. It does not accept a farm name or client-provided authority as
-a security identity. Central requires one known server/save request, a positive
-farmland ID present in the current authenticated snapshot, an existing target
-farm ID in that same snapshot, and a currently unowned preflight owner (`0`).
-An occupied parcel is denied rather than reassigned. A request already in
-`land_assigning` only returns the same operation ID for the same farmland;
-another target is denied.
+The approval actor is recorded server-side. Central requires the stored
+farmland ID to be positive and present in the current authenticated snapshot,
+and requires the destination farm ID to have been confirmed by the preceding
+authoritative farm receipt. An occupied parcel is denied rather than
+reassigned. While land is pending, a retry of `/farm_approve` returns the same
+operation; after a terminal failure it issues a new deterministic retry for the
+same stored farmland only.
 
 The snapshot is a preflight guard, not mutation proof. The command XML carries
 the opaque operation ID, Central server/save scope, farmland ID, target farm ID,
@@ -90,12 +86,13 @@ they do not emulate or prove GIANTS APIs. On a disposable or explicitly safe
 live save:
 
 1. Run `sinFarmland X` for a known unowned farmland and retain its owner.
-2. Use `/farmland_assign` for a `land_pending` farm and record the operation ID.
+2. Run `/farm_approve` for the member who selected `X`; record the operation ID
+   returned by the normal approval workflow.
 3. Verify the FS25 farmland UI and `sinFarmland X` both show the destination
    farm ID.
 4. Inspect the operation receipt/status through the Discord response and
    `/farmland_status`; confirm pre/post owner evidence agrees.
-5. Repeat the exact operation/idempotency path; verify `already_satisfied` and
+5. Repeat `/farm_approve`; verify `already_satisfied` and
    no second mutation.
 6. Save/restart FS25, run `sinFarmland X`, and confirm persisted ownership.
 
