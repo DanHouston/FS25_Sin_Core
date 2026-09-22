@@ -54,6 +54,16 @@ then test one operation at a time with exact before/after records:
 Only then may a receipt-gated FS25 economic operation be added. A reference
 executor or a successful Lua `pcall` is not sufficient proof.
 
+## World-marker failure boundary
+
+`FS25_SiN_Server_world.xml` is created in the FS25 mission's reported
+`savegameDirectory`, rather than the profile-level mailbox. A readable marker
+is re-used verbatim. If an existing marker is missing its opaque value or
+cannot be parsed, the mod now refuses all world-scoped operations; it does not
+silently generate a replacement identity. This is deterministically reviewed
+from the mod path, but GIANTS XML write atomicity and the save-directory
+contract remain **LIVE VALIDATION REQUIRED**. No claimed FS25 save UUID exists.
+
 ## Farm 14 roster evidence
 
 `FS25SiNServer:exportSnapshot` iterates actual `g_farmManager:getFarmById(1..254)`

@@ -59,12 +59,26 @@ function FS25SiNServer:initializeWorldIdentity()
     if separator ~= "/" and separator ~= "\\" then saveDirectory = tostring(saveDirectory) .. "/" end
     local path = tostring(saveDirectory) .. "FS25_SiN_Server_world.xml"
     local worldId = nil
-    if fileExists(path) and XMLFile ~= nil and XMLFile.load ~= nil then
+    local markerExists = fileExists(path)
+    if markerExists then
+        if XMLFile == nil or XMLFile.load == nil then
+            self.worldIdentityReady = false
+            Logging.error("[SiN World] cannot read existing save marker; refusing world-scoped operations")
+            return false
+        end
         local loaded = XMLFile.load("networkLocalWorldIdentity", path)
         worldId = loaded ~= nil and loaded:getString("sinWorldIdentity#worldId") or nil
         if loaded ~= nil then loaded:delete() end
-    end
-    if worldId == nil or tostring(worldId) == "" then
+        -- A partial or malformed marker is ambiguous: silently replacing it
+        -- would make one unchanged FS25 save look like a new world and could
+        -- strand pending receipts.  Keep the runtime fail-closed for an
+        -- operator repair/restore instead.
+        if worldId == nil or tostring(worldId) == "" then
+            self.worldIdentityReady = false
+            Logging.error("[SiN World] existing save marker is malformed; refusing world-scoped operations")
+            return false
+        end
+    else
         if XMLFile == nil or XMLFile.create == nil then
             self.worldIdentityReady = false
             return false
