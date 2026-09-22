@@ -618,6 +618,29 @@ class FarmLifecycle:
                       "farm_id": farm_id, "owner_before_farm_id": owner_before,
                       "owner_farm_id": owner_after, "mutation_performed": receipt.get("mutation_performed"),
                       "updated_at": now}})
+        # A generation-aware onboarding must not present a financially
+        # provisioned farm until the real FS25 money and loan mutations are
+        # implemented with read-back receipts.  The legacy no-marker path is
+        # retained solely for old migration records; it is never served to a
+        # marker-aware game runtime.
+        if operation.get("world_id"):
+            financial_id = _operation_id("financial-provisioning", server_key, save_key,
+                                         operation["world_id"], request["_id"])
+            self.db.farm_financial_provisioning.update_one({"_id": financial_id}, {"$setOnInsert": {
+                "_id": financial_id, "server_key": server_key, "save_key": save_key,
+                "world_id": operation["world_id"], "request_id": request["_id"],
+                "farm_id": farm_id, "farmland_id": farmland_id,
+                "target_operating_cash": 1_000_000,
+                "target_land_loan": "authoritative_farmland_price_required",
+                "state": "capability_required",
+                "blocked_reason": "FS25 money and loan mutation/read-back adapter is not live-verified",
+                "created_at": now}}, upsert=True)
+            self.db.farm_requests.update_one({"_id": request["_id"], "state": "land_assigning"}, {"$set": {
+                "state": "financial_capability_required", "land_confirmed": True,
+                "land_acknowledged_at": now, "owner_before_farm_id": owner_before,
+                "owner_farm_id": owner_after, "financial_provisioning_id": financial_id,
+                "updated_at": now}})
+            return self._operation(operation["_id"])
         permission_operation = self._ensure_manager_authorization(
             request, server_key, save_key, farm_id, request.get("mapping_id"), request.get("farm_name"))
         self.db.farm_requests.update_one({"_id": request["_id"], "state": "land_assigning"}, {"$set": {

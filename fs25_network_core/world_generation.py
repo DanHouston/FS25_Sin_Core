@@ -13,7 +13,7 @@ WORLD_BOUND_COLLECTIONS = (
     "sin_farms", "farm_requests", "farm_operations", "land_operations",
     "memberships", "permission_jobs", "server_snapshots", "sin_maps",
     "deposit_requests", "withdrawals", "fs25_money_operations",
-    "bank_bridge_operations",
+    "bank_bridge_operations", "farm_financial_provisioning",
 )
 
 

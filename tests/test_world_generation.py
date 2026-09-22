@@ -52,6 +52,28 @@ class WorldGenerationTests(unittest.TestCase):
         self.assertEqual({row["world_id"] for row in rows}, {"opaque-marker-one", "opaque-marker-two"})
         self.assertEqual(self.lifecycle.current_world_id("server", "save"), "opaque-marker-two")
 
+    def test_generation_aware_onboarding_waits_for_real_financial_capability(self):
+        self.lifecycle.record_snapshot("server", "save", self.snapshot("generation-a",
+            farms={"2": "New Farm"}, farmlands={"22": 0}))
+        self.db.farm_requests.insert_one({"_id": "request", "server_key": "server", "save_key": "save",
+            "world_id": "generation-a", "state": "land_assigning", "farm_name": "New Farm"})
+        self.db.farm_operations.insert_one({"_id": "land-op", "operation_id": "land-op",
+            "server_key": "server", "save_key": "save", "world_id": "generation-a",
+            "operation_type": "assign_farmland", "state": "dispatched",
+            "payload": {"request_id": "request", "farmland_id": 22, "farm_id": 2}})
+
+        self.lifecycle.accept_receipt("server", "save", {"operation_id": "land-op",
+            "operation_type": "assign_farmland", "world_id": "generation-a", "status": "applied",
+            "farmland_id": 22, "farm_id": 2, "owner_before_farm_id": 0,
+            "owner_farm_id": 2, "receipt": "authoritative-owner-readback"}, "generation-a")
+
+        request = self.db.farm_requests.find_one({"_id": "request"})
+        financial = self.db.farm_financial_provisioning.find_one({"request_id": "request"})
+        self.assertEqual(request["state"], "financial_capability_required")
+        self.assertEqual(financial["target_operating_cash"], 1_000_000)
+        self.assertEqual(financial["state"], "capability_required")
+        self.assertIsNone(self.db.permission_jobs.find_one({"farm_id": 2}))
+
 
 if __name__ == "__main__":
     unittest.main()
