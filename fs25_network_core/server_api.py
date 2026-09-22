@@ -243,12 +243,12 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
             elif receipt.get("operation_type") == "withdraw_funds":
                 result = self.event_processor.banking.settle_withdrawal(
                     receipt["withdrawal_id"], receipt.get("status"), receipt,
-                    record["server_key"], save_key)
+                    record["server_key"], save_key, world_id)
                 result = {"operation_id": receipt["operation_id"], "state": result}
             elif receipt.get("operation_type") == "deposit_funds":
                 result = self.event_processor.banking.settle_deposit(
                     receipt["deposit_id"], receipt.get("status"), receipt,
-                    record["server_key"], save_key)
+                    record["server_key"], save_key, world_id)
                 result = {"operation_id": receipt["operation_id"], "state": result}
             elif receipt.get("revision") is not None and receipt.get("operation_type") not in {"ensure_farm", "provision_farm"}:
                 result = self.event_processor.authorization.acknowledge(

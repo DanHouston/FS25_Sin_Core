@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import hashlib
 
 from .admin_manager import AdminManager
+from .world_generation import WorldGenerationRegistry
 from pymongo.errors import DuplicateKeyError
 
 
@@ -17,6 +18,14 @@ class BankingEngine:
         self.database = database
         self.db = database.db
         self.admin = AdminManager(database)
+        self.worlds = WorldGenerationRegistry(database)
+
+    def _world_id(self, server_id, save_id, world_id):
+        """Require the active generation whenever this touches FS25 cash."""
+        active = self.worlds.active_id(server_id, save_id)
+        if active:
+            return self.worlds.require_active(server_id, save_id, world_id)
+        return None
 
     def balance(self, discord_id):
         wallet = self.db.wallets.find_one({"_id": str(discord_id)}) or {}
@@ -138,8 +147,9 @@ class BankingEngine:
             return "credited"
         return credit(session) if session is not None else self.database.atomic(credit)
 
-    def request_withdrawal(self, request_id, discord_id, server_id, save_id, amount):
+    def request_withdrawal(self, request_id, discord_id, server_id, save_id, amount, world_id=None):
         amount_units(amount)
+        world_id = self._world_id(server_id, save_id, world_id)
         user = str(discord_id)
         if not request_id:
             raise ValueError("A stable request ID is required")
@@ -155,7 +165,7 @@ class BankingEngine:
             result = self.db.wallets.update_one({"_id": user, "balance": {"$gte": amount}}, {"$inc": {"balance": -amount}}, session=session)
             if result.modified_count != 1:
                 raise ValueError("Insufficient available balance")
-            operation_id = self.transaction_id("withdrawal-operation", request_id)
+            operation_id = self.transaction_id("withdrawal-operation", world_id or "legacy", request_id)
             self._ledger(transaction_id, user, -amount, "withdrawal_reservation", "reserved for game delivery",
                          reference=request_id, server_id=server_id, save_id=save_id, session=session)
             now = datetime.now(timezone.utc)
@@ -163,19 +173,21 @@ class BankingEngine:
                 {"_id": operation_id},
                 {"$setOnInsert": {"_id": operation_id, "operation_id": operation_id,
                                    "operation_type": "withdraw_funds", "server_key": server_id,
-                                   "save_key": save_id, "payload": {"withdrawal_id": request_id,
+                                    "save_key": save_id, **({"world_id": world_id} if world_id else {}), "payload": {"withdrawal_id": request_id,
                                    "farm_id": link["farm_id"], "amount": amount}, "state": "pending",
                                    "attempts": 0, "created_at": now},
                  "$set": {"updated_at": now}}, upsert=True, session=session)
             self.db.withdrawals.insert_one(dict(_id=request_id, discord_id=user, server_id=server_id,
-                                               save_id=save_id, farm_id=link["farm_id"], amount=amount,
+                                                save_id=save_id, farm_id=link["farm_id"], amount=amount,
+                                                **({"world_id": world_id} if world_id else {}),
                                                operation_id=operation_id, state="pending", created_at=now), session=session)
             return "pending"
         return self.database.atomic(reserve)
 
-    def request_deposit(self, request_id, discord_id, server_id, save_id, amount):
+    def request_deposit(self, request_id, discord_id, server_id, save_id, amount, world_id=None):
         """Queue a game-to-SiN deposit; no central credit occurs before receipt."""
         amount_units(amount)
+        world_id = self._world_id(server_id, save_id, world_id)
         user = str(discord_id)
         if not request_id:
             raise ValueError("A stable request ID is required")
@@ -187,24 +199,25 @@ class BankingEngine:
                     raise ValueError("Deposit request ID reused with different details")
                 return old["state"]
             link = self.admin.lookup(user, server_id, save_id, session)
-            operation_id = self.transaction_id("deposit-operation", request_id)
+            operation_id = self.transaction_id("deposit-operation", world_id or "legacy", request_id)
             now = datetime.now(timezone.utc)
             self.db.farm_operations.update_one(
                 {"_id": operation_id},
                 {"$setOnInsert": {"_id": operation_id, "operation_id": operation_id,
                                    "operation_type": "deposit_funds", "server_key": server_id,
-                                   "save_key": save_id, "payload": {"deposit_id": request_id,
+                                    "save_key": save_id, **({"world_id": world_id} if world_id else {}), "payload": {"deposit_id": request_id,
                                    "farm_id": link["farm_id"], "amount": amount}, "state": "pending",
                                    "attempts": 0, "created_at": now},
                  "$set": {"updated_at": now}}, upsert=True, session=session)
             self.db.deposit_requests.insert_one({"_id": request_id, "deposit_id": request_id,
                 "discord_id": user, "server_id": server_id, "save_id": save_id,
+                **({"world_id": world_id} if world_id else {}),
                 "farm_id": link["farm_id"], "amount": amount, "operation_id": operation_id,
                 "state": "pending", "created_at": now}, session=session)
             return "pending"
         return self.database.atomic(queue)
 
-    def settle_deposit(self, request_id, outcome, receipt, server_id=None, save_id=None):
+    def settle_deposit(self, request_id, outcome, receipt, server_id=None, save_id=None, world_id=None):
         if outcome not in ("applied", "already_applied") or not receipt:
             raise ValueError("A definitive deposit outcome and durable receipt are required")
         if not isinstance(receipt, dict):
@@ -218,6 +231,8 @@ class BankingEngine:
                 raise ValueError("Deposit receipt does not match the queued operation")
             if server_id is not None and (record.get("server_id") != server_id or record.get("save_id") != save_id):
                 raise ValueError("Deposit is outside the authenticated server/save scope")
+            if record.get("world_id") and record.get("world_id") != self._world_id(server_id, save_id, world_id):
+                raise ValueError("Deposit receipt is outside the active FS25 world generation")
             if record["state"] == "completed":
                 return "completed"
             if record["state"] != "pending":
@@ -245,7 +260,7 @@ class BankingEngine:
             return "completed"
         return self.database.atomic(settle)
 
-    def settle_withdrawal(self, request_id, outcome, receipt, server_id=None, save_id=None):
+    def settle_withdrawal(self, request_id, outcome, receipt, server_id=None, save_id=None, world_id=None):
         """Trusted adapter: applied or definitively_not_applied. Unknown stays reserved."""
         if outcome not in ("applied", "definitively_not_applied") or not receipt:
             raise ValueError("A definitive outcome and durable receipt are required")
@@ -261,6 +276,8 @@ class BankingEngine:
                 raise ValueError("Withdrawal receipt does not match the queued operation")
             if server_id is not None and (record.get("server_id") != server_id or record.get("save_id") != save_id):
                 raise ValueError("Withdrawal is outside the authenticated server/save scope")
+            if record.get("world_id") and record.get("world_id") != self._world_id(server_id, save_id, world_id):
+                raise ValueError("Withdrawal receipt is outside the active FS25 world generation")
             if record["state"] != "pending":
                 if record["state"] != state:
                     raise ValueError("Conflicting settlement")
