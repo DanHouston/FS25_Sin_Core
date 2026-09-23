@@ -500,6 +500,60 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(agent.process_receipts_once(), [receipt.name])
             self.assertFalse(receipt.exists())
 
+    def test_rejected_receipt_payload_contains_runtime_scope_and_is_quarantined(self):
+        class RejectedResponse:
+            status = 400
+            headers = {}
+
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self, *args):
+                return b'{"error":"invalid_operation_receipt","reason":"operation receipt world generation is required"}'
+
+        opener = MagicMock(return_value=RejectedResponse())
+        with tempfile.TemporaryDirectory() as folder, self.assertLogs("fs25_network_core.agent", level="WARNING") as logs:
+            root = Path(folder)
+            (root / "serverBinding.xml").write_text(
+                '<serverBinding serverKey="server" credential="secret"/>', encoding="utf-8")
+            (root / "snapshot.xml").write_text(
+                '<networkLocal source="game" savegameIndex="3" worldId="hobo-world"/>', encoding="utf-8")
+            receipts = root / "permission-receipts"
+            receipts.mkdir()
+            receipt = receipts / "old-receipt.xml"
+            receipt.write_text(
+                '<networkLocalReceipt operation_id="old-receipt" operation_type="ensure_farm" '
+                'server_id="server" save_id="sin-fs25-hobo" status="applied"/>', encoding="utf-8")
+            agent = PairingAgent(root, "https://central", opener)
+            self.assertEqual(agent.process_receipts_once(), [])
+            sent = json.loads(opener.call_args.args[0].data)
+            self.assertEqual((sent["fs25_save_id"], sent["world_id"]), ("3", "hobo-world"))
+            self.assertNotIn("world_id", sent["receipt"])
+            self.assertFalse(receipt.exists())
+            self.assertTrue((receipts / "old-receipt.xml.failed").exists())
+            self.assertTrue(any("status=400" in message and "world generation is required" in message
+                                for message in logs.output))
+
+    def test_current_scoped_receipt_is_accepted_and_removed(self):
+        opener = MagicMock(return_value=Response())
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "serverBinding.xml").write_text(
+                '<serverBinding serverKey="server" credential="secret"/>', encoding="utf-8")
+            (root / "snapshot.xml").write_text(
+                '<networkLocal source="game" savegameIndex="3" worldId="hobo-world"/>', encoding="utf-8")
+            receipts = root / "permission-receipts"
+            receipts.mkdir()
+            receipt = receipts / "hobo-receipt.xml"
+            receipt.write_text(
+                '<networkLocalReceipt operation_id="hobo-receipt" operation_type="ensure_farm" '
+                'server_id="server" save_id="sin-fs25-hobo" world_id="hobo-world" status="applied"/>',
+                encoding="utf-8")
+            agent = PairingAgent(root, "https://central", opener)
+            self.assertEqual(agent.process_receipts_once(), [receipt.name])
+            sent = json.loads(opener.call_args.args[0].data)
+            self.assertEqual(sent["receipt"]["world_id"], "hobo-world")
+            self.assertFalse(receipt.exists())
+
     def test_event_processing_is_bounded_for_a_large_durable_backlog(self):
         opener = MagicMock(return_value=Response())
         with tempfile.TemporaryDirectory() as folder:

@@ -1760,6 +1760,12 @@ function FS25SiNServer:commandWorldId(command)
     return command:getString("networkLocalCommand#world_id") or command:getString("permissionCommand#world_id")
 end
 
+function FS25SiNServer:setReceiptWorldId(receipt, rootKey)
+    if receipt ~= nil and rootKey ~= nil and self.worldIdentityReady == true and self.worldId ~= nil then
+        receipt:setString(rootKey .. "#world_id", tostring(self.worldId))
+    end
+end
+
 function FS25SiNServer:rejectWrongWorldCommand(command, operationId)
     local receipt = XMLFile.create("networkLocalWorldReceipt", self.receiptDirectory .. operationId .. ".xml", "networkLocalReceipt")
     if receipt == nil then return end
@@ -1831,10 +1837,11 @@ function FS25SiNServer:processPermissionCommands()
                         receipt:setString("permissionReceipt#operation_id", operationId)
                         receipt:setString("permissionReceipt#server_id", command:getString("permissionCommand#server_id"))
                         receipt:setString("permissionReceipt#save_id", command:getString("permissionCommand#save_id"))
-                        receipt:setString("permissionReceipt#revision", command:getString("permissionCommand#revision"))
-                        receipt:setString("permissionReceipt#status", applied and "applied" or "pending_validation")
-                        receipt:setString("permissionReceipt#receipt", "Verified FS25 state: userId=" .. tostring(userId) .. "; currentFarm=" .. tostring(currentFarm and currentFarm.farmId) .. "; manager=" .. tostring(manager))
-                        self:saveReceiptAndConsume(receipt, command, operationId)
+                         receipt:setString("permissionReceipt#revision", command:getString("permissionCommand#revision"))
+                         receipt:setString("permissionReceipt#status", applied and "applied" or "pending_validation")
+                         receipt:setString("permissionReceipt#receipt", "Verified FS25 state: userId=" .. tostring(userId) .. "; currentFarm=" .. tostring(currentFarm and currentFarm.farmId) .. "; manager=" .. tostring(manager))
+                         self:setReceiptWorldId(receipt, "permissionReceipt")
+                         self:saveReceiptAndConsume(receipt, command, operationId)
                     end
                 end
             end
@@ -1874,6 +1881,7 @@ function FS25SiNServer:processContractorPermissionCommand(command, operationId)
     receipt:setString("permissionReceipt#revision", command:getString("permissionCommand#revision"))
     receipt:setString("permissionReceipt#status", applied and "applied" or "pending_validation")
     receipt:setString("permissionReceipt#receipt", reason)
+    self:setReceiptWorldId(receipt, "permissionReceipt")
     self:saveReceiptAndConsume(receipt, command, operationId)
 end
 
@@ -1900,6 +1908,7 @@ function FS25SiNServer:processContractorRevocationCommand(command, operationId)
     receipt:setString("permissionReceipt#revision", command:getString("permissionCommand#revision"))
     receipt:setString("permissionReceipt#status", applied and "applied" or "pending_validation")
     receipt:setString("permissionReceipt#receipt", reason)
+    self:setReceiptWorldId(receipt, "permissionReceipt")
     self:saveReceiptAndConsume(receipt, command, operationId)
 end
 
@@ -1922,6 +1931,7 @@ function FS25SiNServer:processChatCommand(command, operationId)
     receipt:setString("permissionReceipt#save_id", command:getString("networkLocalCommand#save_id"))
     receipt:setString("permissionReceipt#status", "pending_validation")
     receipt:setString("permissionReceipt#receipt", "FS25 chat display API requires live runtime verification; no chat mutation was attempted")
+    self:setReceiptWorldId(receipt, "permissionReceipt")
     self:saveReceiptAndConsume(receipt, command, operationId)
 end
 
@@ -2122,6 +2132,7 @@ function FS25SiNServer:processFarmProvisionCommand(command, operationId, operati
     receipt:setInt("networkLocalReceipt#farm_id", farmId)
     receipt:setString("networkLocalReceipt#status", status)
     receipt:setString("networkLocalReceipt#receipt", reason)
+    self:setReceiptWorldId(receipt, "networkLocalReceipt")
     self:saveReceiptAndConsume(receipt, command, operationId)
 end
 
@@ -2148,6 +2159,7 @@ function FS25SiNServer:processNameAlignment(command, operationId)
             receipt:setString("networkLocalReceipt#revision", command:getString("networkLocalCommand#revision"))
             receipt:setString("networkLocalReceipt#status", "pending_validation")
             receipt:setString("networkLocalReceipt#receipt", "identity was not connected during command processing")
+            self:setReceiptWorldId(receipt, "networkLocalReceipt")
             self:saveReceiptAndConsume(receipt, command, operationId)
         end
         return
@@ -2174,6 +2186,7 @@ function FS25SiNServer:processNameAlignment(command, operationId)
         receipt:setString("networkLocalReceipt#revision", command:getString("networkLocalCommand#revision"))
         receipt:setString("networkLocalReceipt#status", aligned and "applied" or "pending_validation")
         receipt:setString("networkLocalReceipt#receipt", aligned and "nickname matched canonical identity" or "nickname could not be verified")
+        self:setReceiptWorldId(receipt, "networkLocalReceipt")
         self:saveReceiptAndConsume(receipt, command, operationId)
     end
 end
@@ -2235,6 +2248,7 @@ function FS25SiNServer:processLandCommand(command, operationId)
     receipt:setBool("networkLocalReceipt#mutation_performed", mutationPerformed)
     receipt:setString("networkLocalReceipt#status", status)
     receipt:setString("networkLocalReceipt#receipt", reason)
+    self:setReceiptWorldId(receipt, "networkLocalReceipt")
     self:saveReceiptAndConsume(receipt, command, operationId)
 end
 

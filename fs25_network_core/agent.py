@@ -59,6 +59,7 @@ class PairingAgent:
     DEFAULT_EVENT_BATCH_SIZE = DEFAULT_EVENT_BATCH_SIZE
     MAX_EVENT_BATCH_SIZE = 500
     MAX_EVENT_LOOKAHEAD = 1000
+    PERMANENT_RECEIPT_REJECTION_STATUSES = frozenset({400, 404, 422})
 
     def __init__(self, mailbox_dir, backend_url, opener=None, event_batch_size=None):
         self.directory = Path(mailbox_dir)
@@ -192,7 +193,14 @@ class PairingAgent:
                                    "Authorization": "Bearer " + credential}, method="POST")
         with self.opener(request, timeout=10) as response:
             if response.status != 200:
-                raise HTTPError(request.full_url, response.status, "receipt API rejected request", response.headers, None)
+                try:
+                    raw_body = response.read(4096)
+                except TypeError:
+                    raw_body = response.read()
+                error = HTTPError(request.full_url, response.status, "receipt API rejected request",
+                                  response.headers, None)
+                error.sin_detail = self._safe_http_error_detail(raw_body)
+                raise error
             return json.loads(response.read().decode("utf-8"))
 
     @staticmethod
@@ -313,11 +321,29 @@ class PairingAgent:
             except (ElementTree.ParseError, ValueError):
                 self._quarantine(path)
             except (HTTPError, URLError, TimeoutError, RuntimeError, OSError, json.JSONDecodeError) as error:
-                if getattr(error, "code", None) in {400, 401, 403, 404, 422}:
-                    # Failed/rejected receipts remain durable audit evidence;
-                    # Central reconciliation may need them after a policy or
-                    # scope correction. Never bulk-delete authoritative acks.
-                    LOG.warning("receipt rejected; retaining for audit path=%s", path.name)
+                code = getattr(error, "code", None)
+                detail = getattr(error, "sin_detail", None)
+                if detail is None and isinstance(error, HTTPError):
+                    try:
+                        raw_body = error.read(4096)
+                    except (AttributeError, OSError, TypeError):
+                        raw_body = b""
+                    detail = self._safe_http_error_detail(raw_body)
+                if code in self.PERMANENT_RECEIPT_REJECTION_STATUSES:
+                    # A malformed, stale, or wrong-world receipt must never be
+                    # replayed forever.  Quarantine it as audit evidence; a
+                    # human can reconcile any game-side mutation explicitly.
+                    if self._quarantine(path):
+                        LOG.warning("operation receipt rejected status=%s detail=%s quarantined path=%s",
+                                    code, detail or {"body": ""}, path.name)
+                    else:
+                        LOG.warning("operation receipt rejected status=%s detail=%s; quarantine failed path=%s",
+                                    code, detail or {"body": ""}, path.name)
+                elif isinstance(error, HTTPError):
+                    # Authentication and transport failures may become valid
+                    # after operator correction, so retain the receipt.
+                    LOG.warning("operation receipt unavailable status=%s detail=%s retaining path=%s",
+                                code, detail or {"body": ""}, path.name)
         return receipts
 
     def process_manager_authority_once(self):

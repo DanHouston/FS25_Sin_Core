@@ -421,6 +421,25 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn('permissionReceipt#status", "pending_validation"', source)
         self.assertIn("FS25 chat display API requires live runtime verification", source)
 
+    def test_every_normal_lua_receipt_carries_current_world_generation(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8")
+        self.assertIn("function FS25SiNServer:setReceiptWorldId(receipt, rootKey)", source)
+        expected = {
+            "processPermissionCommands": ('self:setReceiptWorldId(receipt, "permissionReceipt")', 1),
+            "processContractorPermissionCommand": ('self:setReceiptWorldId(receipt, "permissionReceipt")', 1),
+            "processContractorRevocationCommand": ('self:setReceiptWorldId(receipt, "permissionReceipt")', 1),
+            "processChatCommand": ('self:setReceiptWorldId(receipt, "permissionReceipt")', 1),
+            "processFarmProvisionCommand": ('self:setReceiptWorldId(receipt, "networkLocalReceipt")', 1),
+            "processNameAlignment": ('self:setReceiptWorldId(receipt, "networkLocalReceipt")', 2),
+            "processLandCommand": ('self:setReceiptWorldId(receipt, "networkLocalReceipt")', 1),
+        }
+        for function_name, (marker, count) in expected.items():
+            start = source.index("function FS25SiNServer:" + function_name)
+            end = source.find("\nfunction FS25SiNServer:", start + 1)
+            block = source[start:] if end == -1 else source[start:end]
+            self.assertEqual(block.count(marker), count, function_name)
+
     def test_server_runtime_has_no_fixed_system_farm_id_assumption(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
             encoding="utf-8")

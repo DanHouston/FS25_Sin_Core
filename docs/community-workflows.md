@@ -86,15 +86,17 @@ reported as applied and remain a reconciliation concern.
 Permission-command XML is consumed only after the mod has produced its receipt;
 the runtime now removes the exact command file and manifest with GIANTS'
 `deleteFile` API. A `.failed` receipt remains auditable and is not deleted by
-cleanup. This prevents old command XML from being rediscovered while keeping
-failed central acknowledgments durable for retry/reconciliation.
+cleanup. This prevents old command XML from being rediscovered. The Agent
+retains transient/authentication failures for retry, but quarantines permanent
+400/404/422 receipt rejections as `.failed` so malformed or stale scope
+evidence cannot be retried forever.
 
 Game-facing value operations remain receipt-gated.  A queued operation is not
 completion: the Agent writes it to the FS25 mailbox, the mod returns a durable
 receipt, and the central API commits the business projection only after the
-receipt is authenticated for the same server/save and matches the queued
-operation ID.  Repeated identical receipts are safe; conflicting terminal
-receipts are rejected and left for reconciliation.
+receipt is authenticated for the same server/save/world generation and matches
+the queued operation ID.  Repeated identical receipts are safe; conflicting
+terminal receipts are rejected and left for reconciliation.
 
 Processed server events, activity outbox records, telemetry intervals, and
 chat observations are scoped by `server_key` and canonical `save_key` where

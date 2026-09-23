@@ -88,6 +88,43 @@ class ServerApiTests(unittest.TestCase):
         self.assertEqual((response.status, body["error"]), (400, "save_mapping_required"))
         self.assertIn("save mapping required", "\n".join(logs.output))
 
+    def test_operation_receipt_missing_world_is_rejected_with_reason_and_logged(self):
+        handler = self.server.RequestHandlerClass
+        handler.event_processor.registry.authenticate.return_value = {"server_key": "sin-fs25-01"}
+        handler.event_processor.registry.resolve_save.return_value = "sin-fs25-hobo"
+        handler.farm_lifecycle = MagicMock()
+        payload = {"fs25_save_id": "3", "world_id": "hobo-world", "receipt": {
+            "operation_id": "old-receipt", "operation_type": "ensure_farm", "status": "applied",
+            "save_id": "sin-fs25-hobo"}}
+        connection = HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
+        with self.assertLogs("fs25_network_core.server_api", level="WARNING") as logs:
+            connection.request("POST", "/api/server/operation-receipts", json.dumps(payload), {
+                "Content-Type": "application/json", "X-SiN-Server-Key": "sin-fs25-01",
+                "Authorization": "Bearer secret"})
+            response = connection.getresponse()
+            body = json.loads(response.read())
+        connection.close()
+        self.assertEqual((response.status, body), (400, {
+            "error": "invalid_operation_receipt",
+            "reason": "operation receipt world generation is required"}))
+        self.assertTrue(any("operation receipt rejected" in message
+                            and "operation receipt world generation is required" in message
+                            for message in logs.output))
+
+    def test_malformed_operation_receipt_logs_bounded_reason(self):
+        connection = HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
+        with self.assertLogs("fs25_network_core.server_api", level="WARNING") as logs:
+            connection.request("POST", "/api/server/operation-receipts", "{not-json", headers={
+                "Content-Type": "application/json", "X-SiN-Server-Key": "sin-fs25-01",
+                "Authorization": "Bearer secret"})
+            response = connection.getresponse()
+            body = json.loads(response.read())
+        connection.close()
+        self.assertEqual((response.status, body), (400, {
+            "error": "invalid_operation_receipt", "reason": "malformed_json"}))
+        self.assertTrue(any("operation receipt rejected" in message and "malformed_json" in message
+                            for message in logs.output))
+
     def test_snapshot_records_and_activates_runtime_evidence(self):
         handler = self.server.RequestHandlerClass
         handler.event_processor.registry.authenticate.return_value = {"server_key": "sin-fs25-01"}

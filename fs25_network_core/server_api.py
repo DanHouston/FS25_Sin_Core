@@ -38,6 +38,18 @@ def _json_response(handler, status, payload):
     handler.wfile.write(body)
 
 
+def _safe_receipt_reason(error):
+    """Return bounded diagnostics without echoing receipt contents."""
+    if isinstance(error, json.JSONDecodeError):
+        return "malformed_json"
+    if isinstance(error, KeyError):
+        return "missing_receipt_field"
+    if isinstance(error, TypeError):
+        return "invalid_receipt_shape"
+    reason = str(error).strip()
+    return reason[:240] if reason else "invalid_operation_receipt"
+
+
 class PairingRequestHandler(BaseHTTPRequestHandler):
     """HTTP boundary for the one-time pairing bootstrap secret."""
 
@@ -232,6 +244,10 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
                                    "received_at": result["received_at"].isoformat()})
 
     def do_receipt(self):
+        payload = {}
+        record = None
+        save_key = None
+        receipt = None
         try:
             payload = self._read_json(128_000)
             record, save_key = self._authenticated_scope(payload)
@@ -239,8 +255,12 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
             if not isinstance(receipt, dict):
                 raise ValueError("operation receipt is required")
             world_id = payload.get("world_id")
+            if not world_id:
+                raise ValueError("runtime world generation is required")
             self.farm_lifecycle.require_current_world(record["server_key"], save_key, world_id)
-            if str(receipt.get("world_id") or "") != str(world_id):
+            if not receipt.get("world_id"):
+                raise ValueError("operation receipt world generation is required")
+            if str(receipt.get("world_id")) != str(world_id):
                 raise ValueError("operation receipt world generation does not match runtime")
             if receipt.get("operation_type") == "assign_farmland":
                 # Farmland assignment is a FarmLifecycle operation.  Its
@@ -277,8 +297,13 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
             _json_response(self, 401, {"error": "invalid_server_authentication"})
             return
         except (KeyError, TypeError, ValueError) as error:
+            reason = _safe_receipt_reason(error)
             status = 404 if "unknown" in str(error).lower() or "save" in str(error).lower() else 400
-            _json_response(self, status, {"error": "invalid_operation_receipt"})
+            operation_id = receipt.get("operation_id") if isinstance(receipt, dict) else None
+            LOG.warning("operation receipt rejected server=%s save=%s operation=%s reason=%s",
+                        self.headers.get("X-SiN-Server-Key", "<missing>"), save_key or "<unresolved>",
+                        str(operation_id)[:120] if operation_id is not None else "<missing>", reason)
+            _json_response(self, status, {"error": "invalid_operation_receipt", "reason": reason})
             return
         _json_response(self, 200, {"status": "accepted", "operation_id": result["operation_id"],
                                    "operation_state": result.get("state")})
