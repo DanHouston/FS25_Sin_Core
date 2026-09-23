@@ -19,7 +19,7 @@ jobs:
       - name: Run tests
         run: python -m unittest discover -s tests
       - name: Run offline integration campaign
-        run: python scripts/run_integration_campaign.py --output integration-campaign.json
+        run: python scripts/run_integration_campaign.py --output local-test/integration-campaign.json
       - name: Verify named scenario manifest
         shell: python
         run: |
@@ -29,7 +29,7 @@ jobs:
           required = ["registration", "control_plane_backlog", "activity_disconnect",
                       "map_contract", "contract_scope", "authority_regression"]
           assert manifest["required_scenarios"] == required
-          assert all(Path("integration-campaign.json").read_text().find(secret) < 0
+          assert all(Path("local-test/integration-campaign.json").read_text().find(secret) < 0
                      for secret in ("campaign-secret", "credential", "pairing_code"))
       - name: Compile Python
         run: python -m compileall -q fs25_network_core tests scripts
