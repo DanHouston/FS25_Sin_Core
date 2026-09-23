@@ -8,6 +8,7 @@ from xml.etree import ElementTree
 
 from fs25_network_core.agent import PairingAgent
 from fs25_network_core.authorization import AuthorizationManager
+from fs25_network_core.lua_validation import validate_fs25_lua_source
 
 
 class RegistrationTests(unittest.TestCase):
@@ -18,6 +19,12 @@ class RegistrationTests(unittest.TestCase):
         self.database.db.registration_codes.find_one.return_value = None
         self.database.db.game_identities.find.return_value.limit.return_value = []
         self.auth = AuthorizationManager(self.database)
+
+    def test_all_packaged_fs25_lua_sources_pass_runtime_dialect_gate(self):
+        root = Path(__file__).parents[1] / "mods" / "FS25_SiN_Server"
+        for path in sorted(root.rglob("*.lua")):
+            with self.subTest(path=path):
+                validate_fs25_lua_source(path.read_bytes(), str(path.relative_to(root)))
 
     def test_request_creates_and_reuses_active_human_code(self):
         expires = datetime.now(timezone.utc) + timedelta(minutes=10)

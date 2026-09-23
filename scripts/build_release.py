@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from fs25_network_core.integration_campaign import authoritative_manifest, run_campaign
+from fs25_network_core.lua_validation import validate_fs25_lua_source
 AGENT_FILES = ("fs25_network_core/__init__.py", "fs25_network_core/agent.py")
 MOD_ASSET = "FS25_SiN_Server.zip"
 CLIENT_UPDATER_ASSET = "Update-SiN-Client.ps1"
@@ -55,6 +56,8 @@ def build_mod(destination):
     if any(not name for name in source_names):
         raise ValueError("FS25_SiN_Server mod descriptor contains an invalid source file")
     names_to_package = ["modDesc.xml"] + source_names + [icon_name]
+    for lua_path in source.rglob("*.lua"):
+        validate_fs25_lua_source(lua_path.read_bytes(), str(lua_path.relative_to(ROOT)))
     files = [(name, source / name) for name in names_to_package]
     zip_files(destination, files)
     with ZipFile(destination) as archive:
@@ -63,6 +66,9 @@ def build_mod(destination):
             raise ValueError("FS25_SiN_Server ZIP is missing required root files")
         if set(names_to_package) != names:
             raise ValueError("FS25_SiN_Server ZIP does not match mod descriptor sources")
+        for name in names:
+            if name.lower().endswith(".lua"):
+                validate_fs25_lua_source(archive.read(name), name)
 
 
 def build_agent(destination):

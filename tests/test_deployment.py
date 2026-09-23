@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from zipfile import ZipFile
 
+from fs25_network_core.lua_validation import LuaValidationError, validate_fs25_lua_source
 from scripts.build_release import build
 
 
@@ -60,6 +61,9 @@ class DeploymentPackagingTests(unittest.TestCase):
                 self.assertIn("modDesc.xml", archive.namelist())
                 self.assertIn("NetworkLocal.lua", archive.namelist())
                 self.assertIn("events/SiNRegistrationWarningEvent.lua", archive.namelist())
+                for name in archive.namelist():
+                    if name.lower().endswith(".lua"):
+                        validate_fs25_lua_source(archive.read(name), name)
             with ZipFile(output / "sin-agent.zip") as archive:
                 agent_source = archive.read("fs25_network_core/agent.py").decode("utf-8")
                 self.assertIn("process_events_once(self.event_batch_size)", agent_source)
@@ -69,6 +73,12 @@ class DeploymentPackagingTests(unittest.TestCase):
                 hashlib.sha256((output / "FS25_SiN_Server.zip").read_bytes()).hexdigest(),
                 manifest["server_sha256"],
             )
+
+    def test_fs25_lua_gate_rejects_lua52_control_flow(self):
+        with self.assertRaisesRegex(LuaValidationError, "goto/continue"):
+            validate_fs25_lua_source("function probe()\n    goto continue\nend\n", "probe.lua")
+        with self.assertRaisesRegex(LuaValidationError, "labels"):
+            validate_fs25_lua_source("function probe()\n::target::\nend\n", "probe.lua")
 
     def test_updater_migrates_complete_legacy_mailbox_without_rewriting_binding(self):
         powershell = shutil.which("powershell.exe") or shutil.which("pwsh")

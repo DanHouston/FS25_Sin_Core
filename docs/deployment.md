@@ -17,6 +17,11 @@ The Agent archive contains only `fs25_network_core/__init__.py` and
 `fs25_network_core/agent.py`; it has no Mongo dependency or credentials. The
 FS25_SiN_Server archive is rebuilt from `mods/FS25_SiN_Server` and verified
 to contain `modDesc.xml` and `NetworkLocal.lua` at its archive root.
+The release builder also validates every packaged Lua source against the FS25
+Lua runtime dialect (including rejection of Lua 5.2+ `goto`/label syntax) both
+before and after archive creation. A GIANTS runtime load test remains required,
+but a source that cannot be parsed by the FS25 Lua dialect gate cannot enter a
+release artifact.
 
 ## Creating a release
 
