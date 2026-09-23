@@ -57,10 +57,13 @@ class AuthorizationManager:
         if not starting_field.strip() or len(starting_field) > 80:
             raise ValueError("Starting field must contain 1–80 characters")
         farm_name = application["farm_name"]
-        request_id = key(server_id, save_id, str(discord_id))
+        world_id = self.worlds.active_id(server_id, save_id)
+        request_id = key(server_id, save_id, world_id, str(discord_id)) if world_id else key(server_id, save_id, str(discord_id))
         record = dict(_id=request_id, discord_id=str(discord_id), server_id=server_id, save_id=save_id,
                       farm_name=farm_name.strip(), starting_field=starting_field.strip(), state="requested",
                       created_at=datetime.now(timezone.utc))
+        if world_id:
+            record["world_id"] = world_id
         old = self.db.farm_requests.find_one({"_id": request_id})
         if old and old.get("state") == "rejected":
             record["created_at"] = old.get("created_at", record["created_at"])
@@ -202,16 +205,24 @@ class AuthorizationManager:
                 "reason": "approved", "match_count": 1}
 
     def requests(self, server_id, save_id):
-        return list(self.db.farm_requests.find(dict(server_id=server_id, save_id=save_id,
-            state={"$in": ["requested", "pending"]})).sort("created_at", 1).limit(15))
+        query = dict(server_id=server_id, save_id=save_id, state={"$in": ["requested", "pending"]})
+        active = self.worlds.active_id(server_id, save_id)
+        if active:
+            query["world_id"] = active
+        return list(self.db.farm_requests.find(query).sort("created_at", 1).limit(15))
 
-    def pending_request_for_user(self, discord_id, server_id, save_id):
-        request = self.db.farm_requests.find_one(dict(
-            _id=key(server_id, save_id, str(discord_id)),
+    def pending_request_for_user(self, discord_id, server_id, save_id, world_id=None):
+        world_id = world_id or self.worlds.active_id(server_id, save_id)
+        query = dict(
+            _id=(key(server_id, save_id, world_id, str(discord_id)) if world_id
+                 else key(server_id, save_id, str(discord_id))),
             server_id=server_id,
             save_id=save_id,
             state={"$in": ["requested", "pending"]},
-        ))
+        )
+        if world_id:
+            query["world_id"] = world_id
+        request = self.db.farm_requests.find_one(query)
         if not request:
             raise ValueError("That member has no pending farm request for this server")
         return request
@@ -227,9 +238,18 @@ class AuthorizationManager:
             raise ValueError("Select a player identity from the fresh game roster")
         if not snapshot.get("farms", {}).get(farm_id, "").strip():
             raise ValueError("Select a named farm from the fresh game snapshot")
+        active_world = self.worlds.active_id(server_id, save_id)
+        world_id = snapshot.get("world_id")
+        if active_world:
+            world_id = self.worlds.require_active(server_id, save_id, world_id)
+        elif world_id:
+            raise ValueError("FS25 world generation is not current for this server/save")
 
         def approve(session):
-            request = self.db.farm_requests.find_one(dict(_id=request_id, server_id=server_id, save_id=save_id), session=session)
+            request_query = dict(_id=request_id, server_id=server_id, save_id=save_id)
+            if world_id:
+                request_query["world_id"] = world_id
+            request = self.db.farm_requests.find_one(request_query, session=session)
             if not request:
                 raise ValueError("Unknown request for this server/save")
             try:
@@ -256,30 +276,45 @@ class AuthorizationManager:
                     observation_session=snapshot["session"], observation_sequence=snapshot["sequence"]), session=session)
             operation = request.get("operation_id") or str(uuid.uuid4())
             now = datetime.now(timezone.utc)
-            self.db.land_operations.update_one({"_id": operation}, {"$setOnInsert": dict(
+            land_values = dict(
                 _id=operation, operation_id=operation, request_id=request_id,
                 discord_id=request["discord_id"], server_id=server_id, save_id=save_id,
                 farm_id=farm_id, farmland_id=farmland_id, state="pending",
-                created_at=now, updated_at=now, attempts=0)}, upsert=True, session=session)
+                created_at=now, updated_at=now, attempts=0)
+            if world_id:
+                land_values["world_id"] = world_id
+            self.db.land_operations.update_one({"_id": operation}, {"$setOnInsert": land_values}, upsert=True, session=session)
             self.db.farm_requests.update_one({"_id": request_id}, {"$set": dict(state="land_pending", farm_id=farm_id,
                 game_player_id=player_id, approved_by=str(approved_by), approved_at=datetime.now(timezone.utc),
                 operation_id=operation, land_confirmed=False)}, session=session)
             return operation
         return self.database.atomic(approve)
 
-    def acknowledge_land(self, operation_id, server_id, save_id, farmland_id, farm_id, owner_farm_id, success, details):
+    def acknowledge_land(self, operation_id, server_id, save_id, farmland_id, farm_id, owner_farm_id, success, details,
+                         world_id=None):
         if not details or not success or int(owner_farm_id) != int(farm_id):
             raise ValueError("Land acknowledgement does not prove requested ownership")
 
+        active_world = self.worlds.active_id(server_id, save_id)
+        if active_world:
+            world_id = self.worlds.require_active(server_id, save_id, world_id)
+        elif world_id:
+            raise ValueError("FS25 world generation is not current for this server/save")
+
         def acknowledge(session):
-            op = self.db.land_operations.find_one({"_id": operation_id, "server_id": server_id,
-                "save_id": save_id}, session=session)
+            op_query = {"_id": operation_id, "server_id": server_id, "save_id": save_id}
+            if world_id:
+                op_query["world_id"] = world_id
+            op = self.db.land_operations.find_one(op_query, session=session)
             if not op or int(op["farmland_id"]) != int(farmland_id) or int(op["farm_id"]) != int(farm_id):
                 raise ValueError("Unknown land operation or mismatched server/save/farm/field")
             if op["state"] == "succeeded":
                 return "succeeded"
-            request = self.db.farm_requests.find_one({"_id": op["request_id"], "server_id": server_id,
-                "save_id": save_id, "operation_id": operation_id}, session=session)
+            request_query = {"_id": op["request_id"], "server_id": server_id,
+                             "save_id": save_id, "operation_id": operation_id}
+            if world_id:
+                request_query["world_id"] = world_id
+            request = self.db.farm_requests.find_one(request_query, session=session)
             if not request or request["state"] != "land_pending":
                 raise ValueError("Land operation is not associated with a pending farm request")
             now = datetime.now(timezone.utc)
@@ -287,7 +322,8 @@ class AuthorizationManager:
                 {"$set": {"state": "succeeded", "acknowledgement": details,
                           "owner_farm_id": int(owner_farm_id), "updated_at": now}}, session=session)
             permission_operation = self.assign(request["discord_id"], server_id, save_id, int(farm_id),
-                "farm_manager", {int(farm_id): request["farm_name"]}, request.get("approved_by") or "land-ack", session=session)
+                "farm_manager", {int(farm_id): request["farm_name"]}, request.get("approved_by") or "land-ack",
+                session=session, world_id=world_id)
             self.db.farm_requests.update_one({"_id": request["_id"], "state": "land_pending"},
                 {"$set": {"state": "approved", "land_confirmed": True, "land_acknowledged_at": now,
                           "permission_operation_id": permission_operation}}, session=session)
@@ -297,7 +333,11 @@ class AuthorizationManager:
     def reject_request(self, request_id, server_id, save_id, approved_by, reason):
         if not approved_by or not reason.strip() or len(reason) > 300:
             raise ValueError("A staff reviewer and reason (1–300 characters) are required")
-        result = self.db.farm_requests.update_one(dict(_id=request_id, server_id=server_id, save_id=save_id, state="requested"),
+        query = dict(_id=request_id, server_id=server_id, save_id=save_id, state="requested")
+        active_world = self.worlds.active_id(server_id, save_id)
+        if active_world:
+            query["world_id"] = active_world
+        result = self.db.farm_requests.update_one(query,
             {"$set": dict(state="rejected", reviewed_by=str(approved_by), reason=reason.strip(), reviewed_at=datetime.now(timezone.utc))})
         if result.modified_count != 1:
             raise ValueError("Request is unknown or already reviewed")
