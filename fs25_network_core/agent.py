@@ -195,6 +195,25 @@ class PairingAgent:
                 raise HTTPError(request.full_url, response.status, "receipt API rejected request", response.headers, None)
             return json.loads(response.read().decode("utf-8"))
 
+    @staticmethod
+    def _safe_http_error_detail(raw_body):
+        """Return bounded, non-secret response details for operational logs."""
+        if isinstance(raw_body, bytes):
+            text = raw_body.decode("utf-8", errors="replace")
+        else:
+            text = str(raw_body or "")
+        try:
+            payload = json.loads(text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {"body": text[:240]}
+        if isinstance(payload, dict):
+            safe = {}
+            for key in ("error", "reason", "message", "status"):
+                if key in payload and payload[key] is not None:
+                    safe[key] = str(payload[key])[:240]
+            return safe or {"body": text[:240]}
+        return {"body": text[:240]}
+
     def _snapshot_payload(self):
         root = ElementTree.parse(self.directory / "snapshot.xml").getroot()
         if root.tag != "networkLocal" or root.get("source") != "game":
@@ -347,6 +366,13 @@ class PairingAgent:
                                        "Authorization": "Bearer " + credential}, method="POST")
             with self.opener(request, timeout=10) as response:
                 if response.status != 200:
+                    try:
+                        raw_body = response.read(4096)
+                    except TypeError:
+                        raw_body = response.read()
+                    detail = self._safe_http_error_detail(raw_body)
+                    LOG.warning("snapshot submission rejected status=%s detail=%s",
+                                response.status, detail)
                     raise RuntimeError("snapshot API rejected request")
                 response.read()
             return True

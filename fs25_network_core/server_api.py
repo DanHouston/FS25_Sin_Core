@@ -201,7 +201,9 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
         except PermissionError:
             _json_response(self, 401, {"error": "invalid_server_authentication"})
             return
-        except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
+            LOG.warning("snapshot malformed server=%s reason=%s",
+                        self.headers.get("X-SiN-Server-Key", "<missing>"), str(error))
             _json_response(self, 400, {"error": "malformed_snapshot"})
             return
         try:

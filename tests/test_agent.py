@@ -309,6 +309,31 @@ class AgentTests(unittest.TestCase):
             self.assertIn('target_game_minutes="840"', text)
             self.assertNotIn("secret-value", text)
 
+    def test_snapshot_rejection_logs_status_and_safe_error_detail(self):
+        class RejectedResponse:
+            status = 400
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self, *_args):
+                return json.dumps({"error": "invalid_snapshot", "reason": "authoritative world generation is required",
+                                   "credential": "must-not-be-logged"}).encode()
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "serverBinding.xml").write_text(
+                '<serverBinding serverKey="sin-fs25-01" credential="secret-value"/>', encoding="utf-8")
+            (root / "snapshot.xml").write_text(
+                '<networkLocal source="game" savegameIndex="3" worldId="hobo-world"/>', encoding="utf-8")
+            agent = PairingAgent(root, "https://central", MagicMock(return_value=RejectedResponse()))
+            with self.assertLogs(agent_module.__name__, level="WARNING") as logs:
+                self.assertFalse(agent.process_snapshot_once())
+        output = "\n".join(logs.output)
+        self.assertIn("status=400", output)
+        self.assertIn("invalid_snapshot", output)
+        self.assertIn("authoritative world generation is required", output)
+        self.assertNotIn("must-not-be-logged", output)
+        self.assertNotIn("secret-value", output)
+
     def test_agent_materializes_central_farm_operation_without_mongo(self):
         class OperationResponse:
             status = 200

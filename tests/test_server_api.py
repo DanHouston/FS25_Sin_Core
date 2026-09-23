@@ -55,6 +55,19 @@ class ServerApiTests(unittest.TestCase):
         self.assertEqual(response.status, 400)
         connection.close()
 
+    def test_malformed_snapshot_logs_reason_before_scope_resolution(self):
+        connection = HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
+        with self.assertLogs("fs25_network_core.server_api", level="WARNING") as logs:
+            connection.request("POST", "/api/server/snapshot", "{not-json", headers={
+                "Content-Type": "application/json", "X-SiN-Server-Key": "sin-fs25-01",
+                "Authorization": "Bearer secret"})
+            response = connection.getresponse()
+            response.read()
+        self.assertEqual(response.status, 400)
+        self.assertTrue(any("snapshot malformed" in message and "Expecting" in message
+                            for message in logs.output))
+        connection.close()
+
     def test_event_endpoint_forwards_to_central_processor(self):
         connection = HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
         event = {"event_id": "e1", "event_type": "heartbeat", "server_key": "sin-fs25-01",
