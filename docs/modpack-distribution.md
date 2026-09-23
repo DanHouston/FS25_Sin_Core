@@ -104,6 +104,28 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -ModpackVersion v0.1.32
 ```
 
+If the chosen source/client folder itself is the operator-approved complete
+modset, use the explicit source-approval mode instead. This is the one-command
+path for a first publication or for intentionally approving every ZIP currently
+in that folder:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File 'C:\repos\FS25_SiN_Core\scripts\Update-SiN-Client.ps1' `
+  -Version v0.1.32 `
+  -ModsPath 'C:\Users\Dan\OneDrive\Documents\My Games\SiN' `
+  -PublishModpack -ApproveAllSourceMods `
+  -ModpackRepositoryRoot 'C:\repos\FS25_SiN_Core' `
+  -ModpackPublicationRoot 'G:\My Drive\SiN Mods' `
+  -ModpackServerKey 'sin-fs25-01' `
+  -ModpackServerName 'SiN Test Server 01' `
+  -ModpackVersion v0.1.32
+```
+
+This enumerates only `*.zip` files in the explicitly supplied folder at the
+moment the command runs. It is not a watcher and does not publish when files
+appear; the switch is the approval action.
+
 `-RefreshApprovedModpack` is explicit and fail-closed: it reads the current
 `manifest.json` as the approval allowlist, so new ZIPs in the source directory
 are not published and removed approved ZIPs cause the operation to stop. The
@@ -112,8 +134,8 @@ first modified when the validated `Releases/<version>` capture is written.
 `Current` is replaced only after the complete release validates. The command
 does not synchronize unrelated local ZIPs or deploy to the dedicated server.
 
-For an intentional approved-set change, omit `-RefreshApprovedModpack` and
-provide every approved filename explicitly with repeated `-ApprovedMod`:
+For a deliberately constrained approved set, omit both refresh/source-approval
+modes and provide every approved filename explicitly with repeated `-ApprovedMod`:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `

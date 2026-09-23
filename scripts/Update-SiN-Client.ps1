@@ -5,6 +5,7 @@ param(
     [string]$ModsPath = $env:SIN_FS25_CLIENT_MODS_DIR,
     [switch]$PublishModpack,
     [switch]$RefreshApprovedModpack,
+    [switch]$ApproveAllSourceMods,
     [string]$ModpackRepositoryRoot = $env:SIN_MODPACK_REPOSITORY_ROOT,
     [string]$ModpackPublicationRoot = $env:SIN_MODPACK_PUBLICATION_ROOT,
     [string]$ModpackServerKey = $env:SIN_MODPACK_SERVER_KEY,
@@ -60,6 +61,9 @@ if (-not $ModsPath) {
 if ($RefreshApprovedModpack -and -not $PublishModpack) {
     throw "-RefreshApprovedModpack requires -PublishModpack."
 }
+if ($ApproveAllSourceMods -and $RefreshApprovedModpack) {
+    throw "-ApproveAllSourceMods cannot be combined with -RefreshApprovedModpack."
+}
 if ($PublishModpack) {
     if (-not $ModpackRepositoryRoot) {
         throw "-ModpackRepositoryRoot or SIN_MODPACK_REPOSITORY_ROOT is required when publishing a modpack."
@@ -67,8 +71,8 @@ if ($PublishModpack) {
     if (-not $ModpackPublicationRoot -or -not $ModpackServerKey -or -not $ModpackServerName) {
         throw "Modpack publication requires publication root, server key, and server name."
     }
-    if (-not $RefreshApprovedModpack -and @($ApprovedMod).Count -eq 0) {
-        throw "New modpack approval requires one or more -ApprovedMod values; use -RefreshApprovedModpack to preserve the current approved set."
+    if (-not $RefreshApprovedModpack -and -not $ApproveAllSourceMods -and @($ApprovedMod).Count -eq 0) {
+        throw "New modpack approval requires -ApproveAllSourceMods or one or more -ApprovedMod values; use -RefreshApprovedModpack to preserve the current approved set."
     }
 }
 
@@ -158,6 +162,15 @@ try {
         if ($RefreshApprovedModpack) {
             Invoke-ModpackOperation -Operation "refresh-publish" -PackVersion $packVersion -RepositoryRoot $ModpackRepositoryRoot
         } else {
+            if ($ApproveAllSourceMods) {
+                $ApprovedMod = @(Get-ChildItem -LiteralPath $ModsPath -Filter "*.zip" -File |
+                    Sort-Object Name | ForEach-Object { $_.Name })
+                if (@($ApprovedMod).Count -eq 0) {
+                    throw "No ZIP files were found in the source/client mod directory to approve."
+                }
+                Write-Host "Approved source ZIPs"
+                $ApprovedMod | ForEach-Object { Write-Host "  $_" }
+            }
             Invoke-ModpackOperation -Operation "capture" -PackVersion $packVersion -RepositoryRoot $ModpackRepositoryRoot
             Invoke-ModpackOperation -Operation "publish" -PackVersion $packVersion -RepositoryRoot $ModpackRepositoryRoot
         }

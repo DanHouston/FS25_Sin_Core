@@ -199,7 +199,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 
 This mode reuses only the filenames in the current approved manifest. It fails
 closed if an approved source ZIP is missing and never adds an unapproved ZIP.
-For a deliberate modset change, use repeated `-ApprovedMod` parameters and
-omit `-RefreshApprovedModpack`. The command publishes to the filesystem
+If the explicitly supplied client/source directory is itself the complete
+approved modset, use `-PublishModpack -ApproveAllSourceMods` instead; that
+enumerates its ZIPs only for that invocation. For a deliberate constrained
+modset, use repeated `-ApprovedMod` parameters and omit both approval modes.
+The command publishes to the filesystem
 publication root only after the refreshed release validates; it does not deploy
 the pack to the dedicated server.
