@@ -127,12 +127,13 @@ class ActivityTelemetryProcessor:
 
     def process(self, server_key, save_key, event_id, payload):
         values = self.validate(payload)
+        world_id = str(payload.get("world_id") or "legacy")
         if values is None:
             return {"status": "accepted", "ignored": True, "duplicate": False,
                     "save_key": save_key}
-        interval_key = _key(server_key, save_key, values["unique_id"],
+        interval_key = _key(server_key, save_key, world_id, values["unique_id"],
                             values["session_id"], values["minute_sequence"])
-        aggregate_id = _key(server_key, save_key, values["unique_id"])
+        aggregate_id = _key(server_key, save_key, world_id, values["unique_id"])
         now = datetime.now(timezone.utc)
 
         def apply(session=None):
@@ -144,8 +145,9 @@ class ActivityTelemetryProcessor:
             self.db.player_activity_minutes.insert_one({
                 # Event IDs are only unique within a server/save mailbox
                 # stream; scope the Mongo _id as well as the interval key.
-                "_id": _key(server_key, save_key, "event", event_id), "interval_key": interval_key,
+                "_id": _key(server_key, save_key, world_id, "event", event_id), "interval_key": interval_key,
                 "server_key": server_key, "save_key": save_key,
+                "world_id": world_id,
                 "fs25_unique_user_id": values["unique_id"],
                 "session_id": values["session_id"],
                 "minute_sequence": values["minute_sequence"],
@@ -162,6 +164,7 @@ class ActivityTelemetryProcessor:
                 current["last_activity_at"] = now
             insert_values = {"_id": aggregate_id, "server_key": server_key,
                              "save_key": save_key, "fs25_unique_user_id": values["unique_id"],
+                             "world_id": world_id,
                              "created_at": now}
             if values["bucket"] != "active":
                 insert_values["last_activity_at"] = None
@@ -170,8 +173,9 @@ class ActivityTelemetryProcessor:
                 {"$setOnInsert": insert_values,
                  "$set": current, "$inc": increments}, upsert=True, session=session)
             session_id = values["session_id"]
-            session_key = _key(server_key, save_key, values["unique_id"], session_id)
+            session_key = _key(server_key, save_key, world_id, values["unique_id"], session_id)
             session_insert = {"_id": session_key, "server_key": server_key, "save_key": save_key,
+                              "world_id": world_id,
                               "fs25_unique_user_id": values["unique_id"], "session_id": session_id,
                               "connected_at": now, "state": "active", "created_at": now}
             self.db.player_activity_sessions.update_one(
@@ -195,17 +199,19 @@ class ActivityTelemetryProcessor:
             # or a different event ID for the same deterministic minute.
             return {"status": "accepted", "duplicate": True, "save_key": save_key}
 
-    def status(self, server_key, save_key, unique_user_id):
+    def status(self, server_key, save_key, unique_user_id, world_id=None):
         """Return aggregate/session diagnostics without exposing coordinates."""
         unique_user_id = str(unique_user_id or "").strip()
         if not unique_user_id:
             raise ActivityTelemetryError("stable player identity is required")
+        scope = {"server_key": str(server_key), "save_key": str(save_key),
+                 "fs25_unique_user_id": unique_user_id}
+        if world_id: scope["world_id"] = str(world_id)
         aggregate = self.db.player_activity_aggregates.find_one({
             "server_key": str(server_key), "save_key": str(save_key),
-            "fs25_unique_user_id": unique_user_id})
+            **scope})
         sessions = list(self.db.player_activity_sessions.find({
-            "server_key": str(server_key), "save_key": str(save_key),
-            "fs25_unique_user_id": unique_user_id}).sort("connected_at", -1).limit(5))
+            **scope}).sort("connected_at", -1).limit(5))
         return {"aggregate": aggregate, "sessions": sessions}
 
 
@@ -233,12 +239,13 @@ class ActivitySessionProcessor:
         if values is None:
             return {"status": "accepted", "ignored": True, "duplicate": False, "save_key": save_key}
         unique_id, session_id = values
+        world_id = str(payload.get("world_id") or "legacy")
         now = datetime.now(timezone.utc)
-        session_key = _key(server_key, save_key, unique_id, session_id)
+        session_key = _key(server_key, save_key, world_id, unique_id, session_id)
         self.db.player_activity_sessions.update_one(
             {"_id": session_key},
             {"$setOnInsert": {"_id": session_key, "server_key": server_key,
-                               "save_key": save_key, "fs25_unique_user_id": unique_id,
+                               "save_key": save_key, "world_id": world_id, "fs25_unique_user_id": unique_id,
                                "session_id": session_id, "connected_at": now,
                                "state": "active", "created_at": now},
              "$set": {"last_seen_at": now, "updated_at": now,
@@ -252,7 +259,7 @@ class ActivitySessionProcessor:
         # and identify the reconciliation source rather than fabricating a
         # normal completion summary for the stale session.
         self.db.player_activity_sessions.update_many(
-            {"server_key": server_key, "save_key": save_key,
+            {"server_key": server_key, "save_key": save_key, "world_id": world_id,
              "fs25_unique_user_id": unique_id, "state": "active",
              "session_id": {"$ne": session_id}},
             {"$set": {"state": "reconciled", "reconciled_at": now,
@@ -267,6 +274,7 @@ class ActivitySessionProcessor:
         if values is None:
             return {"status": "accepted", "ignored": True, "duplicate": False, "save_key": save_key}
         unique_id, session_id = values
+        world_id = str(payload.get("world_id") or "legacy")
         watermark_value = payload.get("final_minute_sequence")
         if watermark_value is not None and str(watermark_value).strip() != "":
             try:
@@ -281,7 +289,7 @@ class ActivitySessionProcessor:
             # committed. New runtimes always send the durable watermark.
             watermark = None
         now = datetime.now(timezone.utc)
-        session_key = _key(server_key, save_key, unique_id, session_id)
+        session_key = _key(server_key, save_key, world_id, unique_id, session_id)
         existing = self.db.player_activity_sessions.find_one({"_id": session_key})
         if existing and existing.get("state") == "completed":
             LOG.info("[SiN Telemetry] duplicate session completion ignored serverKey=%s saveKey=%s player=%s session=%s",
@@ -290,7 +298,7 @@ class ActivitySessionProcessor:
                     "session_id": session_id, "summary": self._summary(existing)}
         if watermark is not None:
             committed = list(self.db.player_activity_minutes.find({
-                "server_key": server_key, "save_key": save_key,
+                "server_key": server_key, "save_key": save_key, "world_id": world_id,
                 "fs25_unique_user_id": unique_id, "session_id": session_id,
                 "minute_sequence": {"$gte": 1, "$lte": watermark}}))
             sequences = {int(row.get("minute_sequence")) for row in committed
@@ -304,7 +312,7 @@ class ActivitySessionProcessor:
         self.db.player_activity_sessions.update_one(
             {"_id": session_key},
             {"$setOnInsert": {"_id": session_key, "server_key": server_key,
-                               "save_key": save_key, "fs25_unique_user_id": unique_id,
+                               "save_key": save_key, "world_id": world_id, "fs25_unique_user_id": unique_id,
                                "session_id": session_id, "connected_at": now,
                                "created_at": now},
              "$set": {"state": "completed", "disconnected_at": now,

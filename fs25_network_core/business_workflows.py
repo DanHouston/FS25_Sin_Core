@@ -10,6 +10,7 @@ import hashlib
 import re
 import uuid
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from .world_generation import WorldGenerationRegistry
 
 
 MAX_TEXT = 1000
@@ -153,11 +154,19 @@ class ContractService:
 
     def __init__(self, database):
         self.db = database.db
+        self.worlds = WorldGenerationRegistry(database)
+
+    def _world(self, server_key, save_key, world_id=None):
+        active = self.worlds.active_id(server_key, save_key)
+        if active:
+            return self.worlds.require_active(server_key, save_key, world_id or active)
+        return None
 
     def create(self, creator_id, title, description, value=0, server_key=None, save_key=None, due_at=None,
-               work_type=None, fields=None, compensation_type="fixed", rate=None, server_name=None):
+               work_type=None, fields=None, compensation_type="fixed", rate=None, server_name=None, world_id=None):
         if not server_key or not save_key:
             raise ValueError("Work contracts require an explicit server and save context")
+        world_id = self._world(server_key, save_key, world_id)
         if work_type is not None:
             work_type = str(work_type).strip().lower()
             if work_type not in self.WORK_TYPES:
@@ -192,13 +201,15 @@ class ContractService:
         contract_id = str(uuid.uuid4())
         record = {"contract_id": contract_id, "creator_discord_id": str(creator_id),
                   "acceptor_discord_id": None, "creator_farm_id": None, "acceptor_farm_id": None,
-                  "scope": "server", "server_key": str(server_key), "save_key": str(save_key), "title": title,
+                   "scope": "server", "server_key": str(server_key), "save_key": str(save_key), "title": title,
                   "server_name": server_name,
                   "description": description, "value": value, "work_type": work_type,
                   "fields": fields, "compensation_type": compensation_type, "rate": value,
                   "status": "open",
                   "created_at": _now(), "due_at": due_at, "accepted_at": None,
-                  "completed_at": None, "cancellation_reason": None, "completion_note": None}
+                   "completed_at": None, "cancellation_reason": None, "completion_note": None}
+        if world_id:
+            record["world_id"] = world_id
         self.db.contracts.insert_one(record)
         return record
 
@@ -209,6 +220,10 @@ class ContractService:
         query = {"status": "open"}
         if server_key is not None: query["server_key"] = server_key
         if save_key is not None: query["save_key"] = save_key
+        if server_key is not None and save_key is not None:
+            active = self.worlds.active_id(server_key, save_key)
+            if active:
+                query["world_id"] = active
         return list(self.db.contracts.find(query).sort("created_at", 1).limit(50))
 
     def set_marketplace_message(self, contract_id, channel_id, message_id):
@@ -221,6 +236,8 @@ class ContractService:
 
     def accept(self, contract_id, actor_id, farm_id=None):
         existing = self.get(contract_id)
+        if existing and existing.get("world_id"):
+            self._world(existing["server_key"], existing["save_key"], existing["world_id"])
         if existing and existing.get("creator_discord_id") == str(actor_id):
             raise ValueError("You can't accept a contract posted by your own farm")
         result = self.db.contracts.update_one(
@@ -250,6 +267,8 @@ class ContractService:
     def complete(self, contract_id, actor_id, note=""):
         note = _text(note, "Completion note", 500, required=False)
         record = self.get(contract_id)
+        if record and record.get("world_id"):
+            self._world(record["server_key"], record["save_key"], record["world_id"])
         if not record or str(actor_id) not in {record.get("creator_discord_id"), record.get("acceptor_discord_id")}:
             raise ValueError("Only a contract participant can complete this contract")
         if record.get("status") not in {"accepted", "in_progress"}:

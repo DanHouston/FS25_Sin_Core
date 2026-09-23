@@ -14,6 +14,8 @@ WORLD_BOUND_COLLECTIONS = (
     "memberships", "permission_jobs", "server_snapshots", "sin_maps",
     "deposit_requests", "withdrawals", "fs25_money_operations",
     "bank_bridge_operations", "farm_financial_provisioning",
+    "contracts", "player_activity_minutes", "player_activity_aggregates",
+    "player_activity_sessions", "activity_outbox", "processed_server_events",
 )
 
 

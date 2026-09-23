@@ -724,8 +724,8 @@ class MapStore:
         self.collection = database.db.sin_maps
 
     @staticmethod
-    def key(server_key, save_key):
-        return hashlib.sha256((str(server_key) + "|" + str(save_key)).encode("utf-8")).hexdigest()
+    def key(server_key, save_key, world_id=None):
+        return hashlib.sha256((str(server_key) + "|" + str(save_key) + "|" + str(world_id or "legacy")).encode("utf-8")).hexdigest()
 
     @staticmethod
     def _generation(value):
@@ -739,14 +739,14 @@ class MapStore:
             raise MapValidationError("source_generation must be positive")
         return generation
 
-    def record(self, server_key, save_key):
+    def record(self, server_key, save_key, world_id=None):
         document = self.collection.find_one({
-            "_id": self.key(server_key, save_key),
+            "_id": self.key(server_key, save_key, world_id),
             "server_key": str(server_key), "save_key": str(save_key)})
         return document if isinstance(document, Mapping) else None
 
-    def load_model(self, server_key, save_key):
-        document = self.record(server_key, save_key)
+    def load_model(self, server_key, save_key, world_id=None):
+        document = self.record(server_key, save_key, world_id)
         if document is None:
             return None
         payload = document.get("map_payload")
@@ -758,12 +758,12 @@ class MapStore:
             raise MapValidationError("stored map revision does not match its payload")
         return model
 
-    def persist(self, server_key, save_key, model: MapModel, *, now=None, source_generation=None):
+    def persist(self, server_key, save_key, model: MapModel, *, now=None, source_generation=None, world_id=None):
         if not isinstance(model, MapModel):
             raise MapValidationError("model must be a MapModel")
         source_generation = self._generation(source_generation)
-        key = self.key(server_key, save_key)
-        existing = self.record(server_key, save_key)
+        key = self.key(server_key, save_key, world_id)
+        existing = self.record(server_key, save_key, world_id)
         existing_generation = self._generation(existing.get("source_generation")) if existing else None
         if (existing_generation is not None and source_generation is not None
                 and source_generation < existing_generation):
@@ -783,7 +783,7 @@ class MapStore:
         update = {"$set": values}
         if existing is None:
             update["$setOnInsert"] = {"_id": key, "server_key": str(server_key),
-                                       "save_key": str(save_key), "created_at": timestamp}
+                                        "save_key": str(save_key), "world_id": world_id, "created_at": timestamp}
             self.collection.update_one({"_id": key}, update, upsert=True)
         else:
             self.collection.update_one({"_id": key}, update, upsert=False)
@@ -837,15 +837,19 @@ class MapService:
         self.register_map(server_key, save_key, model, base_rgba=base_rgba, overview_dds=overview_dds)
         return model
 
-    def load_persisted(self, store: MapStore, server_key, save_key):
+    def load_persisted(self, store: MapStore, server_key, save_key, world_id=None):
         """Load one validated map projection without exposing storage to callers.
 
         The store is deliberately supplied by the central process.  This
         keeps MapService reusable in tests and presentation code while making
         the durable/reload boundary explicit and server/save scoped.
         """
-        model = store.load_model(server_key, save_key)
+        model = store.load_model(server_key, save_key, world_id)
         if model is None:
+            # A replacement generation may have no map yet.  Never leave the
+            # previous in-memory projection available for rendering while the
+            # new world is being discovered.
+            self.unregister_map(server_key, save_key)
             return False
         if model.revision == self.revision(server_key, save_key):
             return True

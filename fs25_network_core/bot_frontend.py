@@ -1150,7 +1150,10 @@ class NetworkBot(discord.Client):
         if not server_key or not save_key:
             return False
         try:
-            return self.map_service.load_persisted(MapStore(self.bank.database), server_key, save_key)
+            world_id = self.farm_lifecycle.current_world_id(server_key, save_key)
+            if not world_id:
+                return False
+            return self.map_service.load_persisted(MapStore(self.bank.database), server_key, save_key, world_id)
         except (MapValidationError, ValueError):
             logging.warning("Stored runtime map geometry is invalid; using text-only contract card")
             return False

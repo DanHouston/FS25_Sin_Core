@@ -75,6 +75,13 @@ class CentralEventProcessor:
             save_key = self.registry.resolve_save(record["server_key"], event["save_id"])
         except ValueError as error:
             raise EventScopeError(str(error)) from None
+        raw_world_id = (event.get("payload") or {}).get("world_id") if isinstance(event.get("payload"), dict) else None
+        active_world_id = self.farm_lifecycle.current_world_id(record["server_key"], save_key)
+        if active_world_id:
+            try:
+                self.farm_lifecycle.require_current_world(record["server_key"], save_key, raw_world_id)
+            except ValueError as error:
+                raise EventScopeError(str(error)) from None
         processed_id = scoped_event_id(record["server_key"], save_key, event_id)
         processed_marker = self.db.processed_server_events.find_one({"_id": processed_id})
         if processed_marker and event_type != "player_disconnected":
@@ -101,7 +108,7 @@ class CentralEventProcessor:
                 raise EventValidationError(str(error)) from None
             map_result = MapStore(self.database).persist(
                 record["server_key"], save_key, model, now=now,
-                source_generation=raw_payload.get("source_generation"))
+                source_generation=raw_payload.get("source_generation"), world_id=active_world_id)
             result = {"status": "accepted", "map_persistence": map_result["status"],
                       "map_id": model.map_id,
                       "map_version": model.version, "map_revision": model.revision, "save_key": save_key}
