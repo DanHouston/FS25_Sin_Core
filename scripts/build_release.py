@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 
 from fs25_network_core.integration_campaign import authoritative_manifest, run_campaign
 from fs25_network_core.lua_validation import validate_fs25_lua_source
+from fs25_network_core.release_validation import validate_release_directory
 AGENT_FILES = ("fs25_network_core/__init__.py", "fs25_network_core/agent.py")
 MOD_ASSET = "FS25_SiN_Server.zip"
 CLIENT_UPDATER_ASSET = "Update-SiN-Client.ps1"
@@ -146,6 +147,7 @@ def build(version, output):
     checksummed = (agent, mod, updater, client_updater, agent_restart, campaign_report, live_manifest)
     (output / "SHA256SUMS.txt").write_text(
         "".join(f"{sha256(path)}  {path.name}\n" for path in checksummed), encoding="utf-8")
+    validate_release_directory(output, expected_version=version)
     return output
 
 

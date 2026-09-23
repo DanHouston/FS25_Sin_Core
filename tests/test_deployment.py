@@ -9,6 +9,7 @@ from pathlib import Path
 from zipfile import ZipFile
 
 from fs25_network_core.lua_validation import LuaValidationError, validate_fs25_lua_source
+from fs25_network_core.release_validation import validate_release_directory
 from scripts.build_release import build
 
 
@@ -32,6 +33,8 @@ class DeploymentPackagingTests(unittest.TestCase):
             (output_path / "FS25_SiN_NetworkLocal.zip").write_bytes(b"legacy artifact")
             output = build("v0.1.8-rc", output_path)
             manifest = json.loads((output / "build-manifest.json").read_text(encoding="utf-8"))
+            validated = validate_release_directory(output, expected_version="v0.1.8-rc")
+            self.assertEqual(validated["git_commit"], manifest["git_commit"])
             updater = output / "Update-SiN.ps1"
             client = output / "Update-SiN-Client.ps1"
             restart = output / "Restart-SiN-Agent.ps1"

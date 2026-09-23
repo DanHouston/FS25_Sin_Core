@@ -18,6 +18,8 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
+      - name: Fast static and configuration validation
+        run: python scripts/validate_repository.py
       - name: Run tests
         run: python -m unittest discover -s tests
       - name: Compile Python
@@ -28,6 +30,8 @@ jobs:
         env:
           GITHUB_RUN_ID: ${{ github.run_id }}
         run: python scripts/build_release.py --version "${{ github.ref_name }}" --output release
+      - name: Verify packaged release artifact
+        run: python scripts/validate_release.py release --version "${{ github.ref_name }}" --require-clean
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

@@ -12,6 +12,9 @@ See [Discord channels and authorization](docs/discord-and-authorization.md) for
 the channel layout, account linking, farm role workflow, and custom mod contract.
 See [deterministic FS25 modpack distribution](docs/modpack-distribution.md) for
 the explicit capture, validation, publication, and client synchronization flow.
+See [validation architecture](docs/validation-architecture.md) for the
+fail-first source, contract, scenario, packaged-artifact, and live validation
+boundaries.
 The new authorization workflow supersedes the legacy manual `farm_links` helper
 for banking: only mod-confirmed active farm managers can transact with a farm.
 

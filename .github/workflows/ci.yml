@@ -14,6 +14,8 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
+      - name: Fast static and configuration validation
+        run: python scripts/validate_repository.py
       - name: Run tests
         run: python -m unittest discover -s tests
       - name: Run offline integration campaign
@@ -36,34 +38,4 @@ jobs:
       - name: Build release artifacts
         run: python scripts/build_release.py --version ci-${{ github.sha }} --output ci-release
       - name: Verify release artifacts
-        shell: python
-        run: |
-          import hashlib, json
-          from pathlib import Path
-          from zipfile import ZipFile
-          root = Path("ci-release")
-          manifest = json.loads((root / "build-manifest.json").read_text())
-          assert manifest["release_format_version"] == 1
-          for name in ("sin-agent.zip", "FS25_SiN_Server.zip"):
-              assert (root / name).is_file()
-              actual = hashlib.sha256((root / name).read_bytes()).hexdigest()
-              assert actual == manifest["agent_sha256" if name == "sin-agent.zip" else "server_sha256"]
-          assert (root / "Update-SiN.ps1").is_file()
-          assert hashlib.sha256((root / "Update-SiN.ps1").read_bytes()).hexdigest() == manifest["updater_sha256"]
-          assert (root / "Update-SiN-Client.ps1").is_file()
-          assert hashlib.sha256((root / "Update-SiN-Client.ps1").read_bytes()).hexdigest() == manifest["client_updater_sha256"]
-          assert (root / "Restart-SiN-Agent.ps1").is_file()
-          assert hashlib.sha256((root / "Restart-SiN-Agent.ps1").read_bytes()).hexdigest() == manifest["agent_restart_sha256"]
-          assert (root / "integration-campaign.json").is_file()
-          assert hashlib.sha256((root / "integration-campaign.json").read_bytes()).hexdigest() == manifest["campaign_report_sha256"]
-          assert (root / "live-validation-manifest.json").is_file()
-          assert hashlib.sha256((root / "live-validation-manifest.json").read_bytes()).hexdigest() == manifest["live_validation_manifest_sha256"]
-          assert len(manifest["required_scenarios"]) == 6
-          checksums = (root / "SHA256SUMS.txt").read_text()
-          assert "Update-SiN.ps1" in checksums
-          assert "Update-SiN-Client.ps1" in checksums
-          assert "Restart-SiN-Agent.ps1" in checksums
-          with ZipFile(root / "sin-agent.zip") as archive:
-              assert set(archive.namelist()) == {"fs25_network_core/__init__.py", "fs25_network_core/agent.py"}
-          with ZipFile(root / "FS25_SiN_Server.zip") as archive:
-              assert {"modDesc.xml", "NetworkLocal.lua"}.issubset(archive.namelist())
+        run: python scripts/validate_release.py ci-release --version ci-${{ github.sha }} --require-clean
