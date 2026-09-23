@@ -75,7 +75,16 @@ class CentralEventProcessor:
             save_key = self.registry.resolve_save(record["server_key"], event["save_id"])
         except ValueError as error:
             raise EventScopeError(str(error)) from None
-        raw_world_id = (event.get("payload") or {}).get("world_id") if isinstance(event.get("payload"), dict) else None
+        payload = event.get("payload")
+        # Map geometry is transported as nested payload data, while the
+        # authenticated mailbox event also carries world_id at the event root.
+        # Older Agents replace the map payload during XML parsing and therefore
+        # omit that field from the nested object.  Accept both representations,
+        # but never accept an unscoped geometry event.
+        raw_world_id = (payload or {}).get("world_id") if isinstance(payload, dict) else None
+        raw_world_id = raw_world_id or event.get("world_id")
+        if event_type == MAP_EVENT_TYPE and not str(raw_world_id or "").strip():
+            raise EventScopeError("map geometry event requires a world generation")
         active_world_id = self.farm_lifecycle.current_world_id(record["server_key"], save_key)
         if active_world_id:
             try:
@@ -109,7 +118,7 @@ class CentralEventProcessor:
                 raise EventValidationError(str(error)) from None
             map_result = MapStore(self.database).persist(
                 record["server_key"], save_key, model, now=now,
-                source_generation=raw_payload.get("source_generation"), world_id=active_world_id)
+                source_generation=raw_payload.get("source_generation"), world_id=processed_world_id)
             result = {"status": "accepted", "map_persistence": map_result["status"],
                       "map_id": model.map_id,
                       "map_version": model.version, "map_revision": model.revision, "save_key": save_key}

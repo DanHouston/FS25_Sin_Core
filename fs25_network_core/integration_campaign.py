@@ -394,6 +394,7 @@ class MailboxBoundaryAdapter:
         (directory / "map.xml").write_text(
             '<serverEvent event_id="map-1" event_type="map_geometry" '
             f'server_key="{server_key}" server_credential="{credential}" save_id="{save_id}" '
+            'world_id="campaign-world-a" '
             'map_id="campaign-map" map_title="Campaign Map" world_width="2048" '
             'world_depth="2048" image_width="256" image_height="256" '
             'overview_asset_identity="campaign-overview" version="1" '
@@ -445,6 +446,7 @@ class MailboxBoundaryAdapter:
         path.write_text(
             f'<serverEvent event_id="{event_id}" event_type="map_geometry" '
             f'server_key="{server_key}" server_credential="{credential}" save_id="{save_id}" '
+            'world_id="campaign-world-a" '
             f'source_generation="{source_generation}" '
             'map_id="campaign-map" map_title="Campaign Map" world_width="2048" '
             'world_depth="2048" image_width="128" image_height="128" '
@@ -1177,17 +1179,25 @@ def _authoritative_map_contract(root: Path) -> Mapping[str, object]:
 
     processor.registry.authenticate = authenticate
     processor.registry.resolve_save = lambda server_key, save_id: saves[server_key]
+    # The fixture represents a runtime whose snapshot has already established
+    # the current world.  Map geometry must therefore be persisted in the
+    # exact generation scope, not in the legacy server/save bucket.
+    processor.farm_lifecycle.worlds.activate(
+        "sin-campaign", "campaign-save", "campaign-world-a",
+        evidence={"map_id": "campaign-map"})
     central = ProcessorCentral(processor)
     central.credentials = credentials
     agent = PairingAgent(root, "http://offline", central)
     processed_initial = agent.process_events_once()
     persisted_initial = database.db.sin_maps.find_one({
-        "server_key": "sin-campaign", "save_key": "campaign-save"})
+        "server_key": "sin-campaign", "save_key": "campaign-save",
+        "world_id": "campaign-world-a"})
     mailbox.map_contract_event("map-contract-1")
     replay = agent.process_events_once()
     replay_result = central.results[-1] if central.results else {}
     if (processed_initial != ["map-contract-1.xml"] or replay != ["map-contract-1.xml"]
-            or not replay_result.get("duplicate") or not persisted_initial):
+            or not replay_result.get("duplicate") or not persisted_initial
+            or central.events[0].get("world_id") != "campaign-world-a"):
         raise AssertionError("map geometry was not persisted through the Agent/Central boundary")
     geometry_initial = persisted_initial.get("map_payload", {})
     fields_initial = geometry_initial.get("fields", {})
@@ -1204,10 +1214,14 @@ def _authoritative_map_contract(root: Path) -> Mapping[str, object]:
     other_mailbox.bind("sin-other", "other-secret", "1")
     other_mailbox.map_contract_event("map-other", server_key="sin-other",
                                      credential="other-secret", save_id="1")
+    processor.farm_lifecycle.worlds.activate(
+        "sin-other", "other-save", "campaign-world-a",
+        evidence={"map_id": "campaign-map"})
     other_agent = PairingAgent(other_root, "http://offline", central)
     other_processed = other_agent.process_events_once()
     other_record = database.db.sin_maps.find_one({
-        "server_key": "sin-other", "save_key": "other-save"})
+        "server_key": "sin-other", "save_key": "other-save",
+        "world_id": "campaign-world-a"})
     if not other_record or other_processed != ["map-other.xml"]:
         raise AssertionError("second server map was not independently persisted")
 
@@ -1227,22 +1241,28 @@ def _authoritative_map_contract(root: Path) -> Mapping[str, object]:
             initial_published = await bot.publish_contract_card(persisted_contract)
             initial_loads = map_service.payload_loads
             initial_render = dict(map_service.render_requests[-1]) if map_service.render_requests else None
-            farmland_loaded = bot.ensure_registered_map("sin-campaign", "campaign-save")
+            farmland_loaded = bot.ensure_registered_map(
+                "sin-campaign", "campaign-save", "campaign-world-a")
             farmland_rendered = map_service.render_map(
                 "sin-campaign", "campaign-save", highlight_farmlands=[22],
-                ownership={22: {"farm_id": 2, "farm_name": "Campaign Farm"}})
-            other_loaded = bot.ensure_registered_map("sin-other", "other-save")
+                ownership={22: {"farm_id": 2, "farm_name": "Campaign Farm"}},
+                world_id="campaign-world-a")
+            other_loaded = bot.ensure_registered_map(
+                "sin-other", "other-save", "campaign-world-a")
             other_rendered = map_service.render_map("sin-other", "other-save",
-                                                    highlight_fields=[22])
+                                                    highlight_fields=[22],
+                                                    world_id="campaign-world-a")
 
             # A second event with equivalent content must not cause JiN's
             # persisted-map loader to rebuild its MapService projection.
             mailbox.map_contract_event("map-contract-stable")
             stable_processed = agent.process_events_once()
             stable_record = database.db.sin_maps.find_one({
-                "server_key": "sin-campaign", "save_key": "campaign-save"})
+                "server_key": "sin-campaign", "save_key": "campaign-save",
+                "world_id": "campaign-world-a"})
             stable_before = map_service.payload_loads
-            stable_loaded = bot.ensure_registered_map("sin-campaign", "campaign-save")
+            stable_loaded = bot.ensure_registered_map(
+                "sin-campaign", "campaign-save", "campaign-world-a")
             stable_after = map_service.payload_loads
 
             # A meaningful geometry change crosses the same Agent/Central
@@ -1250,11 +1270,14 @@ def _authoritative_map_contract(root: Path) -> Mapping[str, object]:
             mailbox.map_contract_event("map-contract-changed", changed=True)
             changed_processed = agent.process_events_once()
             changed_record = database.db.sin_maps.find_one({
-                "server_key": "sin-campaign", "save_key": "campaign-save"})
+                "server_key": "sin-campaign", "save_key": "campaign-save",
+                "world_id": "campaign-world-a"})
             changed_before = map_service.payload_loads
-            changed_loaded = bot.ensure_registered_map("sin-campaign", "campaign-save")
+            changed_loaded = bot.ensure_registered_map(
+                "sin-campaign", "campaign-save", "campaign-world-a")
             changed_after = map_service.payload_loads
-            changed_rendered = map_service.render_contract_map("sin-campaign", "campaign-save", "22")
+            changed_rendered = map_service.render_contract_map(
+                "sin-campaign", "campaign-save", "22", world_id="campaign-world-a")
 
             # A delayed event from the previous runtime must not roll back a
             # newer source generation, even though it has a distinct event ID.
@@ -1308,18 +1331,21 @@ def _authoritative_map_contract(root: Path) -> Mapping[str, object]:
     farmland_png = _inspect_png(presentation["farmland_rendered"])
     other_png = _inspect_png(presentation["other_rendered"])
     final_record = database.db.sin_maps.find_one({
-        "server_key": "sin-campaign", "save_key": "campaign-save"})
-    final_model = map_service.model("sin-campaign", "campaign-save")
+        "server_key": "sin-campaign", "save_key": "campaign-save",
+        "world_id": "campaign-world-a"})
+    final_model = map_service.model("sin-campaign", "campaign-save", "campaign-world-a")
     final_field = final_model.fields[22]
     irregular_field = final_model.fields[47]
     unsafe_identity_rejected = False
     try:
         unsafe_payload = dict(final_record["map_payload"])
         unsafe_payload["map_id"] = "../arbitrary-local-path"
-        map_service.register_payload("sin-campaign", "campaign-save", unsafe_payload)
+        map_service.register_payload("sin-campaign", "campaign-save", unsafe_payload,
+                                     world_id="campaign-world-a")
     except Exception as error:
         unsafe_identity_rejected = type(error).__name__ == "MapValidationError"
-    arbitrary_path_lookup = bot.ensure_registered_map("../arbitrary-local-path", "campaign-save")
+    arbitrary_path_lookup = bot.ensure_registered_map(
+        "../arbitrary-local-path", "campaign-save", "campaign-world-a")
     invalid_path = mailbox.map_contract_event("map-contract-invalid", invalid=True)
     invalid_processed = agent.process_events_once()
     invalid_quarantine = invalid_path.with_suffix(invalid_path.suffix + ".failed")
@@ -1369,6 +1395,7 @@ def _authoritative_map_contract(root: Path) -> Mapping[str, object]:
                 "forwarded_field_ids": sorted(fields_initial),
                 "forwarded_server_key": central.events[0].get("server_key"),
                 "forwarded_save_id": central.events[0].get("save_id"),
+                "forwarded_world_id": central.events[0].get("world_id"),
                 "forwarded_revision": central.results[0].get("map_revision")},
                 "central": {"persisted": True, "map_id": persisted_initial["map_payload"]["map_id"],
                             "save_key": persisted_initial["save_key"], "revision": persisted_initial["map_revision"],

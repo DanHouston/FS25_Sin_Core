@@ -159,6 +159,7 @@ class EventProcessingTests(unittest.TestCase):
 
     def test_map_geometry_event_is_validated_and_persisted_for_jin(self):
         event = self.event("map_geometry")
+        event["world_id"] = "hobo-world"
         event["payload"] = {"map": {
             "schema_version": 1, "map_id": "synthetic", "map_title": "Synthetic",
             "world_width": 100, "world_depth": 100, "image_width": 32, "image_height": 32,
@@ -173,4 +174,48 @@ class EventProcessingTests(unittest.TestCase):
         self.assertEqual(result["map_persistence"], "inserted")
         update = self.database.db.sin_maps.update_one.call_args.args[1]
         self.assertEqual(update["$set"]["map_payload"]["map_id"], "synthetic")
+        self.assertEqual(update["$setOnInsert"]["world_id"], "hobo-world")
         self.assertTrue(set(update["$setOnInsert"]).isdisjoint(update["$set"]))
+
+    def test_map_geometry_world_id_at_event_root_is_used_when_runtime_is_already_active(self):
+        event = self.event("map_geometry")
+        event["world_id"] = "hobo-world"
+        event["payload"] = {"map": {
+            "schema_version": 1, "map_id": "hobo", "map_title": "Hobo's Hollow",
+            "world_width": 100, "world_depth": 100, "image_width": 32, "image_height": 32,
+            "overview_asset_identity": "runtime-generated:hobo", "version": 1,
+            "fields": {"1": {"field_id": 1, "farmland_id": 22,
+                              "rings": [[[-10, -10], [10, -10], [0, 10]]]}},
+            "farmlands": {},
+        }}
+        self.processor.farm_lifecycle.current_world_id = MagicMock(return_value="hobo-world")
+        self.processor.farm_lifecycle.require_current_world = MagicMock(return_value="hobo-world")
+        result = self.processor.process(event)
+        self.assertEqual(result["map_persistence"], "inserted")
+        update = self.database.db.sin_maps.update_one.call_args.args[1]
+        self.assertEqual(update["$setOnInsert"]["world_id"], "hobo-world")
+        self.processor.farm_lifecycle.require_current_world.assert_called_once_with(
+            "sin-fs25-01", "main-save", "hobo-world")
+
+    def test_map_geometry_before_snapshot_is_retained_under_its_world_not_legacy_scope(self):
+        event = self.event("map_geometry")
+        event["world_id"] = "new-world"
+        event["payload"] = {"map": {
+            "schema_version": 1, "map_id": "new-map", "map_title": "New Map",
+            "world_width": 100, "world_depth": 100, "image_width": 32, "image_height": 32,
+            "overview_asset_identity": "runtime-generated:new", "version": 1,
+            "fields": {"1": {"field_id": 1, "farmland_id": 22,
+                              "rings": [[[-10, -10], [10, -10], [0, 10]]]}},
+            "farmlands": {},
+        }}
+        self.processor.farm_lifecycle.current_world_id = MagicMock(return_value=None)
+        result = self.processor.process(event)
+        self.assertEqual(result["map_persistence"], "inserted")
+        update = self.database.db.sin_maps.update_one.call_args.args[1]
+        self.assertEqual(update["$setOnInsert"]["world_id"], "new-world")
+
+    def test_map_geometry_without_world_id_is_rejected(self):
+        event = self.event("map_geometry")
+        event["payload"] = {"map": {}}
+        with self.assertRaises(EventScopeError):
+            self.processor.process(event)
