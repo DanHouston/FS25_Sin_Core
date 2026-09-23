@@ -376,7 +376,16 @@ class PairingAgent:
                     raise RuntimeError("snapshot API rejected request")
                 response.read()
             return True
-        except (ElementTree.ParseError, ValueError, OSError, HTTPError, URLError, TimeoutError, RuntimeError, json.JSONDecodeError):
+        except HTTPError as error:
+            try:
+                raw_body = error.read(4096)
+            except (OSError, TypeError):
+                raw_body = b""
+            detail = self._safe_http_error_detail(raw_body)
+            LOG.warning("snapshot submission rejected status=%s detail=%s",
+                        getattr(error, "code", "unknown"), detail)
+            return False
+        except (ElementTree.ParseError, ValueError, OSError, URLError, TimeoutError, RuntimeError, json.JSONDecodeError):
             return False
 
     def _write_clock_policy(self, policy):

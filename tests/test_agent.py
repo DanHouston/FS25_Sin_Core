@@ -310,13 +310,11 @@ class AgentTests(unittest.TestCase):
             self.assertNotIn("secret-value", text)
 
     def test_snapshot_rejection_logs_status_and_safe_error_detail(self):
-        class RejectedResponse:
-            status = 400
-            def __enter__(self): return self
-            def __exit__(self, *args): pass
-            def read(self, *_args):
-                return json.dumps({"error": "invalid_snapshot", "reason": "authoritative world generation is required",
-                                   "credential": "must-not-be-logged"}).encode()
+        rejected = HTTPError(
+            "https://central/api/server/snapshot", 400, "bad request", {},
+            io.BytesIO(json.dumps({"error": "invalid_snapshot",
+                                   "reason": "authoritative world generation is required",
+                                   "credential": "must-not-be-logged"}).encode()))
 
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -324,7 +322,7 @@ class AgentTests(unittest.TestCase):
                 '<serverBinding serverKey="sin-fs25-01" credential="secret-value"/>', encoding="utf-8")
             (root / "snapshot.xml").write_text(
                 '<networkLocal source="game" savegameIndex="3" worldId="hobo-world"/>', encoding="utf-8")
-            agent = PairingAgent(root, "https://central", MagicMock(return_value=RejectedResponse()))
+            agent = PairingAgent(root, "https://central", MagicMock(side_effect=rejected))
             with self.assertLogs(agent_module.__name__, level="WARNING") as logs:
                 self.assertFalse(agent.process_snapshot_once())
         output = "\n".join(logs.output)
