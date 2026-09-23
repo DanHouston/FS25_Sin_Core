@@ -294,3 +294,12 @@ class DeploymentPackagingTests(unittest.TestCase):
         self.assertNotIn('http://192.168.1.185:8080', updater)
         self.assertNotIn("serverBinding.xml", client)
         self.assertNotIn("MONGODB", client)
+
+    def test_client_updater_has_explicit_approval_gated_modpack_publish_path(self):
+        client = (self.root / "scripts" / "Update-SiN-Client.ps1").read_text(encoding="utf-8")
+        self.assertIn("PublishModpack", client)
+        self.assertIn("RefreshApprovedModpack", client)
+        self.assertIn("refresh-publish", client)
+        self.assertIn("ApprovedMod", client)
+        self.assertIn("fs25_network_core\\modpack.py", client)
+        self.assertIn("New modpack approval requires", client)

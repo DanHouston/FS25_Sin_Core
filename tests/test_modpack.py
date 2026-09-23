@@ -73,12 +73,35 @@ class ModpackDistributionTests(unittest.TestCase):
         self.assertEqual(current.manifest, approved.manifest)
         reloaded = ModpackManager(ModpackPaths(self.source, self.publication, self.client))
         self.assertEqual(reloaded.validate_current(self.server).manifest, approved.manifest)
-
         release_mod = approved.release_dir / "mods" / "FS25_SiN_First.zip"
         release_mod.write_bytes(b"tampered")
         with self.assertRaisesRegex(ModpackError, "hash|ZIP|manifest"):
             reloaded.publish_approved(self.server, "r1")
         self.assertEqual(reloaded.validate_current(self.server).manifest, approved.manifest)
+
+    def test_refresh_publish_reuses_only_current_approved_set_and_updates_changed_bytes(self):
+        first = self._mod(self.source / "FS25_SiN_First.zip", "first")
+        self._mod(self.source / "ThirdParty.zip", "third")
+        approved = self.manager.capture_approved(self.server, "r1", ["FS25_SiN_First.zip"])
+        self.manager.publish_approved(self.server, "r1")
+
+        replacement = self._mod(self.source / "FS25_SiN_First.zip", "replacement")
+        refreshed = self.manager.refresh_and_publish(self.server, "r2")
+        self.assertEqual(refreshed.modpack_version, "r2")
+        self.assertEqual(refreshed.manifest["mods"][0]["filename"], "FS25_SiN_First.zip")
+        self.assertEqual(refreshed.manifest["mods"][0]["sha256"], hashlib.sha256(replacement).hexdigest())
+        self.assertNotEqual(refreshed.manifest["mods"][0]["sha256"], hashlib.sha256(first).hexdigest())
+        self.assertEqual(self.manager.validate_current(self.server).manifest, refreshed.manifest)
+        self.assertFalse((refreshed.release_dir / "mods" / "ThirdParty.zip").exists())
+
+    def test_refresh_publish_fails_closed_if_an_approved_source_mod_is_missing(self):
+        self._mod(self.source / "FS25_SiN_First.zip", "first")
+        self.manager.capture_approved(self.server, "r1", ["FS25_SiN_First.zip"])
+        self.manager.publish_approved(self.server, "r1")
+        (self.source / "FS25_SiN_First.zip").unlink()
+        with self.assertRaisesRegex(ModpackError, "approved mod source is missing"):
+            self.manager.refresh_and_publish(self.server, "r2")
+        self.assertEqual(self.manager.validate_current(self.server).modpack_version, "r1")
 
     def test_invalid_current_is_not_silently_overwritten(self):
         self._mod(self.source / "FS25_SiN_First.zip", "first")

@@ -359,6 +359,24 @@ class ModpackManager:
                 backup.rename(current)
             raise
 
+    def refresh_approved(self, server_record: dict, modpack_version: str) -> ApprovedModpack:
+        """Recapture the currently published approved filenames at a new version.
+
+        This is an explicit approval-preserving refresh for cases such as a
+        rebuilt SiN ZIP.  The existing Current manifest is the allowlist; a
+        newly appearing source ZIP is never included implicitly.  The caller
+        must still publish the captured release explicitly.
+        """
+        identity = ServerIdentity.from_registry_record(server_record)
+        current = self._read_current(identity)
+        selected = [record["filename"] for record in current.manifest["mods"]]
+        return self.capture_approved(identity.__dict__, modpack_version, selected)
+
+    def refresh_and_publish(self, server_record: dict, modpack_version: str) -> ApprovedModpack:
+        """Refresh the existing approved set and publish it as one operation."""
+        refreshed = self.refresh_approved(server_record, modpack_version)
+        return self.publish_approved(server_record, modpack_version)
+
     def _read_current(self, identity: ServerIdentity) -> ApprovedModpack:
         current = self._server_root(identity) / "Current"
         if not current.is_dir():
@@ -421,7 +439,7 @@ class ModpackManager:
 
 def _cli() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("capture", "publish", "sync", "validate"))
+    parser.add_argument("operation", choices=("capture", "publish", "refresh-publish", "sync", "validate"))
     parser.add_argument("--server-key", required=True)
     parser.add_argument("--server-name", required=True)
     parser.add_argument("--version")
@@ -456,6 +474,10 @@ def _cli() -> int:
             if not args.version:
                 raise ModpackError("--version is required for publish")
             result = manager.publish_approved(record, args.version)
+        elif args.operation == "refresh-publish":
+            if not args.version:
+                raise ModpackError("--version is required for refresh-publish")
+            result = manager.refresh_and_publish(record, args.version)
         elif args.operation == "validate":
             result = manager.validate_current(record)
         else:

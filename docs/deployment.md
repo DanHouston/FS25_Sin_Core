@@ -180,3 +180,26 @@ uses another mod directory. The updater downloads the public release over
 HTTPS, validates the ZIP against `SHA256SUMS.txt`, checks root contents, and
 replaces only the FS25_SiN_Server ZIP and removes the legacy ZIP so both cannot
 load. FS25 must be reloaded afterward.
+
+When the approved mod list is unchanged, the same updater can explicitly
+refresh and publish the complete modpack after installing the new SiN ZIP:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File "C:\repos\FS25_SiN_Core\scripts\Update-SiN-Client.ps1" `
+  -Version v0.1.32 `
+  -ModsPath "C:\Users\Dan\OneDrive\Documents\My Games\SiN" `
+  -PublishModpack -RefreshApprovedModpack `
+  -ModpackRepositoryRoot "C:\repos\FS25_SiN_Core" `
+  -ModpackPublicationRoot "G:\My Drive\SiN Mods" `
+  -ModpackServerKey sin-fs25-01 `
+  -ModpackServerName "SiN Test Server 01" `
+  -ModpackVersion v0.1.32
+```
+
+This mode reuses only the filenames in the current approved manifest. It fails
+closed if an approved source ZIP is missing and never adds an unapproved ZIP.
+For a deliberate modset change, use repeated `-ApprovedMod` parameters and
+omit `-RefreshApprovedModpack`. The command publishes to the filesystem
+publication root only after the refreshed release validates; it does not deploy
+the pack to the dedicated server.

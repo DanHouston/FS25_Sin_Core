@@ -84,6 +84,48 @@ validates the stage again, and then swaps `Current`. A corrupt source, release,
 manifest, hash, ZIP, or destination fails without publishing a partial pack.
 Re-publishing the same manifest is a no-op.
 
+## One-command client update and approved-pack refresh
+
+When the existing approved mod list is unchanged but one ZIP has been rebuilt,
+the client updater can install the release ZIP, recapture the exact filenames
+from the current approved manifest, validate them, and publish the new version
+to `Current`:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File 'C:\repos\FS25_SiN_Core\scripts\Update-SiN-Client.ps1' `
+  -Version v0.1.32 `
+  -ModsPath 'C:\Users\Dan\OneDrive\Documents\My Games\SiN' `
+  -PublishModpack -RefreshApprovedModpack `
+  -ModpackRepositoryRoot 'C:\repos\FS25_SiN_Core' `
+  -ModpackPublicationRoot 'G:\My Drive\SiN Mods' `
+  -ModpackServerKey 'sin-fs25-01' `
+  -ModpackServerName 'SiN Test Server 01' `
+  -ModpackVersion v0.1.32
+```
+
+`-RefreshApprovedModpack` is explicit and fail-closed: it reads the current
+`manifest.json` as the approval allowlist, so new ZIPs in the source directory
+are not published and removed approved ZIPs cause the operation to stop. The
+source/client directory is updated before capture; the publication root is
+first modified when the validated `Releases/<version>` capture is written.
+`Current` is replaced only after the complete release validates. The command
+does not synchronize unrelated local ZIPs or deploy to the dedicated server.
+
+For an intentional approved-set change, omit `-RefreshApprovedModpack` and
+provide every approved filename explicitly with repeated `-ApprovedMod`:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File 'C:\repos\FS25_SiN_Core\scripts\Update-SiN-Client.ps1' `
+  -Version v0.1.33 -ModsPath 'C:\Users\Dan\OneDrive\Documents\My Games\SiN' `
+  -PublishModpack -ModpackRepositoryRoot 'C:\repos\FS25_SiN_Core' `
+  -ModpackPublicationRoot 'G:\My Drive\SiN Mods' `
+  -ModpackServerKey 'sin-fs25-01' -ModpackServerName 'SiN Test Server 01' `
+  -ModpackVersion v0.1.33 `
+  -ApprovedMod 'FS25_SiN_Server.zip' -ApprovedMod 'ThirdPartyMod.zip'
+```
+
 ## Client synchronization
 
 Validate the current pack and synchronize managed ZIPs with:
@@ -114,6 +156,8 @@ opt-in that removes local `.zip` files not listed in the current manifest.
   the publisher rejects a nested destination to prevent accidental source
   mutation.
 - No automatic watcher or publication-on-file-appearance exists.
+- The client updater's modpack mode is still explicit; it never watches or
+  publishes merely because a source ZIP appeared.
 - Publication root access and all hashes are validated before `Current` changes.
 - Server identity comes from the existing server registry, not a new config
   roster. The CLI's `--server-name` is an explicit offline/operator input and
