@@ -233,6 +233,7 @@ class PairingAgent:
             if node.get("id") is not None:
                 farmlands[node.get("id")] = int(node.get("farmId", "0"))
         return {"source": "game", "session": root.get("session", ""),
+                "runtime_generation": int(root.get("runtimeGeneration", "0")),
                 "sequence": int(root.get("sequence", "0")),
                 "savegame_index": int(root.get("savegameIndex", "0")),
                 "world_id": root.get("worldId", ""), "map_id": root.get("mapId", ""),

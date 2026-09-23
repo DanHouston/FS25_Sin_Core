@@ -105,7 +105,8 @@ python -m fs25_network_core.local_test inspect "$([Environment]::GetFolderPath('
 ```
 
 Adjust that path if your game profile is elsewhere. Expected output includes
-`"source": "game"`, the save slot, increasing sequence, and actual farm IDs/names.
+`"source": "game"`, the save slot, persisted runtime generation, increasing
+sequence, and actual farm IDs/names.
 Leave the save running: snapshots older than thirty seconds are rejected.
 
 Version 0.2.0.0 also includes a `players` mapping keyed by stable game identity.
@@ -333,6 +334,45 @@ python -m fs25_network_core.agent --watch
 ```
 
 ### Persistent-world clock policy
+
+#### Physical save mapping
+
+Each registered server normally exposes one active logical save to Discord,
+while Central may retain mappings for more than one physical FS25 save.  The
+most recent valid snapshot selects the active mapping.  A first-time physical
+save ID must be associated explicitly; it is never guessed from a map name.
+
+Inspect mappings without changing MongoDB:
+
+```powershell
+python -m fs25_network_core.save_mapping `
+  --server sin-fs25-01 `
+  --show
+```
+
+Associate a new save ID as a second logical save:
+
+```powershell
+python -m fs25_network_core.save_mapping `
+  --server sin-fs25-01 `
+  --save sin-fs25-hobo `
+  --fs25-save-id 3
+```
+
+For an intentional physical-ID remap of the existing logical save, require
+the old value so an unexpected mapping cannot be overwritten:
+
+```powershell
+python -m fs25_network_core.save_mapping `
+  --server sin-fs25-01 `
+  --save sin-fs25-main `
+  --expected-current-fs25-save-id 1 `
+  --fs25-save-id 3
+```
+
+The Agent needs no save selector and no re-pairing.  Central uses the latest
+valid runtime snapshot for normal Discord commands; delayed snapshots from an
+older runtime are rejected using the persisted runtime-generation token.
 
 Clock policy is stored on the canonical `sin_saves` document as
 `clock_policy`. Configure the server/save mapping and policy from a central

@@ -2,9 +2,13 @@ import json
 import inspect
 import threading
 import unittest
+from datetime import datetime, timezone
 from http.client import HTTPConnection
 from unittest.mock import MagicMock
 
+from fs25_network_core.farm_lifecycle import FarmLifecycle
+from fs25_network_core.integration_campaign import _MemoryDatabase
+from fs25_network_core.server_registry import ServerRegistry
 from fs25_network_core.server_api import make_server
 
 
@@ -67,6 +71,88 @@ class ServerApiTests(unittest.TestCase):
         self.assertTrue(any("snapshot malformed" in message and "Expecting" in message
                             for message in logs.output))
         connection.close()
+
+    def test_unknown_save_mapping_returns_actionable_reason(self):
+        self.server.RequestHandlerClass.event_processor.registry.authenticate.return_value = {
+            "server_key": "sin-fs25-01"}
+        self.server.RequestHandlerClass.event_processor.registry.resolve_save.side_effect = ValueError(
+            "Unknown or ambiguous FS25 save mapping")
+        connection = HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
+        with self.assertLogs("fs25_network_core.server_api", level="WARNING") as logs:
+            connection.request("POST", "/api/server/snapshot", json.dumps({"fs25_save_id": "3", "snapshot": {}}),
+                               headers={"Content-Type": "application/json", "X-SiN-Server-Key": "sin-fs25-01",
+                                        "Authorization": "Bearer secret"})
+            response = connection.getresponse()
+            body = json.loads(response.read())
+        connection.close()
+        self.assertEqual((response.status, body["error"]), (400, "save_mapping_required"))
+        self.assertIn("save mapping required", "\n".join(logs.output))
+
+    def test_snapshot_records_and_activates_runtime_evidence(self):
+        handler = self.server.RequestHandlerClass
+        handler.event_processor.registry.authenticate.return_value = {"server_key": "sin-fs25-01"}
+        handler.event_processor.registry.resolve_save.return_value = "sin-fs25-main"
+        handler.farm_lifecycle = MagicMock()
+        handler.farm_lifecycle.record_snapshot.return_value = {
+            "received_at": datetime.now(timezone.utc)}
+        payload = {"fs25_save_id": "3", "snapshot": {
+            "source": "game", "world_id": "hobo-world", "savegame_index": 3,
+            "runtime_generation": 9, "session": "hobo-session", "sequence": 1}}
+        connection = HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
+        connection.request("POST", "/api/server/snapshot", json.dumps(payload), {
+            "Content-Type": "application/json", "X-SiN-Server-Key": "sin-fs25-01",
+            "Authorization": "Bearer secret"})
+        response = connection.getresponse()
+        body = json.loads(response.read())
+        connection.close()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(body["status"], "accepted")
+        handler.event_processor.registry.validate_runtime_snapshot.assert_called_once_with(
+            "sin-fs25-01", "sin-fs25-main", payload["snapshot"])
+        handler.event_processor.registry.activate_runtime.assert_called_once_with(
+            "sin-fs25-01", "sin-fs25-main", payload["snapshot"])
+
+    def test_snapshot_switches_active_save_and_rejects_delayed_previous_runtime(self):
+        database = _MemoryDatabase()
+        database.db.sin_servers.insert_one({"_id": "sin-fs25-01", "server_key": "sin-fs25-01",
+                                             "enabled": True,
+                                             "credential_hash": __import__("hashlib").sha256(b"secret").hexdigest()})
+        for save_key, save_id in (("sin-fs25-main", "1"), ("sin-fs25-hobo", "3")):
+            database.db.sin_saves.insert_one({"_id": f"sin-fs25-01:{save_key}",
+                                              "server_key": "sin-fs25-01", "save_key": save_key,
+                                              "fs25_save_id": save_id})
+        registry = ServerRegistry(database)
+        processor = MagicMock()
+        processor.registry = registry
+        handler = self.server.RequestHandlerClass
+        handler.registry = registry
+        handler.event_processor = processor
+        handler.farm_lifecycle = FarmLifecycle(database)
+
+        def post(save_id, save_key, world_id, runtime_generation):
+            payload = {"fs25_save_id": save_id, "snapshot": {
+                "source": "game", "savegame_index": int(save_id), "world_id": world_id,
+                "runtime_generation": runtime_generation, "session": f"session-{runtime_generation}",
+                "sequence": 1, "farms": {}, "players": {}, "farmlands": {}}}
+            connection = HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
+            connection.request("POST", "/api/server/snapshot", json.dumps(payload), {
+                "Content-Type": "application/json", "X-SiN-Server-Key": "sin-fs25-01",
+                "Authorization": "Bearer secret"})
+            response = connection.getresponse()
+            body = json.loads(response.read())
+            connection.close()
+            return response.status, body
+
+        self.assertEqual(post("3", "sin-fs25-hobo", "hobo-world", 20)[0], 200)
+        self.assertEqual(post("1", "sin-fs25-main", "courtright-world", 19)[0], 400)
+        self.assertEqual(registry.active_runtime("sin-fs25-01")["save_key"], "sin-fs25-hobo")
+        self.assertIsNone(database.db.server_snapshots.find_one({
+            "server_key": "sin-fs25-01", "save_key": "sin-fs25-main"}))
+
+        self.assertEqual(post("1", "sin-fs25-main", "courtright-world", 21)[0], 200)
+        self.assertEqual(registry.active_runtime("sin-fs25-01")["save_key"], "sin-fs25-main")
+        self.assertEqual(registry.worlds.active_id("sin-fs25-01", "sin-fs25-hobo"), "hobo-world")
+        self.assertEqual(registry.worlds.active_id("sin-fs25-01", "sin-fs25-main"), "courtright-world")
 
     def test_event_endpoint_forwards_to_central_processor(self):
         connection = HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)

@@ -58,6 +58,19 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(picker["fields"], [{"field_id": 22, "farmland_id": 1}])
         self.assertTrue(picker["image"].startswith(b"\x89PNG"))
 
+    async def test_farm_request_picker_uses_active_save_without_user_save_selector(self):
+        model = synthetic_model(64, 64)
+        self.bot.map_service.register_map("server", "hobo-save", model,
+                                          base_rgba=rgba_base(64, 64), world_id="hobo-world")
+        self.bot.farm_lifecycle.current_world_id = MagicMock(return_value="hobo-world")
+        self.bot.farm_lifecycle.available_fields = MagicMock(return_value={1: 0})
+        self.bot.ensure_registered_map = MagicMock(return_value=True)
+        picker = self.bot.farm_request_picker_context({
+            "server_key": "server", "active_save_key": "hobo-save",
+            "saves": [{"save_key": "main-save"}, {"save_key": "hobo-save"}]})
+        self.assertEqual(picker["save_key"], "hobo-save")
+        self.assertEqual(picker["world_id"], "hobo-world")
+
     async def test_farm_request_view_rejects_other_user_and_submits_selected_field(self):
         view = FarmRequestView(self.bot, "member", "server", "save", "world-a", "Courtright", [
             {"field_id": 22, "farmland_id": 1}])

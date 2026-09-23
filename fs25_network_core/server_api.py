@@ -6,6 +6,7 @@ import this module or connect to MongoDB directly.
 import json
 import logging
 import os
+import threading
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,6 +21,7 @@ from .clock_policy import target_game_minutes
 from .farm_lifecycle import FarmLifecycle
 
 LOG = logging.getLogger(__name__)
+SNAPSHOT_LOCK = threading.Lock()
 PAIR_PATH = "/api/server/pair"
 REGISTRATION_PATH = "/api/server/registration/request"
 OPERATIONS_PATH = "/api/server/operations"
@@ -202,15 +204,25 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
             _json_response(self, 401, {"error": "invalid_server_authentication"})
             return
         except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
-            LOG.warning("snapshot malformed server=%s reason=%s",
-                        self.headers.get("X-SiN-Server-Key", "<missing>"), str(error))
-            _json_response(self, 400, {"error": "malformed_snapshot"})
+            reason = str(error)
+            if "save mapping" in reason.lower():
+                LOG.warning("snapshot save mapping required server=%s reason=%s",
+                            self.headers.get("X-SiN-Server-Key", "<missing>"), reason)
+                _json_response(self, 400, {"error": "save_mapping_required", "reason": reason})
+            else:
+                LOG.warning("snapshot malformed server=%s reason=%s",
+                            self.headers.get("X-SiN-Server-Key", "<missing>"), reason)
+                _json_response(self, 400, {"error": "malformed_snapshot", "reason": reason})
             return
         try:
-            snapshot = payload.get("snapshot")
-            if not isinstance(snapshot, dict) or not snapshot.get("world_id"):
-                raise ValueError("authoritative world generation is required")
-            result = self.farm_lifecycle.record_snapshot(record["server_key"], save_key, snapshot)
+            with SNAPSHOT_LOCK:
+                snapshot = payload.get("snapshot")
+                if not isinstance(snapshot, dict) or not snapshot.get("world_id"):
+                    raise ValueError("authoritative world generation is required")
+                self.event_processor.registry.validate_runtime_snapshot(
+                    record["server_key"], save_key, snapshot)
+                result = self.farm_lifecycle.record_snapshot(record["server_key"], save_key, snapshot)
+                self.event_processor.registry.activate_runtime(record["server_key"], save_key, snapshot)
         except ValueError as error:
             LOG.warning("snapshot rejected server=%s save=%s reason=%s",
                         record["server_key"], save_key, str(error))

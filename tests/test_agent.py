@@ -332,6 +332,17 @@ class AgentTests(unittest.TestCase):
         self.assertNotIn("must-not-be-logged", output)
         self.assertNotIn("secret-value", output)
 
+    def test_snapshot_payload_exports_persisted_runtime_generation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "snapshot.xml").write_text(
+                '<networkLocal source="game" session="session" runtimeGeneration="17" '
+                'sequence="4" savegameIndex="3" worldId="hobo-world"/>', encoding="utf-8")
+            agent = PairingAgent(root, "https://central", MagicMock())
+            payload = agent._snapshot_payload()
+        self.assertEqual(payload["runtime_generation"], 17)
+        self.assertEqual(payload["sequence"], 4)
+
     def test_agent_materializes_central_farm_operation_without_mongo(self):
         class OperationResponse:
             status = 200

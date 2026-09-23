@@ -2304,6 +2304,10 @@ function FS25SiNServer:exportSnapshot()
     xml:setInt("networkLocal#schemaVersion", 1)
     xml:setString("networkLocal#source", "game")
     xml:setString("networkLocal#session", self.session)
+    -- runtimeGeneration is a persisted mailbox-runtime identity.  Unlike the
+    -- wall-clock session label, it remains unique across rapid reloads and is
+    -- used by Central to reject delayed snapshots from an older save runtime.
+    xml:setInt("networkLocal#runtimeGeneration", self.runtimeGeneration or 0)
     xml:setInt("networkLocal#sequence", self.sequence)
     local info = g_currentMission.missionInfo
     xml:setInt("networkLocal#savegameIndex", (info and info.savegameIndex) or 0)

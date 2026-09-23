@@ -341,8 +341,13 @@ class NetworkBot(discord.Client):
 
         def selected_save(config):
             saves = config.get("saves") or []
+            active_save_key = config.get("active_save_key")
+            if active_save_key:
+                if any(str(save.get("save_key")) == str(active_save_key) for save in saves):
+                    return str(active_save_key)
+                raise ValueError("The server's active save mapping is no longer configured")
             if len(saves) != 1:
-                raise ValueError("The selected server must have exactly one configured save")
+                raise ValueError("The server has no current active save snapshot")
             return saves[0]["save_key"]
 
         def auth_for(server):
@@ -1174,6 +1179,8 @@ class NetworkBot(discord.Client):
             save_key = identity.get("save_id")
             if not save_key or not any(save.get("save_key") == save_key for save in config.get("saves", [])):
                 continue
+            if config.get("active_save_key") and str(save_key) != str(config["active_save_key"]):
+                continue
             observation = database.observed_fs25_identities.find_one({
                 "server_id": key, "save_id": save_key,
                 "fs25_unique_user_id": identity.get("fs25_unique_user_id"),
@@ -1261,10 +1268,17 @@ class NetworkBot(discord.Client):
     def farm_request_picker_context(self, config):
         """Build the map and selector from one current-world eligible set."""
         saves = config.get("saves") or []
-        if len(saves) != 1:
-            raise ValueError("The selected server must have exactly one configured save")
+        active_save_key = config.get("active_save_key")
+        if active_save_key:
+            matching = [save for save in saves if str(save.get("save_key")) == str(active_save_key)]
+            if len(matching) != 1:
+                raise ValueError("The server's active save mapping is no longer configured")
+            save_key = str(active_save_key)
+        else:
+            if len(saves) != 1:
+                raise ValueError("The server has no current active save snapshot")
+            save_key = str(saves[0]["save_key"])
         server_key = str(config["server_key"])
-        save_key = str(saves[0]["save_key"])
         world_id = self.farm_lifecycle.current_world_id(server_key, save_key)
         if not world_id:
             raise ValueError("No current FS25 world generation is available")
