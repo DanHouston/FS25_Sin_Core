@@ -1,4 +1,6 @@
+import json
 import os
+from pathlib import Path
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -18,6 +20,29 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         await self.bot.close()
+
+    async def test_real_discord_configuration_shape_constructs_bot(self):
+        config_path = Path(__file__).parents[1] / "discord.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        self.assertNotIn("server_chat", config["channels"])
+        with patch.dict(os.environ, {"DISCORD_OPERATOR_ROLE_IDS": ",".join(config["operator_role_ids"])}):
+            bot = NetworkBot(
+                MagicMock(), {}, int(config["guild_id"]),
+                operator_role_ids=config["operator_role_ids"],
+                channels=config["channels"],
+                sin_member_role_id=config["roles"]["sin_member"],
+            )
+        bot._sync_command_registry = AsyncMock(return_value=True)
+        bot.contracts.open = MagicMock(return_value=[])
+        bot.community_events.list = MagicMock(return_value=[])
+        await bot.setup_hook()
+        self.assertEqual(bot.channels["sin_apply"], int(config["channels"]["sin_apply"]))
+        self.assertEqual(bot.channels["jobs"], int(config["channels"]["jobs"]))
+        await bot.close()
+
+    async def test_nested_server_chat_configuration_fails_with_registry_guidance(self):
+        with self.assertRaisesRegex(ValueError, "discord_chat_channel_id"):
+            NetworkBot(MagicMock(), {}, 1, channels={"server_chat": {"sin-fs25-01": 123}})
 
     async def test_commands_replace_self_linking_and_all_have_channel_checks(self):
         commands = self.bot.tree.get_commands()

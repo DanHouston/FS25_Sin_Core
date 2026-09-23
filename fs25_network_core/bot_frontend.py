@@ -4,6 +4,7 @@ import io
 import json
 import logging
 import os
+from collections.abc import Mapping
 
 import discord
 from discord import app_commands
@@ -26,6 +27,32 @@ from .map_service import MapService, MapStore, MapValidationError
 
 class DiscordSetupError(RuntimeError):
     """An actionable installation error safe to display without credentials."""
+
+
+def normalize_channel_config(channels):
+    """Validate the flat Discord channel-ID configuration contract.
+
+    Playable-server chat is authoritative in each
+    ``sin_servers.discord_chat_channel_id`` record, not in this guild-wide
+    mapping. Reject nested legacy values with an actionable error.
+    """
+    if channels is None:
+        return {}
+    if not isinstance(channels, Mapping):
+        raise ValueError("Discord channels configuration must be an object of scalar channel IDs")
+    normalized = {}
+    for name, value in channels.items():
+        if name == "server_chat":
+            raise ValueError(
+                "channels.server_chat is unsupported; configure each playable server's "
+                "discord_chat_channel_id in the server registry")
+        if isinstance(value, Mapping) or isinstance(value, (list, tuple, set)):
+            raise ValueError(f"channels.{name} must be a scalar Discord channel ID")
+        try:
+            normalized[str(name)] = int(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"channels.{name} must be a numeric Discord channel ID") from None
+    return normalized
 
 
 def player_choice_label(player_id, nickname):
@@ -172,7 +199,7 @@ class NetworkBot(discord.Client):
         super().__init__(intents=intents)
         self.bank, self.servers = bank, servers
         self.guild = discord.Object(id=guild_id)
-        self.channels = {name: int(value) for name, value in (channels or {}).items()}
+        self.channels = normalize_channel_config(channels)
         self.community_timezone = str(community_timezone or "UTC")
         self.tree = app_commands.CommandTree(self)
         self._command_sync_lock = asyncio.Lock()
@@ -1293,7 +1320,10 @@ def main():
     # Do not reuse another guild's operator configuration when overriding guild ID.
     operator_role_ids = discord_config.get("operator_role_ids", []) if str(guild_id) == str(discord_config["guild_id"]) else []
     channels = discord_config.get("channels", {}) if str(guild_id) == str(discord_config["guild_id"]) else {}
-    channels = dict(channels)
+    try:
+        channels = normalize_channel_config(channels)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
     # Deployment may keep channel IDs outside the repository config.  These
     # explicit overrides are non-secret and avoid embedding a live guild ID in
     # business logic; discord.json remains the normal source of truth.

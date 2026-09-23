@@ -78,6 +78,25 @@ future FS25 chat routing; it is not derived from `server_key` or a channel
 name. Channel renames therefore do not affect routing. Missing required staff
 destinations fail clearly rather than falling back.
 
+The repository `discord.json` channel object is flat and contains scalar
+Discord channel IDs only. Its expected shape is:
+
+```json
+{
+  "channels": {
+    "staff": "<staff-channel-id>",
+    "operations": "<operations-channel-id>",
+    "jobs": "<sin-jobs-channel-id>",
+    "audit_log": "<audit-log-channel-id>",
+    "sin_apply": "<sin-apply-channel-id>"
+  }
+}
+```
+
+Do not add `channels.server_chat` (or any per-server nested mapping). The
+authoritative per-server chat ID is `sin_servers.discord_chat_channel_id` in
+Central.
+
 ## Community membership before farms
 
 Players link their stable FS25 identity with `/register code:<CODE>` after the
@@ -88,8 +107,8 @@ Discord command argument.
 
 New Discord users first use `/apply nickname:<name> farm_name:<farm>` in
 `#sin-apply`. This creates only a community application; it grants no game,
-banking, farm, or wallet access. Network Admins review it in `#sin-applications`
-with `/application_pending`, `/application_approve`, or `/application_deny`.
+banking, farm, or wallet access. Network Admins review it in `#staff` with
+`/application_pending`, `/application_approve`, or `/application_deny`.
 Approval sets the server nickname to `nickname | farm name` and grants the SiN
 Member role. Members must not have Change Nickname. SiN JiN needs Manage
 Nicknames and Manage Roles, with its role above SiN Member; do not grant
@@ -97,24 +116,18 @@ Administrator. Discord channel/role overwrites control visibility; the bot never
 creates or dynamically hides channels or roles. Only after community approval may
 a member optionally use the separate `/farm_request` workflow below.
 
-| Channel | ID | Commands / purpose |
-| --- | --- | --- |
-| #link-account | 1547411943311024240 | Legacy organization channel; member responses are private |
-| #bank | 1547412275462406205 | Legacy organization channel; member responses are private |
-| #farm-approvals | 1547412673069584444 | Staff review, roster, approval, rejection, role changes |
-| #audit-log | 1547412783564324956 | Reserved for future audit publishing |
-| #bridge-alerts | 1547412813390291044 | Reserved for future bridge alerts |
-
-Keep #farm-approvals, #audit-log, and #bridge-alerts private to staff. Other useful
-channels remain #start-here, #help, #announcements, #market, #server-status, and
-per-server chat/voice. No automatic channel creation or background posting occurs.
+Keep #staff, #operations, and #audit-log private to staff. Other useful
+channels remain #sin-rules, #sin-apply, #sin-lobby, #announcements, #mod-updates,
+#general, #sin-jobs, #market, #server-status, and per-server chat/voice. No
+automatic channel creation or background posting occurs.
 The bot responds privately to commands. Staff inspects the request queue with
 /farm_requests; requests are not automatically posted to a channel.
 
-The existing #link-account and #bank channels can keep their names for
-organization, but member self-service commands are no longer restricted to
-them. Role and channel IDs live in `discord.json`. Optional `channels.jobs` and
-`channels.events` values enable persistent contract and community-event cards;
+Retired #link-account, #bank, #sin-applications, #farm-approvals, and
+#bank-reconciliation channels are not routing dependencies. Role and guild-wide
+channel IDs live in `discord.json`; per-server chat IDs live in Central. Optional
+`channels.jobs` and `channels.events` values enable persistent contract and
+community-event cards;
 the bot does not guess or create those channels. Set `DISCORD_TIMEZONE` to an
 IANA timezone name when event creators should be able to enter local times.
 
