@@ -16,9 +16,12 @@ class AdminManager:
         self.db.farm_links.insert_one(record)
         return record
 
-    def lookup(self, discord_id, server_id, save_id, session=None):
-        link = self.db.memberships.find_one(dict(discord_id=str(discord_id), server_id=server_id, save_id=save_id,
-                                                state="active", desired_role="farm_manager", applied_role="farm_manager"), session=session)
+    def lookup(self, discord_id, server_id, save_id, session=None, world_id=None):
+        query = dict(discord_id=str(discord_id), server_id=server_id, save_id=save_id,
+                     state="active", desired_role="farm_manager", applied_role="farm_manager")
+        if world_id:
+            query["world_id"] = str(world_id)
+        link = self.db.memberships.find_one(query, session=session)
         if not link:
             raise ValueError("No active, mod-confirmed farm manager mapping for this user and save")
         return link

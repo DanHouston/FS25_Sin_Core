@@ -73,6 +73,15 @@ class ChatService:
 
     def __init__(self, database):
         self.database, self.db = database, database.db
+        self.worlds = WorldGenerationRegistry(database)
+
+    def _world(self, server_key, save_key, world_id=None):
+        active = self.worlds.active_id(server_key, save_key)
+        if active:
+            return self.worlds.require_active(server_key, save_key, world_id or active)
+        if world_id:
+            raise ValueError("FS25 world generation is not current for this server/save")
+        return None
 
     @staticmethod
     def fs25_injection_supported():
@@ -83,39 +92,45 @@ class ChatService:
     def sanitize(message):
         return _text(message, "Message", MAX_CHAT)
 
-    def ingest_fs25(self, server_key, save_key, event_id, payload):
+    def ingest_fs25(self, server_key, save_key, event_id, payload, world_id=None):
+        world_id = self._world(server_key, save_key, world_id or payload.get("world_id"))
         message = self.sanitize(payload.get("message"))
         source = str(payload.get("source", "fs25"))
         if source == "discord":
             raise ValueError("Discord-originated messages cannot be mirrored back from FS25")
         message_id = str(payload.get("message_id") or event_id)
-        storage_id = _id("fs25-chat", server_key, save_key, message_id)
+        storage_id = _id("fs25-chat", server_key, save_key, world_id or "legacy", message_id)
         record = {"_id": storage_id, "message_id": message_id, "server_key": server_key,
                   "save_key": save_key, "source": "fs25", "message": message,
-                  "unique_user_id": str(payload.get("unique_user_id", "")),
-                  "created_at": _now(), "state": "received"}
+                   "unique_user_id": str(payload.get("unique_user_id", "")),
+                   "created_at": _now(), "state": "received"}
+        if world_id:
+            record["world_id"] = world_id
         self.db.chat_messages.update_one({"_id": storage_id}, {"$setOnInsert": record}, upsert=True)
         return self.db.chat_messages.find_one({"_id": storage_id})
 
-    def queue_to_fs25(self, server_key, save_key, actor_id, message, operation_id=None):
+    def queue_to_fs25(self, server_key, save_key, actor_id, message, operation_id=None, world_id=None):
+        world_id = self._world(server_key, save_key, world_id)
         message = self.sanitize(message)
         actor_id = str(actor_id)
-        operation_id = operation_id or _id("discord-chat", server_key, save_key, actor_id, message, uuid.uuid4())
+        operation_id = operation_id or _id("discord-chat", server_key, save_key, world_id or "legacy", actor_id, message, uuid.uuid4())
         record = {"_id": operation_id, "message_id": operation_id, "server_key": server_key,
                   "save_key": save_key, "source": "discord", "message": message,
                   "actor_discord_id": actor_id, "created_at": _now(), "state": "pending"}
+        if world_id:
+            record["world_id"] = world_id
         self.db.chat_messages.update_one({"_id": operation_id}, {"$setOnInsert": record}, upsert=True)
         self.db.farm_operations.update_one(
             {"_id": operation_id},
             {"$setOnInsert": {"_id": operation_id, "operation_id": operation_id,
                                "operation_type": "chat_message", "server_key": server_key,
-                               "save_key": save_key, "payload": {"message_id": operation_id,
+                                "save_key": save_key, **({"world_id": world_id} if world_id else {}), "payload": {"message_id": operation_id,
                                "message": message, "source": "discord"}, "state": "pending",
                                "attempts": 0, "created_at": _now()},
              "$set": {"updated_at": _now()}}, upsert=True)
         return operation_id
 
-    def accept_receipt(self, operation_id, status, receipt, server_key=None, save_key=None):
+    def accept_receipt(self, operation_id, status, receipt, server_key=None, save_key=None, world_id=None):
         if status not in {"applied", "already_applied", "failed", "pending_validation"}:
             raise ValueError("Invalid chat operation outcome")
         operation = self.db.farm_operations.find_one({"_id": str(operation_id),
@@ -124,6 +139,8 @@ class ChatService:
             raise ValueError("Unknown chat operation")
         if server_key is not None and (operation.get("server_key") != server_key or operation.get("save_key") != save_key):
             raise ValueError("Chat operation is outside the authenticated server/save scope")
+        if operation.get("world_id") and self._world(server_key, save_key, world_id) != operation.get("world_id"):
+            raise ValueError("Chat operation is outside the active FS25 world generation")
         state = "succeeded" if status in {"applied", "already_applied"} else "reconciliation_required"
         current = operation.get("state")
         if current == "succeeded":
@@ -160,6 +177,8 @@ class ContractService:
         active = self.worlds.active_id(server_key, save_key)
         if active:
             return self.worlds.require_active(server_key, save_key, world_id or active)
+        if world_id:
+            raise ValueError("FS25 world generation is not current for this server/save")
         return None
 
     def create(self, creator_id, title, description, value=0, server_key=None, save_key=None, due_at=None,
@@ -224,6 +243,8 @@ class ContractService:
             active = self.worlds.active_id(server_key, save_key)
             if active:
                 query["world_id"] = active
+            else:
+                query["world_id"] = {"$exists": False}
         return list(self.db.contracts.find(query).sort("created_at", 1).limit(50))
 
     def set_marketplace_message(self, contract_id, channel_id, message_id):
@@ -252,6 +273,8 @@ class ContractService:
     def cancel(self, contract_id, actor_id, reason, staff=False):
         reason = _text(reason, "Cancellation reason", 300)
         record = self.get(contract_id)
+        if record and record.get("world_id"):
+            self._world(record["server_key"], record["save_key"], record["world_id"])
         if not record or (not staff and record.get("creator_discord_id") != str(actor_id)):
             raise ValueError("Only the contract creator or staff can cancel this contract")
         if record.get("status") in {"completed", "cancelled"}:
@@ -424,9 +447,15 @@ class TransferService:
 
     def __init__(self, database, authorization=None):
         self.db, self.authorization = database.db, authorization
+        self.worlds = WorldGenerationRegistry(database)
 
     def create(self, kind, requester_id, server_key, save_key, source_farm_id, destination_farm_id,
-               item, quantity=None, source_location=None):
+               item, quantity=None, source_location=None, world_id=None):
+        active = self.worlds.active_id(server_key, save_key)
+        if active:
+            world_id = self.worlds.require_active(server_key, save_key, world_id or active)
+        elif world_id:
+            raise ValueError("FS25 world generation is not current for this server/save")
         if kind not in {"vehicle", "product"}:
             raise ValueError("Transfer kind must be vehicle or product")
         if int(source_farm_id) <= 0 or int(destination_farm_id) <= 0 or int(source_farm_id) == int(destination_farm_id):
@@ -435,21 +464,26 @@ class TransferService:
         if kind == "product" and (type(quantity) not in (int, float) or quantity <= 0):
             raise ValueError("Product quantity must be positive")
         if self.authorization is not None:
-            manager = self.authorization.db.memberships.find_one({
+            manager_query = {
                 "discord_id": str(requester_id), "server_id": server_key, "save_id": save_key,
                 "farm_id": int(source_farm_id), "desired_role": "farm_manager",
                 # A queued/pending permission job is not yet game authority.
                 # Value-affecting transfers require the mod-confirmed role.
-                "state": "active", "applied_role": "farm_manager"})
+                "state": "active", "applied_role": "farm_manager"}
+            if world_id:
+                manager_query["world_id"] = world_id
+            manager = self.authorization.db.memberships.find_one(manager_query)
             if not manager:
                 raise ValueError("Source-farm manager authorization is required for a transfer")
         transfer_id = str(uuid.uuid4())
         record = {"transfer_id": transfer_id, "kind": kind, "requester_discord_id": str(requester_id),
                   "server_key": server_key, "save_key": save_key, "source_farm_id": int(source_farm_id),
                   "destination_farm_id": int(destination_farm_id), "item": item,
-                  "quantity": quantity, "source_location": source_location, "status": "requested",
-                  "created_at": _now(), "accepted_at": None, "operation_id": None,
-                  "receipt": None}
+                   "quantity": quantity, "source_location": source_location, "status": "requested",
+                   "created_at": _now(), "accepted_at": None, "operation_id": None,
+                   "receipt": None}
+        if world_id:
+            record["world_id"] = world_id
         self.db.transfers.insert_one(record)
         return record
 
@@ -457,6 +491,8 @@ class TransferService:
 
     def accept(self, transfer_id, actor_id):
         record = self.get(transfer_id)
+        if record and record.get("world_id"):
+            self.worlds.require_active(record["server_key"], record["save_key"], record["world_id"])
         if not record or record.get("status") != "requested":
             raise ValueError("Transfer is not awaiting acceptance")
         if record.get("requester_discord_id") == str(actor_id):
@@ -470,22 +506,27 @@ class TransferService:
 
     def queue_game_operation(self, transfer_id, actor_id):
         record = self.get(transfer_id)
+        if record and record.get("world_id"):
+            self.worlds.require_active(record["server_key"], record["save_key"], record["world_id"])
         if not record or record.get("status") not in {"accepted", "pending_game"}:
             raise ValueError("Transfer must be accepted before game delivery")
         operation_id = record.get("operation_id") or _id("transfer", transfer_id)
         payload = {key: record.get(key) for key in ("transfer_id", "kind", "source_farm_id",
                                                      "destination_farm_id", "item", "quantity", "source_location")}
+        operation_values = {"_id": operation_id, "operation_id": operation_id,
+                            "operation_type": record["kind"] + "_transfer", "server_key": record["server_key"],
+                            "save_key": record["save_key"], "payload": payload, "state": "pending",
+                            "attempts": 0, "created_at": _now()}
+        if record.get("world_id"):
+            operation_values["world_id"] = record["world_id"]
         self.db.farm_operations.update_one({"_id": operation_id},
-            {"$setOnInsert": {"_id": operation_id, "operation_id": operation_id,
-                               "operation_type": record["kind"] + "_transfer", "server_key": record["server_key"],
-                               "save_key": record["save_key"], "payload": payload, "state": "pending",
-                               "attempts": 0, "created_at": _now()}, "$set": {"updated_at": _now()}}, upsert=True)
+            {"$setOnInsert": operation_values, "$set": {"updated_at": _now()}}, upsert=True)
         self.db.transfers.update_one({"transfer_id": str(transfer_id)},
                                      {"$set": {"status": "pending_game", "operation_id": operation_id,
                                                "queued_by": str(actor_id), "updated_at": _now()}})
         return operation_id
 
-    def accept_receipt(self, transfer_id, receipt, server_key=None, save_key=None):
+    def accept_receipt(self, transfer_id, receipt, server_key=None, save_key=None, world_id=None):
         if not isinstance(receipt, dict):
             raise ValueError("Transfer receipt must be an object")
         record = self.get(transfer_id)
@@ -493,6 +534,10 @@ class TransferService:
             raise ValueError("Unknown transfer")
         if server_key is not None and (record.get("server_key") != server_key or record.get("save_key") != save_key):
             raise ValueError("Transfer is outside the authenticated server/save scope")
+        if record.get("world_id"):
+            active = self.worlds.active_id(server_key, save_key)
+            if not active or self.worlds.require_active(server_key, save_key, world_id) != record["world_id"]:
+                raise ValueError("Transfer is outside the active FS25 world generation")
         if not receipt.get("operation_id") or record.get("operation_id") != receipt.get("operation_id"):
             raise ValueError("Transfer receipt does not match the queued operation")
         outcome = receipt.get("status")

@@ -22,9 +22,9 @@ SUPPORTED_EVENTS = {"heartbeat", "player_connected", "player_disconnected", ACTI
                     CHAT_EVENT_TYPE, MAP_EVENT_TYPE}
 
 
-def scoped_event_id(server_key, save_key, event_id):
-    """Return the durable idempotency key for one server/save event stream."""
-    value = "|".join((str(server_key), str(save_key), str(event_id)))
+def scoped_event_id(server_key, save_key, event_id, world_id=None):
+    """Return the durable idempotency key for one world event stream."""
+    value = "|".join((str(server_key), str(save_key), str(world_id or "legacy"), str(event_id)))
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
@@ -82,7 +82,8 @@ class CentralEventProcessor:
                 self.farm_lifecycle.require_current_world(record["server_key"], save_key, raw_world_id)
             except ValueError as error:
                 raise EventScopeError(str(error)) from None
-        processed_id = scoped_event_id(record["server_key"], save_key, event_id)
+        processed_world_id = active_world_id or raw_world_id
+        processed_id = scoped_event_id(record["server_key"], save_key, event_id, processed_world_id)
         processed_marker = self.db.processed_server_events.find_one({"_id": processed_id})
         if processed_marker and event_type != "player_disconnected":
             LOG.info("[SiN Events] duplicate event ignored eventId=%s type=%s", event_id, event_type)
@@ -117,7 +118,9 @@ class CentralEventProcessor:
             if not isinstance(raw_payload, dict):
                 raise EventValidationError("event payload must be an object")
             try:
-                chat_record = self.chat.ingest_fs25(record["server_key"], save_key, event_id, raw_payload)
+                chat_record = self.chat.ingest_fs25(
+                    record["server_key"], save_key, event_id, raw_payload,
+                    **({"world_id": processed_world_id} if processed_world_id else {}))
             except (TypeError, ValueError) as error:
                 raise EventValidationError(str(error)) from None
             result = {"status": "accepted", "message_id": chat_record.get("message_id") if chat_record else event_id,
@@ -131,7 +134,7 @@ class CentralEventProcessor:
                 ActivityOutbox(self.database).enqueue(
                     event_id, record["server_key"], CHAT_EVENT_TYPE,
                     f"💬 {sender}: {chat_record.get('message', raw_payload.get('message', ''))}",
-                    save_key=save_key)
+                     save_key=save_key, world_id=processed_world_id)
         elif event_type == "player_connected":
             raw_payload = event.get("payload") or {}
             if not isinstance(raw_payload, dict):
@@ -151,7 +154,7 @@ class CentralEventProcessor:
             message = self.activity_message(record, save_key, payload)
             if message is not None:
                 ActivityOutbox(self.database).enqueue(event_id, record["server_key"], event_type, message,
-                                                      save_key=save_key)
+                                                       save_key=save_key, world_id=processed_world_id)
         elif event_type == "player_disconnected":
             raw_payload = event.get("payload") or {}
             if not isinstance(raw_payload, dict):
@@ -175,7 +178,7 @@ class CentralEventProcessor:
             # durable record.
             if message is not None:
                 ActivityOutbox(self.database).enqueue(event_id, record["server_key"], event_type, message,
-                                                      save_key=save_key)
+                                                       save_key=save_key, world_id=processed_world_id)
         elif event_type == "heartbeat":
             try:
                 self.farm_lifecycle.ensure_system_farm(record["server_key"], save_key)
@@ -187,7 +190,8 @@ class CentralEventProcessor:
                 name = record.get("display_name") or record["server_key"]
                 ActivityOutbox(self.database).enqueue(
                     event_id, record["server_key"], "server_online",
-                    f"🟢 Server Online\n{name} is connected to SiN JiN.", save_key=save_key)
+                    f"🟢 Server Online\n{name} is connected to SiN JiN.", save_key=save_key,
+                    world_id=processed_world_id)
         elif event_type not in {"player_connected", "player_disconnected"}:
             raw_payload = event.get("payload") or {}
             if not isinstance(raw_payload, dict):
@@ -197,11 +201,13 @@ class CentralEventProcessor:
             message = self.activity_message(record, save_key, payload)
             if message is not None:
                 ActivityOutbox(self.database).enqueue(
-                    event_id, record["server_key"], event_type, message, save_key=save_key)
+                    event_id, record["server_key"], event_type, message, save_key=save_key,
+                    world_id=processed_world_id)
         try:
             self.db.processed_server_events.insert_one(
                 {"_id": processed_id, "event_id": event_id, "server_key": record["server_key"],
-                 "save_key": save_key, "processed_at": now})
+                  "save_key": save_key, **({"world_id": processed_world_id} if processed_world_id else {}),
+                  "processed_at": now})
         except DuplicateKeyError:
             pass
         LOG.info("[SiN Events] processed type=%s serverKey=%s", event_type, record["server_key"])

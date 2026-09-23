@@ -16,6 +16,7 @@ WORLD_BOUND_COLLECTIONS = (
     "bank_bridge_operations", "farm_financial_provisioning",
     "contracts", "player_activity_minutes", "player_activity_aggregates",
     "player_activity_sessions", "activity_outbox", "processed_server_events",
+    "observed_fs25_identities", "chat_messages", "transfers",
 )
 
 
@@ -32,6 +33,22 @@ class WorldGenerationRegistry:
     @staticmethod
     def _scope(server_key, save_key):
         return {"server_key": str(server_key), "save_key": str(save_key)}
+
+    @staticmethod
+    def _scopes_for_collection(name, server_key, save_key):
+        """Return both historical field spellings used by world-bound stores.
+
+        Early authorization/banking records use ``server_id``/``save_id`` while
+        runtime records use ``server_key``/``save_key``.  A generation change
+        must archive both forms; filtering only one spelling leaves stale
+        authority or bridge rows executable after a replacement save.
+        """
+        primary = {"server_key": str(server_key), "save_key": str(save_key)}
+        legacy = {"server_id": str(server_key), "save_id": str(save_key)}
+        if name in {"farm_requests", "memberships", "permission_jobs", "deposit_requests",
+                    "withdrawals", "observed_fs25_identities"}:
+            return (legacy, primary)
+        return (primary,)
 
     @staticmethod
     def validate(world_id):
@@ -81,17 +98,20 @@ class WorldGenerationRegistry:
         old_world = {"world_id": {"$ne": world_id}}
         for name in WORLD_BOUND_COLLECTIONS:
             collection = getattr(self.db, name)
-            query = {**scope, **old_world}
-            collection.update_many(query, {"$set": {
-                "world_generation_state": "historical", "world_superseded_at": now,
-                "superseded_by_world_id": world_id}})
+            for collection_scope in self._scopes_for_collection(name, server_key, save_key):
+                query = {**collection_scope, **old_world}
+                collection.update_many(query, {"$set": {
+                    "world_generation_state": "historical", "world_superseded_at": now,
+                    "superseded_by_world_id": world_id}})
         for name in ("farm_operations", "permission_jobs", "land_operations",
-                     "fs25_money_operations", "bank_bridge_operations"):
+                     "fs25_money_operations", "bank_bridge_operations", "transfers"):
             collection = getattr(self.db, name)
-            collection.update_many({**scope, **old_world, "state": {"$in": ["pending", "dispatched"]}},
-                                   {"$set": {"state": "world_superseded", "updated_at": now,
-                                             "world_generation_state": "historical",
-                                             "superseded_by_world_id": world_id}})
+            for collection_scope in self._scopes_for_collection(name, server_key, save_key):
+                collection.update_many({**collection_scope, **old_world,
+                                        "state": {"$in": ["requested", "accepted", "pending", "dispatched", "pending_game"]}},
+                                       {"$set": {"state": "world_superseded", "updated_at": now,
+                                                  "world_generation_state": "historical",
+                                                  "superseded_by_world_id": world_id}})
         generation_id = f"{scope['server_key']}:{scope['save_key']}:{world_id}"
         self.db.world_generations.update_one({"_id": generation_id}, {"$setOnInsert": {
             "_id": generation_id, **scope, "world_id": world_id, "created_at": now}, "$set": {

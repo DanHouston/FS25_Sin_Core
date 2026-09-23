@@ -115,13 +115,14 @@ class BankingEngine:
                                    upsert=True, session=session)
 
     def credit_verified_transfer(self, server_id, save_id, event_id, discord_id, source_farm_id, amount, evidence,
-                                 session=None):
+                                 session=None, world_id=None):
         """Only call after adapter/operator verifies sender, destination, and finality.
 
         event_id must be the source system's immutable transaction identifier.
         Never derive it from a Discord interaction or a balance difference.
         """
         amount_units(amount)
+        world_id = self._world_id(server_id, save_id, world_id)
         if not event_id or not evidence:
             raise ValueError("A source transaction ID and verification evidence are required")
         user = str(discord_id)
@@ -133,7 +134,7 @@ class BankingEngine:
                 if (existing["discord_id"], existing["source_farm_id"], existing["amount"]) != (user, source_farm_id, amount):
                     raise ValueError("Transfer ID already used with different details")
                 return "already_credited"
-            link = self.admin.lookup(user, server_id, save_id, session)
+            link = self.admin.lookup(user, server_id, save_id, session, world_id)
             if link["farm_id"] != source_farm_id:
                 raise ValueError("Transfer sender does not match the approved farm")
             transaction_id = self.transaction_id("deposit", server_id, save_id, event_id)
@@ -160,7 +161,7 @@ class BankingEngine:
                 if (old["discord_id"], old["server_id"], old["save_id"], old["amount"]) != (user, server_id, save_id, amount):
                     raise ValueError("Request ID reused with different details")
                 return old["state"]
-            link = self.admin.lookup(user, server_id, save_id, session)
+            link = self.admin.lookup(user, server_id, save_id, session, world_id)
             transaction_id = self.transaction_id("withdrawal", request_id)
             result = self.db.wallets.update_one({"_id": user, "balance": {"$gte": amount}}, {"$inc": {"balance": -amount}}, session=session)
             if result.modified_count != 1:
@@ -198,7 +199,7 @@ class BankingEngine:
                 if (old["discord_id"], old["server_id"], old["save_id"], old["amount"]) != (user, server_id, save_id, amount):
                     raise ValueError("Deposit request ID reused with different details")
                 return old["state"]
-            link = self.admin.lookup(user, server_id, save_id, session)
+            link = self.admin.lookup(user, server_id, save_id, session, world_id)
             operation_id = self.transaction_id("deposit-operation", world_id or "legacy", request_id)
             now = datetime.now(timezone.utc)
             self.db.farm_operations.update_one(
@@ -243,7 +244,7 @@ class BankingEngine:
             # transfer/ledger idempotency rules remain the single credit path.
             self.credit_verified_transfer(record["server_id"], record["save_id"], event_id,
                                           record["discord_id"], record["farm_id"], record["amount"], evidence,
-                                          session=session)
+                                          session=session, world_id=record.get("world_id"))
             result = self.db.deposit_requests.update_one(
                 {"_id": request_id, "state": "pending"},
                 {"$set": {"state": "completed", "receipt": receipt,

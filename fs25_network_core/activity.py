@@ -11,15 +11,17 @@ LOG = logging.getLogger(__name__)
 class ActivityOutbox:
     def __init__(self, database): self.db = database.db
     @staticmethod
-    def _scoped_id(source_event_id, server_key, save_key=None):
+    def _scoped_id(source_event_id, server_key, save_key=None, world_id=None):
         return hashlib.sha256("|".join((str(server_key), str(save_key or ""),
-                                         str(source_event_id))).encode("utf-8")).hexdigest()
+                                         str(world_id or "legacy"), str(source_event_id))).encode("utf-8")).hexdigest()
 
-    def enqueue(self, source_event_id, server_key, activity_type, message, save_key=None):
-        scoped_id = self._scoped_id(source_event_id, server_key, save_key)
+    def enqueue(self, source_event_id, server_key, activity_type, message, save_key=None, world_id=None):
+        scoped_id = self._scoped_id(source_event_id, server_key, save_key, world_id)
         doc = {"_id": scoped_id, "activity_id": scoped_id, "source_event_id": source_event_id,
                "server_key": server_key, "save_key": save_key, "activity_type": activity_type, "message": message,
                "created_at": datetime.now(timezone.utc), "status": "pending", "attempts": 0}
+        if world_id:
+            doc["world_id"] = str(world_id)
         try: self.db.activity_outbox.insert_one(doc)
         except DuplicateKeyError:
             pass
@@ -43,7 +45,8 @@ class ActivityPublisher:
         self.task = None
     async def run(self):
         while True:
-            for record in list(self.outbox.db.activity_outbox.find({"status": "pending"}).limit(25)):
+            for record in list(self.outbox.db.activity_outbox.find(
+                    {"status": "pending", "world_generation_state": {"$ne": "historical"}}).limit(25)):
                 await self.publish(record)
             await asyncio.sleep(self.interval)
 

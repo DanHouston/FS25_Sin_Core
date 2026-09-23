@@ -800,7 +800,12 @@ class MapService:
         self._render_cache = _BoundedCache(max_render_cache)
         self.renderer = MapRenderer()
 
-    def register_map(self, server_key, save_key, model: MapModel, *, base_rgba=None, overview_dds=None):
+    @staticmethod
+    def _map_key(server_key, save_key, world_id=None):
+        return (str(server_key), str(save_key), str(world_id) if world_id is not None else None)
+
+    def register_map(self, server_key, save_key, model: MapModel, *, base_rgba=None, overview_dds=None,
+                     world_id=None):
         if not isinstance(model, MapModel):
             raise MapValidationError("model must be a MapModel")
         if (base_rgba is None) == (overview_dds is None):
@@ -816,15 +821,17 @@ class MapService:
                 raise MapValidationError("overview_dds must be bytes")
             if len(overview_dds) > MAX_IMAGE_BYTES:
                 raise MapValidationError("overview DDS exceeds the safe byte limit")
-        self._maps[(str(server_key), str(save_key))] = {
+        self._maps[self._map_key(server_key, save_key, world_id)] = {
             "model": model, "base_rgba": bytes(base_rgba) if base_rgba is not None else None,
             "overview_dds": bytes(overview_dds) if overview_dds is not None else None,
             "revision": model.revision,
+            "world_id": str(world_id) if world_id is not None else None,
         }
         self._base_cache.clear()
         self._render_cache.clear()
 
-    def register_payload(self, server_key, save_key, payload, *, base_rgba=None, overview_dds=None):
+    def register_payload(self, server_key, save_key, payload, *, base_rgba=None, overview_dds=None,
+                         world_id=None):
         """Register the versioned normalized transport payload.
 
         This is the narrow ingestion boundary for a future authenticated map
@@ -834,7 +841,8 @@ class MapService:
         model = MapModel.from_dict(payload)
         if base_rgba is None and overview_dds is None:
             base_rgba = generated_background(model.image_width, model.image_height)
-        self.register_map(server_key, save_key, model, base_rgba=base_rgba, overview_dds=overview_dds)
+        self.register_map(server_key, save_key, model, base_rgba=base_rgba, overview_dds=overview_dds,
+                          world_id=world_id)
         return model
 
     def load_persisted(self, store: MapStore, server_key, save_key, world_id=None):
@@ -849,30 +857,45 @@ class MapService:
             # A replacement generation may have no map yet.  Never leave the
             # previous in-memory projection available for rendering while the
             # new world is being discovered.
-            self.unregister_map(server_key, save_key)
+            self.unregister_map(server_key, save_key, world_id)
             return False
-        if model.revision == self.revision(server_key, save_key):
+        if model.revision == self.revision(server_key, save_key, world_id):
             return True
         # Keep the public payload ingestion boundary in the load path as well;
         # presentation adapters can observe one projection load without
         # gaining access to storage or bypassing model validation.
         self.register_payload(server_key, save_key, model.to_dict(),
-                              base_rgba=generated_background(model.image_width, model.image_height))
+                              base_rgba=generated_background(model.image_width, model.image_height),
+                              world_id=world_id)
         return True
 
-    def unregister_map(self, server_key, save_key):
-        self._maps.pop((str(server_key), str(save_key)), None)
+    def unregister_map(self, server_key, save_key, world_id=None):
+        if world_id is None:
+            for key in tuple(self._maps):
+                if key[:2] == (str(server_key), str(save_key)):
+                    self._maps.pop(key, None)
+        else:
+            self._maps.pop(self._map_key(server_key, save_key, world_id), None)
         self._base_cache.clear()
         self._render_cache.clear()
 
-    def model(self, server_key, save_key):
-        record = self._maps.get((str(server_key), str(save_key)))
+    def _lookup(self, server_key, save_key, world_id=None):
+        if world_id is not None:
+            return self._maps.get(self._map_key(server_key, save_key, world_id))
+        matches = [record for key, record in self._maps.items()
+                   if key[:2] == (str(server_key), str(save_key))]
+        if len(matches) > 1:
+            raise MapUnavailable("World generation is required when multiple maps are loaded")
+        return matches[0] if matches else None
+
+    def model(self, server_key, save_key, world_id=None):
+        record = self._lookup(server_key, save_key, world_id)
         if not record:
             raise MapUnavailable("No validated map is registered for this server/save")
         return record["model"]
 
-    def revision(self, server_key, save_key):
-        record = self._maps.get((str(server_key), str(save_key)))
+    def revision(self, server_key, save_key, world_id=None):
+        record = self._lookup(server_key, save_key, world_id)
         return record.get("revision") if record else None
 
     def _base(self, key, record):
@@ -895,9 +918,9 @@ class MapService:
         return base, width, height
 
     def render_map(self, server_key, save_key, *, highlight_fields=(), highlight_farmlands=(),
-                   ownership=None, labels=True, ownership_revision=None):
-        key = (str(server_key), str(save_key))
-        record = self._maps.get(key)
+                   ownership=None, labels=True, ownership_revision=None, world_id=None):
+        key = self._map_key(server_key, save_key, world_id)
+        record = self._lookup(server_key, save_key, world_id)
         if not record:
             raise MapUnavailable("No validated map is registered for this server/save")
         model = record["model"]
@@ -926,7 +949,7 @@ class MapService:
         self._render_cache.put(render_key, result)
         return result
 
-    def render_contract_map(self, server_key, save_key, fields):
+    def render_contract_map(self, server_key, save_key, fields, world_id=None):
         field_ids = []
         for value in str(fields or "").split(","):
             if value.strip():
@@ -936,4 +959,5 @@ class MapService:
                     raise MapValidationError("contract field IDs must be positive integers") from None
         if not field_ids:
             raise MapUnavailable("Contract has no field IDs to render")
-        return self.render_map(server_key, save_key, highlight_fields=field_ids, labels=True)
+        return self.render_map(server_key, save_key, highlight_fields=field_ids, labels=True,
+                               world_id=world_id)

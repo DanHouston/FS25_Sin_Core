@@ -13,7 +13,7 @@ class Database:
         self.name = self.db.name
 
     @staticmethod
-    def _replace_legacy_unique_index(collection, legacy_keys, desired_keys, name, **options):
+    def _replace_legacy_unique_index(collection, legacy_keys, desired_keys, name, allow_partial=False, **options):
         """Replace only the known pre-scope unique index, if it exists.
 
         Older deployments created global uniqueness for event/transfer fields.
@@ -26,7 +26,7 @@ class Database:
             indexes = {}
         for index_name, info in (indexes.items() if isinstance(indexes, dict) else ()):
             if (info.get("unique") and list(info.get("key", [])) == list(legacy_keys)
-                    and not info.get("partialFilterExpression")):
+                    and (allow_partial or not info.get("partialFilterExpression"))):
                 collection.drop_index(index_name)
         collection.create_index(desired_keys, name=name, **options)
 
@@ -52,11 +52,19 @@ class Database:
         self.db.game_identities.create_index([("server_id", 1), ("save_id", 1), ("discord_id", 1)], unique=True)
         self.db.game_identities.create_index([("server_id", 1), ("save_id", 1), ("game_player_id", 1)], unique=True)
         self.db.game_identities.create_index([("server_id", 1), ("save_id", 1), ("fs25_unique_user_id", 1)], unique=True, sparse=True)
-        self.db.observed_fs25_identities.create_index([("server_id", 1), ("save_id", 1), ("fs25_unique_user_id", 1)], unique=True)
+        self._replace_legacy_unique_index(
+            self.db.observed_fs25_identities,
+            [("server_id", 1), ("save_id", 1), ("fs25_unique_user_id", 1)],
+            [("server_id", 1), ("save_id", 1), ("world_id", 1), ("fs25_unique_user_id", 1)],
+            name="observed_identity_world_scope", unique=True)
         self.db.registration_codes.create_index("expires_at", expireAfterSeconds=0)
         self.db.registration_codes.create_index("token_hash", unique=True, sparse=True)
-        self.db.memberships.create_index([("server_id", 1), ("save_id", 1), ("farm_id", 1)],
-            unique=True, partialFilterExpression={"desired_role": "farm_manager"}, name="one_manager_per_farm")
+        self._replace_legacy_unique_index(
+            self.db.memberships,
+            [("server_id", 1), ("save_id", 1), ("farm_id", 1)],
+            [("server_id", 1), ("save_id", 1), ("world_id", 1), ("farm_id", 1)],
+            name="one_manager_per_farm", unique=True,
+            partialFilterExpression={"desired_role": "farm_manager"}, allow_partial=True)
         self.db.permission_jobs.create_index([("server_id", 1), ("save_id", 1), ("state", 1)])
         self.db.farm_requests.create_index([("server_id", 1), ("save_id", 1), ("state", 1), ("created_at", 1)])
         self.db.land_operations.create_index([("server_id", 1), ("save_id", 1), ("request_id", 1)], unique=True)
@@ -66,26 +74,37 @@ class Database:
             partialFilterExpression={"source_request_id": {"$type": "string"}})
         self.db.sin_farms.create_index([("server_key", 1), ("save_key", 1), ("owner_discord_id", 1)],
             unique=True, partialFilterExpression={"owner_discord_id": {"$type": "string"}})
-        self.db.server_snapshots.create_index([("server_key", 1), ("save_key", 1)], unique=True)
+        self._replace_legacy_unique_index(
+            self.db.server_snapshots,
+            [("server_key", 1), ("save_key", 1)],
+            [("server_key", 1), ("save_key", 1), ("world_id", 1)],
+            name="snapshot_world_scope", unique=True)
         self.db.community_applications.create_index([("state", 1), ("submitted_at", 1)])
         self.db.sin_servers.create_index("server_key", unique=True)
         self.db.sin_saves.create_index([("server_key", 1), ("fs25_save_id", 1)], unique=True)
         self.db.sin_saves.create_index([("server_key", 1), ("save_key", 1)], unique=True)
-        self.db.sin_maps.create_index([("server_key", 1), ("save_key", 1)], unique=True)
+        self._replace_legacy_unique_index(
+            self.db.sin_maps,
+            [("server_key", 1), ("save_key", 1)],
+            [("server_key", 1), ("save_key", 1), ("world_id", 1)],
+            name="map_world_scope", unique=True)
         self.db.processed_server_events.create_index("processed_at", expireAfterSeconds=604800)
         self.db.activity_outbox.create_index([("status", 1), ("created_at", 1)])
         self._replace_legacy_unique_index(
             self.db.activity_outbox,
             [("source_event_id", 1)],
-            [("server_key", 1), ("save_key", 1), ("source_event_id", 1)],
-            name="activity_event_scope",
+            [("server_key", 1), ("save_key", 1), ("world_id", 1), ("source_event_id", 1)],
+            name="activity_event_world_scope",
             unique=True,
         )
         self.db.player_activity_minutes.create_index("interval_key", unique=True)
         self.db.player_activity_minutes.create_index([
             ("server_key", 1), ("save_key", 1), ("fs25_unique_user_id", 1), ("observed_at", 1)])
-        self.db.player_activity_aggregates.create_index([
-            ("server_key", 1), ("save_key", 1), ("fs25_unique_user_id", 1)], unique=True)
+        self._replace_legacy_unique_index(
+            self.db.player_activity_aggregates,
+            [("server_key", 1), ("save_key", 1), ("fs25_unique_user_id", 1)],
+            [("server_key", 1), ("save_key", 1), ("world_id", 1), ("fs25_unique_user_id", 1)],
+            name="activity_aggregate_world_scope", unique=True)
         self.db.player_activity_sessions.create_index([
             ("server_key", 1), ("save_key", 1), ("fs25_unique_user_id", 1), ("connected_at", -1)])
         self.db.player_activity_sessions.create_index([

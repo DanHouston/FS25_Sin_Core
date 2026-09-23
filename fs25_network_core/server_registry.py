@@ -3,6 +3,7 @@ import hashlib
 import secrets
 from datetime import datetime, timezone, timedelta
 from .clock_policy import validate_policy
+from .world_generation import WorldGenerationRegistry
 
 
 def _hash(value):
@@ -12,6 +13,7 @@ def _hash(value):
 class ServerRegistry:
     def __init__(self, database):
         self.db = database.db
+        self.worlds = WorldGenerationRegistry(database)
 
     def register(self, server_key, display_name, guild_id, channel_id):
         if not server_key or not server_key.replace("-", "").replace("_", "").isalnum() or len(server_key) > 64:
@@ -92,10 +94,12 @@ class ServerRegistry:
                     continue
                 save_choice = {"save_key": save["save_key"], "fs25_save_id": str(save["fs25_save_id"])}
                 if purpose == "farm_request":
-                    snapshot = self.db.server_snapshots.find_one(
-                        {"server_key": server["server_key"], "save_key": save["save_key"]},
-                        sort=[("received_at", -1)],
-                    )
+                    snapshot_query = {"server_key": server["server_key"], "save_key": save["save_key"]}
+                    active_world = self.worlds.active_id(server["server_key"], save["save_key"])
+                    if active_world:
+                        snapshot_query["world_id"] = active_world
+                    snapshot = self.db.server_snapshots.find_one(snapshot_query,
+                        sort=[("received_at", -1)])
                     available = self._available_snapshot_fields(snapshot)
                     if not available:
                         continue

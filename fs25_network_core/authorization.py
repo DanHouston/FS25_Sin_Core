@@ -12,6 +12,7 @@ import re
 import uuid
 import secrets
 from datetime import datetime, timezone, timedelta
+from .world_generation import WorldGenerationRegistry
 
 
 ROLES = {"farm_manager", "contractor", "worker", "visitor", "revoked"}
@@ -31,6 +32,7 @@ class AuthorizationManager:
     def __init__(self, database):
         self.database, self.db = database, database.db
         self.community_db = database.db
+        self.worlds = WorldGenerationRegistry(database)
 
     def issue_code(self, discord_id, server_id, save_id):
         raise ValueError("Player self-linking is disabled; submit a farm request for staff approval")
@@ -69,6 +71,10 @@ class AuthorizationManager:
 
     def observe_players(self, server_id, save_id, snapshot):
         """Persist connected trusted UserManager observations without linking them."""
+        world_id = snapshot.get("world_id") if isinstance(snapshot, dict) else None
+        active = self.worlds.active_id(server_id, save_id)
+        if active:
+            world_id = self.worlds.require_active(server_id, save_id, world_id)
         now = datetime.now(timezone.utc)
         observed = snapshot.get("observed_users") or [dict(unique_user_id=k, name=v, farm_id=0, connected=True)
                                                        for k, v in snapshot.get("players", {}).items()]
@@ -78,10 +84,16 @@ class AuthorizationManager:
                 display_name, user_id, farm_id, connected = player.get("name", ""), player.get("user_id"), player.get("farm_id", 0), player.get("connected", True)
             else:
                 display_name, user_id, farm_id, connected = player, None, 0, True
+            query = {"server_id": server_id, "save_id": save_id, "fs25_unique_user_id": unique_id}
+            if world_id:
+                query["world_id"] = str(world_id)
+            values = {"latest_display_name": display_name, "user_id": user_id, "current_farm_id": farm_id,
+                      "currently_connected": connected, "last_seen_at": now}
+            if world_id:
+                values["world_id"] = str(world_id)
             self.db.observed_fs25_identities.update_one(
-                {"server_id": server_id, "save_id": save_id, "fs25_unique_user_id": unique_id},
-                {"$set": {"latest_display_name": display_name, "user_id": user_id, "current_farm_id": farm_id,
-                          "currently_connected": connected, "last_seen_at": now},
+                query,
+                {"$set": values,
                  "$setOnInsert": {"first_seen_at": now}}, upsert=True)
 
     def _registration_code(self, server_id, save_id, unique_user_id, issued_at):
@@ -464,5 +476,13 @@ class AuthorizationManager:
             return "applied"
         return self.database.atomic(acknowledge)
 
-    def status(self, discord_id, server_id, save_id):
-        return self.db.memberships.find_one({"_id": key(server_id, save_id, str(discord_id))})
+    def status(self, discord_id, server_id, save_id, world_id=None):
+        active = self.worlds.active_id(server_id, save_id)
+        query = {"discord_id": str(discord_id), "server_id": server_id, "save_id": save_id}
+        if active:
+            if not world_id:
+                return None
+            query["world_id"] = self.worlds.require_active(server_id, save_id, world_id)
+        elif world_id:
+            raise ValueError("FS25 world generation is not current for this server/save")
+        return self.db.memberships.find_one(query)

@@ -233,12 +233,12 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
                 result = self.farm_lifecycle.accept_receipt(record["server_key"], save_key, receipt, world_id)
             elif receipt.get("operation_type") in {"vehicle_transfer", "product_transfer"}:
                 result = self.event_processor.transfers.accept_receipt(
-                    receipt["transfer_id"], receipt, record["server_key"], save_key)
+                    receipt["transfer_id"], receipt, record["server_key"], save_key, world_id)
                 result = {"operation_id": receipt["operation_id"], "state": result.get("status")}
             elif receipt.get("operation_type") == "chat_message":
                 result = self.event_processor.chat.accept_receipt(
                     receipt["operation_id"], receipt.get("status"), receipt.get("receipt"),
-                    record["server_key"], save_key)
+                    record["server_key"], save_key, world_id)
                 result = {"operation_id": receipt["operation_id"], "state": result}
             elif receipt.get("operation_type") == "withdraw_funds":
                 result = self.event_processor.banking.settle_withdrawal(

@@ -737,8 +737,10 @@ class NetworkBot(discord.Client):
                     ephemeral=True)
                 return
             save_key = selected_save(server_config(interaction, server, "reconcile"))
+            world_id = self.farm_lifecycle.current_world_id(server, save_key)
             operation_id = await asyncio.to_thread(self.chat.queue_to_fs25, server, save_key,
-                                                   str(interaction.user.id), message)
+                                                   str(interaction.user.id), message,
+                                                   **({"world_id": world_id} if world_id else {}))
             await interaction.response.send_message(
                 f"Game chat operation `{operation_id}` queued for the selected server.", ephemeral=True)
 
@@ -1019,7 +1021,9 @@ class NetworkBot(discord.Client):
             target = member or interaction.user
             await interaction.response.defer(ephemeral=True)
             context = await asyncio.to_thread(self.resolve_identity_context, str(target.id), None, "reconcile")
-            status = await asyncio.to_thread(self.telemetry.status, context["server_key"], context["save_key"], context["unique_user_id"])
+            world_id = self.farm_lifecycle.current_world_id(context["server_key"], context["save_key"])
+            status = await asyncio.to_thread(self.telemetry.status, context["server_key"], context["save_key"],
+                                              context["unique_user_id"], world_id)
             aggregate = status.get("aggregate") or {}
             sessions = status.get("sessions") or []
             if not aggregate and not sessions:
@@ -1139,7 +1143,7 @@ class NetworkBot(discord.Client):
                 f"Participants: {len(participants)}"
                 + (f"/{record['max_participants']}" if record.get("max_participants") else ""))
 
-    def ensure_registered_map(self, server_key, save_key):
+    def ensure_registered_map(self, server_key, save_key, world_id=None):
         """Load a validated runtime map projection before rendering a card.
 
         The Agent posts geometry to the server API process, while JiN runs in
@@ -1150,9 +1154,7 @@ class NetworkBot(discord.Client):
         if not server_key or not save_key:
             return False
         try:
-            world_id = self.farm_lifecycle.current_world_id(server_key, save_key)
-            if not world_id:
-                return False
+            world_id = world_id or self.farm_lifecycle.current_world_id(server_key, save_key)
             return self.map_service.load_persisted(MapStore(self.bank.database), server_key, save_key, world_id)
         except (MapValidationError, ValueError):
             logging.warning("Stored runtime map geometry is invalid; using text-only contract card")
@@ -1172,11 +1174,15 @@ class NetworkBot(discord.Client):
         try:
             attachment = None
             try:
-                await asyncio.to_thread(self.ensure_registered_map, record.get("server_key"),
-                                        record.get("save_key"))
-                image = await asyncio.to_thread(
-                    self.map_service.render_contract_map, record.get("server_key"),
-                    record.get("save_key"), record.get("fields"))
+                map_args = (record.get("server_key"), record.get("save_key"))
+                if record.get("world_id"):
+                    await asyncio.to_thread(self.ensure_registered_map, *map_args, record.get("world_id"))
+                else:
+                    await asyncio.to_thread(self.ensure_registered_map, *map_args)
+                render_args = (*map_args, record.get("fields"))
+                if record.get("world_id"):
+                    render_args = (*render_args, record.get("world_id"))
+                image = await asyncio.to_thread(self.map_service.render_contract_map, *render_args)
                 attachment = discord.File(io.BytesIO(image), filename="sin-map.png")
             except Exception as error:
                 logging.info("Contract map rendering unavailable; posting text-only card: %s", error)
