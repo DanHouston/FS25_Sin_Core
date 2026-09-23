@@ -82,6 +82,47 @@ class WorldGenerationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.lifecycle.require_current_world(self.SERVER, self.SAVE, "courtright-generation")
 
+    def test_legacy_scope_is_migrated_when_hobo_is_first_generation_snapshot(self):
+        legacy_scope = {"server_key": self.SERVER, "save_key": self.SAVE}
+        self.db.server_snapshots.insert_one({
+            "_id": "legacy-courtright-snapshot", **legacy_scope,
+            "source": "game", "savegame_index": 1,
+            "farms": {"1": "SiN Harvest", "2": "Repton Does", "14": ""},
+            "farmlands": {"22": 2}, "players": {},
+        })
+        self.db.sin_farms.insert_one({
+            "_id": "legacy-repton", **legacy_scope,
+            "farm_type": "member", "canonical_name": "Repton Does",
+            "fs25_farm_id": 2, "state": "active",
+        })
+        self.db.farm_operations.insert_one({
+            "_id": "legacy-operation", "operation_id": "legacy-operation", **legacy_scope,
+            "operation_type": "assign_farmland", "state": "pending",
+            "payload": {"farm_id": 2, "farmland_id": 22},
+        })
+
+        hobo = self.snapshot(
+            "sin-world-20260922233019-1790134219-687362",
+            farms={"14": ""}, farmlands={str(index): 0 for index in range(1, 81)})
+        hobo["map_id"] = "FS25_HobosHollow.HobosHollow"
+        hobo["savegame_index"] = 3
+        result = self.lifecycle.record_snapshot(self.SERVER, self.SAVE, hobo)
+
+        world_id = result["world_id"]
+        self.assertEqual(self.lifecycle.current_world_id(self.SERVER, self.SAVE), world_id)
+        self.assertEqual(self.db.server_snapshots.find_one({"_id": "legacy-courtright-snapshot"})[
+            "world_generation_state"], "historical")
+        self.assertEqual(self.db.sin_farms.find_one({"_id": "legacy-repton"})[
+            "world_generation_state"], "historical")
+        legacy_operation = self.db.farm_operations.find_one({"_id": "legacy-operation"})
+        self.assertEqual(legacy_operation["state"], "world_superseded")
+        current_operations = self.lifecycle.operations_for(self.SERVER, self.SAVE, world_id)
+        self.assertNotIn("legacy-operation", {row["operation_id"] for row in current_operations})
+        with self.assertRaises(ValueError):
+            self.lifecycle.accept_receipt(self.SERVER, self.SAVE, {
+                "operation_id": "legacy-operation", "world_id": world_id, "status": "applied",
+            }, world_id)
+
     def test_snapshot_remains_accepted_when_system_farm_follow_up_needs_retry(self):
         snapshot = self.snapshot("replacement", farms={"14": ""}, farmlands={"1": 0})
         with patch.object(self.lifecycle, "ensure_system_farm", side_effect=ValueError("malformed legacy mapping")):
