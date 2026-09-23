@@ -182,6 +182,14 @@ polygons on a deterministic neutral canvas. Compare Field 22 and several
 irregular fields against the in-game PDA before treating orientation as
 production-verified.
 
+Field labels use a deterministic large, bold white bitmap with a dark halo so
+numeric IDs remain readable at normal Discord attachment size. Contract maps
+label the selected fields; the farm-request picker labels the complete current
+eligible-field set while retaining the unselected field outlines as whole-map
+context. The picker derives those labels from the same available farmland set
+used by `FarmLifecycle`; geometry selects context, while farmland remains the
+ownership primitive.
+
 ## Runtime probe
 
 On a stopped/testable FS25 server, run `sinSelfTest` from the FS25 server

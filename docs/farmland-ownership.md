@@ -1,14 +1,18 @@
 # Authoritative farmland ownership assignment
 
 This workflow assigns one FS25 **farmland ID** to one FS25 farm in one
-server/save context. It does not use field geometry, does not infer parcel
-boundaries, and does not fabricate farmland polygons. Courtright Line has 72
-farmland IDs and fewer field geometries; a field is not a farmland parcel.
+server/save context. `/farm_request server:<server>` presents current map field
+geometry only as a readable selection context; the selected field resolves to
+its associated farmland ID. It does not infer parcel boundaries or fabricate
+farmland polygons. Courtright Line has 72 farmland IDs and fewer field
+geometries; a field is not a farmland parcel.
 
 ## Lifecycle and authority
 
-The member selects the requested farmland in `/farm_request`; the numeric ID is
-persisted with the pending server/save-scoped request. Staff then runs only
+The member selects a numbered field in the ephemeral current-world map picker;
+submission atomically revalidates availability and reserves the associated
+farmland. The numeric farmland ID and selected field context are persisted with
+the pending server/save/world-scoped request. Staff then runs only
 `/farm_approve server:<server> member:<requester>`. Approval first creates or
 adopts the requested FS25 farm. Its receipt automatically queues ownership of
 the farmland already selected by the member; staff never re-enters an ID.

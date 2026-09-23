@@ -6,10 +6,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from discord import app_commands
 
-from fs25_network_core.bot_frontend import (CommunityEventView, ContractView, NetworkBot,
-                                            format_farm_roster, player_choice_label)
+from fs25_network_core.bot_frontend import (CommunityEventView, ContractView, FarmRequestView,
+                                            NetworkBot, format_farm_roster, player_choice_label)
 from fs25_network_core.channel_policy import COMMAND_CHANNELS
 from fs25_network_core.map_service import MapUnavailable
+from tests.test_map_service import rgba_base, synthetic_model
 
 
 class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
@@ -43,6 +44,44 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
     async def test_nested_server_chat_configuration_fails_with_registry_guidance(self):
         with self.assertRaisesRegex(ValueError, "discord_chat_channel_id"):
             NetworkBot(MagicMock(), {}, 1, channels={"server_chat": {"sin-fs25-01": 123}})
+
+    async def test_farm_request_picker_uses_current_map_and_available_farmland_set(self):
+        model = synthetic_model(64, 64)
+        self.bot.map_service.register_map("server", "save", model,
+                                          base_rgba=rgba_base(64, 64), world_id="world-a")
+        self.bot.farm_lifecycle.current_world_id = MagicMock(return_value="world-a")
+        self.bot.farm_lifecycle.available_fields = MagicMock(return_value={1: 0, 2: 9})
+        self.bot.ensure_registered_map = MagicMock(return_value=True)
+        picker = self.bot.farm_request_picker_context({
+            "server_key": "server", "saves": [{"save_key": "save"}]})
+        self.assertEqual(picker["world_id"], "world-a")
+        self.assertEqual(picker["fields"], [{"field_id": 22, "farmland_id": 1}])
+        self.assertTrue(picker["image"].startswith(b"\x89PNG"))
+
+    async def test_farm_request_view_rejects_other_user_and_submits_selected_field(self):
+        view = FarmRequestView(self.bot, "member", "server", "save", "world-a", "Courtright", [
+            {"field_id": 22, "farmland_id": 1}])
+        self.assertEqual(view.field_select.options[0].label, "Field 22")
+        self.assertEqual(view.field_select.options[0].value, "22")
+        other = MagicMock()
+        other.user.id = "other"
+        other.response.send_message = AsyncMock()
+        self.assertFalse(await view.interaction_check(other))
+        other.response.send_message.assert_awaited_once()
+
+        interaction = MagicMock()
+        interaction.user.id = "member"
+        interaction.response.edit_message = AsyncMock()
+        view.field_select._values = ["22"]
+        await view._select_field(interaction)
+        self.assertEqual(view.selected_field_id, 22)
+        self.assertFalse(view.submit_button.disabled)
+        self.bot.submit_farm_request_from_picker = MagicMock(return_value={
+            "farm_name": "Farm", "starting_field_id": 22, "starting_field": 1})
+        await view._submit_request(interaction)
+        self.bot.submit_farm_request_from_picker.assert_called_once_with(
+            "member", "server", "save", "world-a", 22)
+        self.assertIn("pending staff review", interaction.response.edit_message.await_args.kwargs["content"])
 
     async def test_commands_replace_self_linking_and_all_have_channel_checks(self):
         commands = self.bot.tree.get_commands()

@@ -13,9 +13,13 @@ leaves the operation pending. If FS25 already contains exactly one `SiN Harvest`
 farm, the next authenticated snapshot/reconcile adopts that actual ID instead of
 creating another farm; duplicates fail closed as `reconciliation_required`.
 
-Member farm requests use the approved application's farm name and a numeric
-starting farmland ID. `/farm_request` stores the friendly server selection and
-field choice; it never creates a farm or grants authority. Staff uses
+Member farm requests use the approved application's farm name and a current
+world-generation map picker. `/farm_request server:<server>` sends an ephemeral
+whole-map attachment with the currently available field numbers and a dropdown.
+The picker is presentation context; its selected field resolves to the
+associated farmland ID, which remains the ownership primitive. Submission
+atomically revalidates the current generation and reserves that farmland; merely
+opening the picker reserves nothing. Staff uses
 `/farm_approve` to queue a `provision_farm` operation. FS25_SiN_Server creates or
 adopts the exact named farm, then its receipt automatically queues ownership of
 the farmland selected in `/farm_request`. The server reads the current owner,
@@ -161,14 +165,16 @@ See [Discord application commands](https://docs.discord.com/developers/interacti
    The Atlas database user must have access to this test database.
 3. In any channel in the configured guild, submit:
 
-   `/farm_request server:local-dev starting_field:<your field>`
+   `/farm_request server:local-dev`
 
-   Use the exact created farm name for this test. The requester comes from the
-   Discord interaction; players cannot submit another Discord identity, a game
-   identity, or a granted role. A request grants no permissions.
-4. Staff opens #farm-approvals and runs `/farm_requests server:local-dev`.
-   It lists the first 15 pending requests, including requester, farm name, and
-   starting field. Requests persist in MongoDB.
+   Choose a numbered field on the attached current-world map, then submit the
+   dropdown request. Use the exact created farm name from the approved
+   application. The requester comes from the Discord interaction; players cannot
+   submit another Discord identity, a game identity, or a granted role. A
+   request grants no permissions.
+4. Staff opens #staff and runs `/farm_requests server:local-dev`. It lists the
+   first 15 pending requests, including requester, farm name, selected field,
+   and associated farmland. Requests persist in MongoDB.
 5. Staff reviews the field choice and runs `/farm_approve server:local-dev`.
    Select the requester from the pending picker. The backend queues a durable
    `provision_farm` operation; staff does not create the farm or guess its ID.

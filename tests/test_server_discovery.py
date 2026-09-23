@@ -85,18 +85,9 @@ class DiscordServerAutocompleteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot.server_registry.eligible_servers.call_args_list[0].args, ("reconcile",))
         self.assertEqual(self.bot.server_registry.eligible_servers.call_args_list[1].args, ("farm_request",))
 
-    async def test_farm_field_choices_follow_selected_server_snapshot(self):
-        self.bot.server_registry.eligible_server = MagicMock(return_value={
-            "server_key": "sin-fs25-01",
-            "saves": [{"save_key": "sin-fs25-main", "available_fields": [12]}],
-        })
-        interaction = MagicMock()
-        interaction.guild_id = 1
-        interaction.namespace.server = "sin-fs25-01"
+    async def test_farm_request_starts_with_server_only_and_uses_component_picker(self):
         command = self.bot.tree.get_command("farm_request")
-        choices = await command._params["starting_field"].autocomplete(interaction, "")
-        self.assertEqual([(choice.name, choice.value) for choice in choices], [("12", "12")])
-        self.bot.server_registry.eligible_server.assert_called_once_with("sin-fs25-01", "farm_request")
+        self.assertEqual([option["name"] for option in command.to_dict(self.bot.tree)["options"]], ["server"])
 
     async def test_server_autocomplete_logs_provider_failure_and_recovers(self):
         interaction = MagicMock()

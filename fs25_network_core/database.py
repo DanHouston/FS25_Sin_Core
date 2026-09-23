@@ -68,6 +68,8 @@ class Database:
         self.db.permission_jobs.create_index([("server_id", 1), ("save_id", 1), ("state", 1)])
         self.db.farm_requests.create_index([("server_id", 1), ("save_id", 1), ("state", 1), ("created_at", 1)])
         self.db.land_operations.create_index([("server_id", 1), ("save_id", 1), ("request_id", 1)], unique=True)
+        self.db.farm_field_reservations.create_index(
+            [("server_key", 1), ("save_key", 1), ("world_id", 1), ("farmland_id", 1)], unique=True)
         self.db.farm_operations.create_index([("server_key", 1), ("save_key", 1), ("state", 1), ("created_at", 1)])
         self.db.sin_farms.create_index([("server_key", 1), ("save_key", 1), ("farm_type", 1), ("canonical_name", 1)])
         self.db.sin_farms.create_index("source_request_id", unique=True,

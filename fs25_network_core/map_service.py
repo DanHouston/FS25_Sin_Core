@@ -437,18 +437,23 @@ class MapRenderer:
     FIELD_CONTEXT_OUTLINE = (180, 205, 220, 190)
     FARMLAND_OUTLINE = (0, 220, 255, 235)
     LABEL = (255, 255, 255, 255)
+    LABEL_HALO = (8, 14, 20, 250)
+    LABEL_SCALE = 3
 
     def render(self, model: MapModel, base_rgba: bytes, highlight_fields=(), highlight_farmlands=(),
-               ownership: Mapping | None = None, labels=True):
+               ownership: Mapping | None = None, labels=True, label_fields=None):
         expected = model.image_width * model.image_height * 4
         if len(base_rgba) != expected:
             raise MapValidationError("base image does not match normalized map dimensions")
         fields = self._ids(highlight_fields, "field")
         farmlands = self._ids(highlight_farmlands, "farmland")
+        label_fields = fields if label_fields is None else self._ids(label_fields, "field label")
         unknown_fields = [field_id for field_id in fields if field_id not in model.fields]
+        unknown_label_fields = [field_id for field_id in label_fields if field_id not in model.fields]
         unknown_farmlands = [farmland_id for farmland_id in farmlands if farmland_id not in model.farmlands]
-        if unknown_fields:
-            raise MapUnavailable(f"Unknown field ID: {unknown_fields[0]}")
+        if unknown_fields or unknown_label_fields:
+            unknown = (unknown_fields or unknown_label_fields)[0]
+            raise MapUnavailable(f"Unknown field ID: {unknown}")
         if unknown_farmlands:
             raise MapUnavailable(f"Unknown farmland ID: {unknown_farmlands[0]}")
         ownership = ownership or {}
@@ -469,7 +474,9 @@ class MapRenderer:
             rings = self._pixel_rings(geometry.rings, transform)
             self._fill_rings(pixels, model.image_width, model.image_height, rings, self.FIELD_FILL)
             self._outline_rings(pixels, model.image_width, model.image_height, rings, self.FIELD_OUTLINE)
-            if labels:
+        if labels:
+            for field_id in label_fields:
+                geometry = model.fields[field_id]
                 self._draw_label(pixels, model.image_width, model.image_height,
                                  transform.world_to_pixel(*geometry.centroid), str(field_id))
         for farmland_id in farmlands:
@@ -557,8 +564,9 @@ class MapRenderer:
 
     @staticmethod
     def _draw_label(pixels, width, height, center, text):
-        # A tiny deterministic 3x5 bitmap for numeric/short labels.  It avoids
-        # a font dependency while keeping overlays legible at map scale.
+        # A deterministic bitmap avoids a font dependency.  A three-pixel glyph
+        # was unreadable in normal Discord attachments, so labels use a large,
+        # bold white glyph with a dark halo for contrast against any map fill.
         glyphs = {
             "0": ("111", "101", "101", "101", "111"), "1": ("010", "110", "010", "010", "111"),
             "2": ("111", "001", "111", "100", "111"), "3": ("111", "001", "111", "001", "111"),
@@ -570,18 +578,32 @@ class MapRenderer:
         text = "".join(char for char in str(text) if char in glyphs)[:12]
         if not text:
             return
-        total_width = len(text) * 4 - 1
+        scale = MapRenderer.LABEL_SCALE
+        total_width = len(text) * 4 * scale - scale
         start_x = int(center[0] - total_width / 2)
-        start_y = int(center[1] - 2)
+        start_y = int(center[1] - 2.5 * scale)
+
+        def paint(x, y, color):
+            for pixel_y in range(y, y + scale):
+                for pixel_x in range(x, x + scale):
+                    if 0 <= pixel_x < width and 0 <= pixel_y < height:
+                        offset = (pixel_y * width + pixel_x) * 4
+                        pixels[offset:offset + 4] = bytes(color)
+
         for char_index, char in enumerate(text):
             glyph = glyphs[char]
             for row, line in enumerate(glyph):
                 for column, value in enumerate(line):
                     if value == "1":
-                        x, y = start_x + char_index * 4 + column, start_y + row
-                        if 0 <= x < width and 0 <= y < height:
-                            offset = (y * width + x) * 4
-                            pixels[offset:offset + 4] = bytes(MapRenderer.LABEL)
+                        x = start_x + char_index * 4 * scale + column * scale
+                        y = start_y + row * scale
+                        # Paint a one-pixel halo first, then the glyph block.
+                        for halo_y in range(y - 1, y + scale + 1):
+                            for halo_x in range(x - 1, x + scale + 1):
+                                if 0 <= halo_x < width and 0 <= halo_y < height:
+                                    offset = (halo_y * width + halo_x) * 4
+                                    pixels[offset:offset + 4] = bytes(MapRenderer.LABEL_HALO)
+                        paint(x, y, MapRenderer.LABEL)
 
 
 def _png_chunk(kind, payload):
@@ -918,7 +940,8 @@ class MapService:
         return base, width, height
 
     def render_map(self, server_key, save_key, *, highlight_fields=(), highlight_farmlands=(),
-                   ownership=None, labels=True, ownership_revision=None, world_id=None):
+                   ownership=None, labels=True, ownership_revision=None, world_id=None,
+                   label_fields=None):
         key = self._map_key(server_key, save_key, world_id)
         record = self._lookup(server_key, save_key, world_id)
         if not record:
@@ -927,11 +950,12 @@ class MapService:
         try:
             fields = tuple(sorted(set(int(value) for value in (highlight_fields or []))))
             farmlands = tuple(sorted(set(int(value) for value in (highlight_farmlands or []))))
+            rendered_labels = None if label_fields is None else tuple(sorted(set(int(value) for value in label_fields)))
         except (TypeError, ValueError):
             raise MapValidationError("overlay IDs must be positive integers") from None
-        if any(value <= 0 for value in fields + farmlands):
+        if any(value <= 0 for value in fields + farmlands + (rendered_labels or ())):
             raise MapValidationError("overlay IDs must be positive integers")
-        if len(fields) > MAX_OVERLAYS or len(farmlands) > MAX_OVERLAYS:
+        if len(fields) > MAX_OVERLAYS or len(farmlands) > MAX_OVERLAYS or len(rendered_labels or ()) > MAX_OVERLAYS:
             raise MapValidationError("too many map overlays")
         ownership_key = ownership_revision if ownership_revision is not None else tuple(sorted(
             (str(key), str(value)) for key, value in (ownership or {}).items()))
@@ -940,12 +964,12 @@ class MapService:
         except TypeError:
             ownership_key = repr(ownership_key)
         render_key = (key, model.version, model.revision, model.overview_asset_identity, fields, farmlands,
-                      bool(labels), ownership_key)
+                      rendered_labels, bool(labels), ownership_key)
         cached = self._render_cache.get(render_key)
         if cached is not None:
             return cached
         base, _, _ = self._base(key, record)
-        result = self.renderer.render(model, base, fields, farmlands, ownership, labels)
+        result = self.renderer.render(model, base, fields, farmlands, ownership, labels, rendered_labels)
         self._render_cache.put(render_key, result)
         return result
 
@@ -961,3 +985,20 @@ class MapService:
             raise MapUnavailable("Contract has no field IDs to render")
         return self.render_map(server_key, save_key, highlight_fields=field_ids, labels=True,
                                world_id=world_id)
+
+    def eligible_field_map(self, server_key, save_key, available_farmland_ids, world_id=None):
+        """Return current map field -> farmland choices for available land.
+
+        Field geometry is only the presentation/selection context.  The
+        returned farmland IDs remain the ownership primitive used by
+        ``FarmLifecycle``.
+        """
+        model = self.model(server_key, save_key, world_id)
+        try:
+            available = {int(value) for value in (available_farmland_ids or [])}
+        except (TypeError, ValueError):
+            raise MapValidationError("available farmland IDs must be positive integers") from None
+        if any(value <= 0 for value in available):
+            raise MapValidationError("available farmland IDs must be positive integers")
+        return {field_id: geometry.farmland_id for field_id, geometry in sorted(model.fields.items())
+                if geometry.farmland_id in available}

@@ -5,6 +5,8 @@ an FS25 numeric farm ID; IDs are learned from authenticated game receipts.
 """
 from datetime import datetime, timezone
 import hashlib
+from pymongo.errors import DuplicateKeyError
+from .database import Database
 from .world_generation import WorldGenerationRegistry
 
 
@@ -47,8 +49,11 @@ class FarmLifecycle:
             scope["world_id"] = active
         return scope
 
-    def latest_snapshot(self, server_key, save_key, world_id=None):
-        return self.db.server_snapshots.find_one(self._scope(server_key, save_key, world_id), sort=[("received_at", -1)])
+    def latest_snapshot(self, server_key, save_key, world_id=None, session=None):
+        kwargs = {"sort": [("received_at", -1)]}
+        if session is not None:
+            kwargs["session"] = session
+        return self.db.server_snapshots.find_one(self._scope(server_key, save_key, world_id), **kwargs)
 
     def record_snapshot(self, server_key, save_key, snapshot):
         if not isinstance(snapshot, dict) or snapshot.get("source") != "game":
@@ -337,38 +342,78 @@ class FarmLifecycle:
     def _repair_contractor_authorizations(self, server_key, save_key):
         self._reconcile_shared_contractor_authorizations(server_key, save_key)
 
-    def available_fields(self, server_key, save_key):
-        snapshot = self.latest_snapshot(server_key, save_key)
+    def available_fields(self, server_key, save_key, *, world_id=None, session=None):
+        snapshot = self.latest_snapshot(server_key, save_key, world_id, session=session)
         if not snapshot:
             raise ValueError("No current game snapshot is available")
         fields = snapshot.get("farmlands") or {}
         return {int(field_id): int(owner or 0) for field_id, owner in fields.items()}
 
-    def request_farm(self, discord_id, server_key, save_key, starting_field):
+    def request_farm(self, discord_id, server_key, save_key, starting_field, *, world_id=None, field_id=None):
         application = self.db.community_applications.find_one({"_id": str(discord_id), "state": "approved"})
         if not application or not application.get("farm_name"):
             raise ValueError("You must complete SiN membership approval before requesting a farm")
         try:
-            field_id = int(str(starting_field).strip())
+            farmland_id = int(str(starting_field).strip())
         except (TypeError, ValueError):
             raise ValueError("Starting field must be a numeric FS25 farmland ID") from None
-        if field_id <= 0:
+        if farmland_id <= 0:
             raise ValueError("Starting field must be a positive FS25 farmland ID")
-        owner = self.available_fields(server_key, save_key).get(field_id)
-        if owner is None:
-            raise ValueError("That starting field is not present on the current save")
-        if owner != 0:
-            raise ValueError("That starting field is no longer available")
-        world_id = self.current_world_id(server_key, save_key)
-        request_id = hashlib.sha256(f"{server_key}|{save_key}|{world_id or 'legacy'}|{discord_id}".encode()).hexdigest()
-        now = self._now()
-        record = dict(_id=request_id, discord_id=str(discord_id), server_key=server_key, save_key=save_key,
-                      farm_name=str(application["farm_name"]).strip(), starting_field=field_id,
-                      state="pending", created_at=now, updated_at=now)
-        if world_id:
-            record["world_id"] = world_id
-        self.db.farm_requests.update_one({"_id": request_id}, {"$setOnInsert": record}, upsert=True)
-        return self.db.farm_requests.find_one({"_id": request_id})
+
+        def reserve(session):
+            active_world = self.current_world_id(server_key, save_key)
+            selected_world = str(world_id) if world_id is not None else active_world
+            if world_id is not None and active_world != str(world_id):
+                raise ValueError("This field picker belongs to an older FS25 world generation; start again")
+            available = self.available_fields(server_key, save_key, world_id=selected_world, session=session)
+            owner = available.get(farmland_id)
+            if owner is None:
+                raise ValueError("That starting field is not present on the current save")
+            if owner != 0:
+                raise ValueError("That starting field is no longer available")
+            generation_key = selected_world or "legacy"
+            request_id = hashlib.sha256(
+                f"{server_key}|{save_key}|{generation_key}|{discord_id}".encode()).hexdigest()
+            request_query = {"_id": request_id}
+            existing = self.db.farm_requests.find_one(request_query, session=session)
+            if isinstance(existing, dict) and existing.get("state") in {"pending", "requested"}:
+                old_field = existing.get("starting_field")
+                if old_field is not None and int(old_field) != farmland_id:
+                    raise ValueError("You already have a pending farm request for this world")
+            reservation_query = {"server_key": str(server_key), "save_key": str(save_key),
+                                 "world_id": generation_key, "farmland_id": farmland_id}
+            reservation = self.db.farm_field_reservations.find_one(reservation_query, session=session)
+            if isinstance(reservation, dict) and reservation.get("request_id") != request_id:
+                raise ValueError("That starting field was just reserved by another pending request")
+            now = self._now()
+            reservation_values = dict(**reservation_query, request_id=request_id,
+                                      discord_id=str(discord_id), state="pending", created_at=now, updated_at=now)
+            try:
+                self.db.farm_field_reservations.update_one(
+                    reservation_query, {"$setOnInsert": reservation_values, "$set": {"updated_at": now}},
+                    upsert=True, session=session)
+            except DuplicateKeyError:
+                raise ValueError("That starting field was just reserved by another pending request") from None
+            record = dict(_id=request_id, discord_id=str(discord_id), server_key=server_key, save_key=save_key,
+                          farm_name=str(application["farm_name"]).strip(), starting_field=farmland_id,
+                          state="pending", created_at=now, updated_at=now)
+            if selected_world:
+                record["world_id"] = selected_world
+            if field_id is not None:
+                record["starting_field_id"] = int(field_id)
+            if isinstance(existing, dict) and existing.get("state") == "rejected":
+                self.db.farm_requests.replace_one(request_query, record, upsert=True, session=session)
+            else:
+                self.db.farm_requests.update_one(request_query, {"$setOnInsert": record}, upsert=True, session=session)
+            return self.db.farm_requests.find_one(request_query, session=session)
+
+        # MongoDB's Database.atomic gives the reservation and request one
+        # transaction.  Lightweight deterministic adapters execute the same
+        # callback directly; their reservation collection still models the
+        # unique-field boundary used by production MongoDB.
+        if isinstance(self.database, Database):
+            return self.database.atomic(reserve)
+        return reserve(None)
 
     def request_status(self, discord_id):
         return self.db.farm_requests.find_one({"discord_id": str(discord_id)}, sort=[("updated_at", -1), ("created_at", -1)])
@@ -386,6 +431,8 @@ class FarmLifecycle:
                 "reviewed_at": self._now(), "updated_at": self._now()}})
         if getattr(result, "modified_count", 1) != 1:
             raise ValueError("Request is unknown or already reviewed")
+        self.db.farm_field_reservations.delete_one({"request_id": request_id,
+            "server_key": str(server_key), "save_key": str(save_key)})
 
     def approve_request(self, request_id, server_key, save_key, approved_by):
         if not approved_by:

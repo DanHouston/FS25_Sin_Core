@@ -29,7 +29,8 @@ The authorization workflow allows one desired manager per farm, multiple
 workers/visitors, and one farm per user per save.
 Farm migration needs an operator workflow; never silently reuse old mappings.
 
-Players submit `/farm_request` with a server, farm name, and starting field.
+Players submit `/farm_request server:<server>` and choose a numbered field from
+the current-world map; the approved application supplies the farm name.
 An operator creates the farm and assigns starting land in game, then uses
 `/farm_approve` to associate the requester with a player identity observed by
 the mod. Staff confirms that identity and land allocation before approving.

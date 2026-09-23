@@ -22,7 +22,7 @@ from .activity_telemetry import ActivityTelemetryProcessor
 from .business_workflows import (ChatService, ContractService, InvoiceService,
                                   CommunityEventService, TransferService)
 from .farm_lifecycle import FarmLifecycle, SYSTEM_FARM_NAME
-from .map_service import MapService, MapStore, MapValidationError
+from .map_service import MapService, MapStore, MapUnavailable, MapValidationError
 
 
 class DiscordSetupError(RuntimeError):
@@ -188,6 +188,86 @@ class CommunityEventView(discord.ui.View):
             await interaction.response.send_message(str(error), ephemeral=True)
             return
         await interaction.response.edit_message(content=self.bot.event_card_text(record), view=self)
+
+
+class FarmRequestView(discord.ui.View):
+    """Ephemeral current-world field picker for one farm requester."""
+
+    def __init__(self, bot, user_id, server_key, save_key, world_id, map_title, fields):
+        super().__init__(timeout=600)
+        self.bot = bot
+        self.user_id = str(user_id)
+        self.server_key = str(server_key)
+        self.save_key = str(save_key)
+        self.world_id = str(world_id)
+        self.map_title = str(map_title)
+        self.fields = {int(item["field_id"]): int(item["farmland_id"]) for item in fields}
+        if not self.fields:
+            raise ValueError("No currently available starting fields are selectable")
+        if len(self.fields) > 25:
+            raise ValueError("More than 25 fields are available; staff must provide a paged selector")
+        options = [discord.SelectOption(
+            label=f"Field {field_id}", value=str(field_id),
+            description=f"Available farmland {farmland_id}")
+            for field_id, farmland_id in sorted(self.fields.items())]
+        self.field_select = discord.ui.Select(
+            placeholder="Choose an available starting field", min_values=1, max_values=1,
+            options=options, custom_id="sin:farm-request:field")
+        self.field_select.callback = self._select_field
+        self.add_item(self.field_select)
+        self.submit_button = discord.ui.Button(
+            label="Submit farm request", style=discord.ButtonStyle.success,
+            custom_id="sin:farm-request:submit", disabled=True)
+        self.submit_button.callback = self._submit_request
+        self.add_item(self.submit_button)
+        self.selected_field_id = None
+
+    async def interaction_check(self, interaction: discord.Interaction):
+        if str(interaction.user.id) != self.user_id:
+            await interaction.response.send_message("This farm field picker belongs to another member.", ephemeral=True)
+            return False
+        return True
+
+    def content(self):
+        rows = [f"**{self.map_title}** — current world generation `{self.world_id}`",
+                "Select one available starting field. The associated farmland is reserved only when you submit.", ""]
+        rows.extend(f"Field {field_id} → Farmland {farmland_id}"
+                    for field_id, farmland_id in sorted(self.fields.items()))
+        if self.selected_field_id is not None:
+            rows.extend(("", f"Selected: **Field {self.selected_field_id}** "
+                         f"(Farmland {self.fields[self.selected_field_id]})"))
+        return "\n".join(rows)
+
+    async def _select_field(self, interaction: discord.Interaction):
+        try:
+            self.selected_field_id = int(self.field_select.values[0])
+        except (IndexError, TypeError, ValueError):
+            await interaction.response.send_message("Choose a valid field from the current map.", ephemeral=True)
+            return
+        self.submit_button.disabled = False
+        await interaction.response.edit_message(content=self.content(), view=self)
+
+    async def _submit_request(self, interaction: discord.Interaction):
+        if self.selected_field_id is None:
+            await interaction.response.send_message("Select a starting field first.", ephemeral=True)
+            return
+        try:
+            record = await asyncio.to_thread(
+                self.bot.submit_farm_request_from_picker, str(interaction.user.id),
+                self.server_key, self.save_key, self.world_id, self.selected_field_id)
+        except (MapUnavailable, MapValidationError, ValueError) as error:
+            self.clear_items()
+            await interaction.response.edit_message(
+                content=f"This field selection is no longer current: {error}\nRun `/farm_request` again to refresh the map.",
+                view=self)
+            return
+        self.clear_items()
+        field_id = record.get("starting_field_id") or self.selected_field_id
+        farmland_id = record.get("starting_field")
+        await interaction.response.edit_message(
+            content=(f"Farm request submitted for **{record['farm_name']}**.\n"
+                     f"Selected Field **{field_id}** (Farmland **{farmland_id}**) is pending staff review."),
+            view=self)
 
 
 class NetworkBot(discord.Client):
@@ -493,36 +573,25 @@ class NetworkBot(discord.Client):
                     choices.append(app_commands.Choice(name=label[:100], value=record["discord_id"]))
             return choices[:25]
 
-        @self.tree.command(name="farm_request", description="Request a farm and starting field for staff review")
+        @self.tree.command(name="farm_request", description="Choose a current-world field and request a farm")
         @app_commands.check(channel_check)
-        async def farm_request(interaction: discord.Interaction, server: str, starting_field: str):
+        async def farm_request(interaction: discord.Interaction, server: str):
             config = server_config(interaction, server, "farm_request")
             await interaction.response.defer(ephemeral=True)
-            record = await asyncio.to_thread(self.farm_lifecycle.request_farm, str(interaction.user.id), server,
-                                            selected_save(config), starting_field)
-            await interaction.followup.send(
-                f"Your request for **{record['farm_name']}** at **{record['starting_field']}** is pending staff review. "
-                "Staff will create the farm and confirm your in-game identity. Repeated submissions keep this request.",
-                ephemeral=True)
+            try:
+                picker = await asyncio.to_thread(self.farm_request_picker_context, config)
+                view = FarmRequestView(self, interaction.user.id, picker["server_key"], picker["save_key"],
+                                       picker["world_id"], picker["map_title"], picker["fields"])
+                await interaction.followup.send(
+                    content=view.content(),
+                    file=discord.File(io.BytesIO(picker["image"]), filename="sin-farm-request-map.png"),
+                    view=view, ephemeral=True)
+            except (MapUnavailable, MapValidationError, ValueError) as error:
+                await interaction.followup.send(f"Farm field selection is unavailable: {error}", ephemeral=True)
 
         @farm_request.autocomplete("server")
         async def farm_request_server_autocomplete(interaction: discord.Interaction, current: str):
             return await server_choices(interaction, current, "farm_request")
-
-        @farm_request.autocomplete("starting_field")
-        async def farm_request_field_autocomplete(interaction: discord.Interaction, current: str):
-            server = getattr(interaction.namespace, "server", None)
-            if not server:
-                return []
-            try:
-                config = await asyncio.to_thread(server_config, interaction, server, "farm_request")
-                save = (config.get("saves") or [])[0]
-                fields = save.get("available_fields") or []
-            except (ValueError, IndexError, TypeError):
-                return []
-            query = (current or "").strip()
-            return [app_commands.Choice(name=str(field), value=str(field))
-                    for field in fields if not query or query in str(field)][:25]
 
         @self.tree.command(name="farm_requests", description="Staff: list pending farm requests")
         @app_commands.check(channel_check)
@@ -532,8 +601,10 @@ class NetworkBot(discord.Client):
             config = server_config(interaction, server)
             await interaction.response.defer(ephemeral=True)
             records = await asyncio.to_thread(self.farm_lifecycle.requests, server, selected_save(config))
-            rows = [f"<@{r['discord_id']}> requested **{r['farm_name']}**; starting field: **{r['starting_field']}**. "
-                    "Use `/farm_approve` and select this member." for r in records]
+            rows = [f"<@{r['discord_id']}> requested **{r['farm_name']}**; "
+                    f"Field **{r.get('starting_field_id') or r['starting_field']}** "
+                    f"(Farmland **{r['starting_field']}**). Use `/farm_approve` and select this member."
+                    for r in records]
             for row in rows or ["No pending requests."]:
                 await interaction.followup.send(row, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
@@ -1186,6 +1257,48 @@ class NetworkBot(discord.Client):
         except (MapValidationError, ValueError):
             logging.warning("Stored runtime map geometry is invalid; using text-only contract card")
             return False
+
+    def farm_request_picker_context(self, config):
+        """Build the map and selector from one current-world eligible set."""
+        saves = config.get("saves") or []
+        if len(saves) != 1:
+            raise ValueError("The selected server must have exactly one configured save")
+        server_key = str(config["server_key"])
+        save_key = str(saves[0]["save_key"])
+        world_id = self.farm_lifecycle.current_world_id(server_key, save_key)
+        if not world_id:
+            raise ValueError("No current FS25 world generation is available")
+        if not self.ensure_registered_map(server_key, save_key, world_id):
+            raise ValueError("No validated current-world map is available")
+        available = self.farm_lifecycle.available_fields(server_key, save_key, world_id=world_id)
+        field_map = self.map_service.eligible_field_map(
+            server_key, save_key, [farmland_id for farmland_id, owner in available.items() if owner == 0], world_id)
+        if not field_map:
+            raise ValueError("No available starting fields are present on the current map")
+        fields = [{"field_id": field_id, "farmland_id": farmland_id}
+                  for field_id, farmland_id in sorted(field_map.items())]
+        image = self.map_service.render_map(
+            server_key, save_key, label_fields=list(field_map), labels=True, world_id=world_id)
+        return {"server_key": server_key, "save_key": save_key, "world_id": world_id,
+                "map_title": self.map_service.model(server_key, save_key, world_id).map_title,
+                "fields": fields, "image": image}
+
+    def submit_farm_request_from_picker(self, discord_id, server_key, save_key, world_id, field_id):
+        """Re-read current geometry, then atomically reserve its farmland."""
+        current_world = self.farm_lifecycle.current_world_id(server_key, save_key)
+        if str(current_world or "") != str(world_id):
+            raise ValueError("the FS25 world generation changed")
+        if not self.ensure_registered_map(server_key, save_key, world_id):
+            raise ValueError("the current-world map is unavailable")
+        available = self.farm_lifecycle.available_fields(server_key, save_key, world_id=world_id)
+        field_map = self.map_service.eligible_field_map(
+            server_key, save_key, [farmland_id for farmland_id, owner in available.items() if owner == 0], world_id)
+        try:
+            farmland_id = field_map[int(field_id)]
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("the selected field is no longer available") from None
+        return self.farm_lifecycle.request_farm(
+            discord_id, server_key, save_key, farmland_id, world_id=world_id, field_id=int(field_id))
 
     async def publish_contract_card(self, record):
         channel_id = self.channels.get("jobs")

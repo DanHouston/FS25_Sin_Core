@@ -326,6 +326,40 @@ class FarmlandAssignmentLifecycleTests(unittest.TestCase):
         self.assertEqual(self.db.farm_requests.find_one({"_id": "request"})["state"], "land_pending")
 
 
+class FarmRequestReservationTests(unittest.TestCase):
+    def setUp(self):
+        self.database = _MemoryDatabase()
+        self.lifecycle = FarmLifecycle(self.database)
+        self.db = self.database.db
+        self.db.community_applications.insert_one({"_id": "member-a", "state": "approved", "farm_name": "Farm A"})
+        self.db.community_applications.insert_one({"_id": "member-b", "state": "approved", "farm_name": "Farm B"})
+        self.lifecycle.record_snapshot("server", "save", {
+            "source": "game", "world_id": "world-a", "farmlands": {"22": 0, "23": 0},
+            "farms": {"1": "SiN Harvest"}, "players": {}})
+
+    def test_two_pending_requests_cannot_reserve_the_same_current_farmland(self):
+        first = self.lifecycle.request_farm("member-a", "server", "save", 22, world_id="world-a", field_id=1)
+        self.assertEqual(first["starting_field"], 22)
+        with self.assertRaisesRegex(ValueError, "reserved"):
+            self.lifecycle.request_farm("member-b", "server", "save", 22, world_id="world-a", field_id=2)
+        reservation = self.db.farm_field_reservations.find_one({"farmland_id": 22})
+        self.assertEqual(reservation["request_id"], first["_id"])
+
+    def test_picker_generation_is_rejected_after_world_replacement(self):
+        self.lifecycle.record_snapshot("server", "save", {
+            "source": "game", "world_id": "world-b", "farmlands": {"22": 0},
+            "farms": {"1": "SiN Harvest"}, "players": {}})
+        with self.assertRaisesRegex(ValueError, "older FS25 world generation"):
+            self.lifecycle.request_farm("member-a", "server", "save", 22, world_id="world-a", field_id=1)
+
+    def test_rejection_releases_the_current_world_reservation(self):
+        request = self.lifecycle.request_farm("member-a", "server", "save", 22, world_id="world-a", field_id=1)
+        self.lifecycle.reject_request(request["_id"], "server", "save", "staff", "changed mind")
+        self.assertIsNone(self.db.farm_field_reservations.find_one({"farmland_id": 22}))
+        second = self.lifecycle.request_farm("member-b", "server", "save", 22, world_id="world-a", field_id=1)
+        self.assertEqual(second["discord_id"], "member-b")
+
+
 class SharedContractorAuthorityTests(unittest.TestCase):
     """Policy tests use real Central membership/job records, never a role stub."""
 

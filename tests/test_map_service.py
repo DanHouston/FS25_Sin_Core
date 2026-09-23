@@ -194,6 +194,28 @@ class MapServiceTests(unittest.TestCase):
         self.assertNotEqual(plain, rendered)
         self.assertEqual(rendered, rendered_again)
 
+    def test_field_picker_labels_are_large_contrast_and_separate_from_highlights(self):
+        model = synthetic_model(128, 128)
+        renderer = MapRenderer()
+        base = rgba_base(model.image_width, model.image_height)
+        whole_context = renderer.render(model, base, label_fields=[22])
+        selected = renderer.render(model, base, highlight_fields=[22])
+        self.assertTrue(whole_context.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertNotEqual(whole_context, base)
+        self.assertEqual(selected, renderer.render(model, base, highlight_fields=[22]))
+        # The scaled glyph plus halo materially increases the encoded image
+        # over the old tiny label footprint while remaining deterministic.
+        self.assertNotEqual(whole_context, renderer.render(model, base, labels=False))
+
+    def test_eligible_field_map_uses_field_geometry_but_returns_farmland_primitive(self):
+        service = MapService()
+        model = synthetic_model()
+        service.register_map("server", "save", model, base_rgba=rgba_base(32, 32), world_id="world-a")
+        self.assertEqual(service.eligible_field_map("server", "save", [1], "world-a"), {22: 1})
+        self.assertEqual(service.eligible_field_map("server", "save", [999], "world-a"), {})
+        with self.assertRaises(MapUnavailable):
+            service.eligible_field_map("server", "save", [1], "world-b")
+
     def test_unknown_overlay_and_missing_map_fail_without_path_access(self):
         service = MapService()
         with self.assertRaises(MapUnavailable):

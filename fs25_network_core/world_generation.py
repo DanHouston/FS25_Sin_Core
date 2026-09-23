@@ -16,7 +16,7 @@ WORLD_BOUND_COLLECTIONS = (
     "bank_bridge_operations", "farm_financial_provisioning",
     "contracts", "player_activity_minutes", "player_activity_aggregates",
     "player_activity_sessions", "activity_outbox", "processed_server_events",
-    "observed_fs25_identities", "chat_messages", "transfers",
+    "observed_fs25_identities", "chat_messages", "transfers", "farm_field_reservations",
 )
 
 
