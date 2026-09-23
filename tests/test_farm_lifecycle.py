@@ -523,3 +523,24 @@ class SharedContractorAuthorityTests(unittest.TestCase):
                          ("farm_manager", "farm_manager", "active"))
         self.assertEqual((shared["desired_role"], shared["applied_role"], shared["state"]),
                          ("revoked", "revoked", "revoked"))
+
+    def test_failed_revocation_receipt_is_reissued_on_restart_reconciliation(self):
+        self.approved_identity("repton", "stable-repton")
+        self.lifecycle.operations_for("server", "save")
+        grant = self.db.permission_jobs.find_one({"role": "contractor"})
+        self.authorization.acknowledge(grant["_id"], "server", "save", grant["revision"], {
+            "operation_id": grant["_id"], "status": "applied", "receipt": "contractor relation verified",
+            "source_farm_id": 2, "target_farm_id": 99, "contracting_for": True,
+            "authoritative_readback": True}, world_id="world-a")
+        self.db.community_applications.update_one({"_id": "repton"}, {"$set": {"state": "denied"}})
+        self.lifecycle.operations_for("server", "save")
+        revoke = self.db.permission_jobs.find_one({"role": "revoked", "state": "pending"})
+        with self.assertRaises(ValueError):
+            self.authorization.acknowledge(revoke["_id"], "server", "save", revoke["revision"], {
+                "operation_id": revoke["_id"], "status": "failed", "receipt": "not verified",
+                "source_farm_id": 2, "target_farm_id": 99, "contracting_for": True,
+                "authoritative_readback": False}, world_id="world-a")
+        self.lifecycle.operations_for("server", "save")
+        replacement = self.db.permission_jobs.find_one({"membership_id": revoke["membership_id"],
+                                                          "role": "revoked", "revision": revoke["revision"] + 1})
+        self.assertEqual(replacement["state"], "pending")

@@ -449,7 +449,35 @@ class FarmLifecycle:
                     pass
                 continue
             if relationship.get("desired_role") == "revoked" \
-                    and relationship.get("state") in {"pending", "active", "reconciliation_required"}:
+                    and relationship.get("state") in {"pending", "active", "revoked"}:
+                continue
+            if relationship.get("desired_role") == "revoked" \
+                    and relationship.get("state") == "reconciliation_required" and desired:
+                try:
+                    operation = self.authorization.assign(
+                        discord_id, server_key, save_key, shared_farm_id,
+                        "contractor", {shared_farm_id: SYSTEM_FARM_NAME,
+                                        desired["source_farm_id"]: desired["source_farm_name"]},
+                        "shared-contractor-policy", world_id=world_id, allow_unapproved_identity=True,
+                        idempotent=True, source_farm_id=desired["source_farm_id"],
+                        source_farm_name=desired["source_farm_name"])
+                    if operation:
+                        operations[discord_id] = operation
+                except ValueError:
+                    pass
+                continue
+            if relationship.get("desired_role") == "revoked" \
+                    and relationship.get("state") == "reconciliation_required" and not desired \
+                    and relationship_source is not None:
+                try:
+                    operation = self.authorization.revoke_contractor(
+                        discord_id, server_key, save_key, shared_farm_id,
+                        "shared-contractor-policy", world_id=world_id, idempotent=True,
+                        source_farm_id=relationship_source)
+                    if operation:
+                        operations[discord_id] = operation
+                except ValueError:
+                    pass
                 continue
             if desired and relationship.get("desired_role") == "revoked" \
                     and relationship.get("state") == "revoked":
