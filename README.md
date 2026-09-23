@@ -10,6 +10,8 @@ requires neither Discord nor MongoDB.
 
 See [Discord channels and authorization](docs/discord-and-authorization.md) for
 the channel layout, account linking, farm role workflow, and custom mod contract.
+See [deterministic FS25 modpack distribution](docs/modpack-distribution.md) for
+the explicit capture, validation, publication, and client synchronization flow.
 The new authorization workflow supersedes the legacy manual `farm_links` helper
 for banking: only mod-confirmed active farm managers can transact with a farm.
 
