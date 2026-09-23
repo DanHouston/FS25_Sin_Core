@@ -240,12 +240,26 @@ class PairingAgent:
         for node in root.findall("./farmlands/farmland"):
             if node.get("id") is not None:
                 farmlands[node.get("id")] = int(node.get("farmId", "0"))
-        return {"source": "game", "session": root.get("session", ""),
+        payload = {"source": "game", "session": root.get("session", ""),
                 "runtime_generation": int(root.get("runtimeGeneration", "0")),
                 "sequence": int(root.get("sequence", "0")),
                 "savegame_index": int(root.get("savegameIndex", "0")),
                 "world_id": root.get("worldId", ""), "map_id": root.get("mapId", ""),
                 "farms": farms, "players": players, "farmlands": farmlands}
+        optional_numbers = (("currentMonth", "current_month", int),
+                            ("currentDay", "current_day", int),
+                            ("dayTimeMinutes", "day_time_minutes", int),
+                            ("timeScale", "time_scale", float))
+        for xml_name, payload_name, converter in optional_numbers:
+            raw = root.get(xml_name)
+            if raw is None or str(raw).strip() == "":
+                continue
+            try:
+                value = converter(raw)
+            except (TypeError, ValueError):
+                raise ValueError("invalid game-clock snapshot field") from None
+            payload[payload_name] = int(value) if converter is int else value
+        return payload
 
     def process_operations_once(self):
         """Materialize central durable operations into the existing Lua mailbox."""

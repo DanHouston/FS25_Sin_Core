@@ -92,6 +92,13 @@ including `/register`, `/farm_request`, `/farm_status`, `/balance`, `/deposit`,
 channels. `#bank`, `#link-account`, `#sin-applications`, `#farm-approvals`, and
 `#bank-reconciliation` are legacy names and are no longer required.
 
+`#server-status` is a JiN-maintained dashboard, not an activity feed. It has
+one persistent status card per enabled/registered FS25 server. JiN edits that
+card in place when the current-runtime projection changes and stores its
+Discord message ID in `server_status_cards`; restarts recover the stored card.
+If Discord reports the stored card deleted, JiN creates one replacement and
+updates the durable ID. Activity and lifecycle events remain separate.
+
 Each playable server record stores `discord_chat_channel_id` explicitly for
 future FS25 chat routing; it is not derived from `server_key` or a channel
 name. Channel renames therefore do not affect routing. Missing required staff
@@ -107,14 +114,20 @@ Discord channel IDs only. Its expected shape is:
     "operations": "<operations-channel-id>",
     "jobs": "<sin-jobs-channel-id>",
     "audit_log": "<audit-log-channel-id>",
-    "sin_apply": "<sin-apply-channel-id>"
+    "sin_apply": "<sin-apply-channel-id>",
+    "server_status": "<server-status-channel-id>"
   }
 }
 ```
 
 Do not add `channels.server_chat` (or any per-server nested mapping). The
 authoritative per-server chat ID is `sin_servers.discord_chat_channel_id` in
-Central.
+Central. `channels.server_status` is the one configured `#server-status`
+destination for all registered servers. `DISCORD_SERVER_STATUS_CHANNEL_ID` may
+override that scalar ID at startup. It is not derived from a channel name or
+from `server_key`. JiN reads the active runtime pointer and the snapshot for
+that exact logical save/world; historical snapshots are never used as the
+current card.
 
 ## Community membership before farms
 

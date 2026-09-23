@@ -343,6 +343,19 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(payload["runtime_generation"], 17)
         self.assertEqual(payload["sequence"], 4)
 
+    def test_snapshot_payload_preserves_optional_authoritative_game_clock(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "snapshot.xml").write_text(
+                '<networkLocal source="game" savegameIndex="3" worldId="hobo-world" '
+                'currentMonth="3" currentDay="12" dayTimeMinutes="615" timeScale="5"/>',
+                encoding="utf-8")
+            payload = PairingAgent(root, "https://central", MagicMock())._snapshot_payload()
+        self.assertEqual(payload["current_month"], 3)
+        self.assertEqual(payload["current_day"], 12)
+        self.assertEqual(payload["day_time_minutes"], 615)
+        self.assertEqual(payload["time_scale"], 5.0)
+
     def test_agent_materializes_central_farm_operation_without_mongo(self):
         class OperationResponse:
             status = 200

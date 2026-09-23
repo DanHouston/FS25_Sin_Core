@@ -2393,6 +2393,23 @@ function FS25SiNServer:exportSnapshot()
     xml:setInt("networkLocal#sequence", self.sequence)
     local info = g_currentMission.missionInfo
     xml:setInt("networkLocal#savegameIndex", (info and info.savegameIndex) or 0)
+    -- These are observations from the authoritative mission environment.  A
+    -- dashboard may display them, but Central never uses them for identity or
+    -- world selection.  Keep the fields optional for GIANTS versions that do
+    -- not expose one of the values.
+    local environment = g_currentMission.environment
+    if environment ~= nil then
+        local currentMonth = environment.currentPeriod or environment.currentMonth
+        local currentDay = environment.currentDay
+        local dayTime = environment.dayTime
+        if type(currentMonth) == "number" then xml:setInt("networkLocal#currentMonth", currentMonth) end
+        if type(currentDay) == "number" then xml:setInt("networkLocal#currentDay", currentDay) end
+        if type(dayTime) == "number" then xml:setInt("networkLocal#dayTimeMinutes", math.floor(dayTime / 60000) % 1440) end
+    end
+    if g_currentMission.getEffectiveTimeScale ~= nil then
+        local scaleOk, timeScale = pcall(g_currentMission.getEffectiveTimeScale, g_currentMission)
+        if scaleOk and type(timeScale) == "number" then xml:setInt("networkLocal#timeScale", timeScale) end
+    end
     if self.worldIdentityReady ~= true or self.worldId == nil then
         xml:delete()
         error("FS25 save-backed world identity unavailable")

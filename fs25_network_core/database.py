@@ -104,6 +104,7 @@ class Database:
             name="map_world_scope", unique=True)
         self.db.processed_server_events.create_index("processed_at", expireAfterSeconds=604800)
         self.db.activity_outbox.create_index([("status", 1), ("created_at", 1)])
+        self.db.server_status_cards.create_index("server_key", unique=True)
         self._replace_legacy_unique_index(
             self.db.activity_outbox,
             [("source_event_id", 1)],

@@ -32,6 +32,32 @@ python -m fs25_network_core.local_test build-mod
 python scripts/run_integration_campaign.py
 ```
 
+### JiN `#server-status` dashboard
+
+Configure the scalar `channels.server_status` ID in `discord.json` (or set
+`DISCORD_SERVER_STATUS_CHANNEL_ID` for the deployment). On Discord gateway
+startup JiN reads enabled registered servers from Central and creates or
+recovers exactly one card per server. The card is edited in place only when
+its rendered current-runtime projection changes; activity messages continue to
+use the activity outbox and never append to `#server-status`.
+
+The durable card reference is in Mongo collection `server_status_cards`:
+`server_key`, `channel_id`, `message_id`, and `content_hash`. The projection
+uses the server heartbeat for liveness and the active save/world pointer plus
+the matching current-world snapshot for map, players, game clock, time scale,
+and last successful update. Historical snapshots cannot populate a current
+card. If the stored message was deleted, the next startup/refresh creates one
+replacement and persists its new ID.
+
+For live validation, restart JiN once with the configured `#server-status`
+ID, confirm one card appears for each registered server, restart JiN and
+confirm no additional messages are posted, then change a current FS25 player
+or heartbeat state and confirm the same message ID is edited. Delete a card
+manually and wait for the next dashboard refresh; exactly one replacement
+should appear. This requires Discord permissions to view/send/edit messages in
+the configured channel and a running Central/Agent/FS25 runtime, but it does
+not mutate game state.
+
 The simulator creates `local-test/simulated-snapshot.xml` exclusively; for another
 run use `--output local-test/another-snapshot.xml`. It never overwrites a snapshot.
 The build creates `dist/FS25_SiN_Server.zip` with modDesc.xml at the ZIP root.

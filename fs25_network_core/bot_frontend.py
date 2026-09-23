@@ -18,6 +18,7 @@ from .channel_policy import require_command_channel
 from .community import CommunityApplications
 from .server_registry import ServerRegistry
 from .activity import ActivityPublisher
+from .server_status import ServerStatusPublisher
 from .activity_telemetry import ActivityTelemetryProcessor
 from .business_workflows import (ChatService, ContractService, InvoiceService,
                                   CommunityEventService, TransferService)
@@ -289,6 +290,10 @@ class NetworkBot(discord.Client):
         self.server_registry = ServerRegistry(bank.database)
         self.farm_lifecycle = FarmLifecycle(bank.database, self.authorization)
         self.activity_publisher = ActivityPublisher(self, bank.database)
+        # This is a durable one-card-per-server projection, not an activity
+        # feed.  Its message IDs are stored in Mongo so gateway reconnects and
+        # process restarts edit the same cards.
+        self.server_status_publisher = ServerStatusPublisher(self, bank.database)
         self.telemetry = ActivityTelemetryProcessor(bank.database)
         self.chat = ChatService(bank.database)
         self.contracts = ContractService(bank.database)
@@ -1423,6 +1428,7 @@ class NetworkBot(discord.Client):
     async def on_ready(self):
         logging.info("Discord bot connected as %s (ID %s)", self.user, self.user.id)
         self.activity_publisher.start()
+        self.server_status_publisher.start()
 
     async def on_resumed(self):
         logging.info("Discord gateway resumed; refreshing command registry")
@@ -1430,6 +1436,7 @@ class NetworkBot(discord.Client):
 
     async def close(self):
         await self.activity_publisher.stop()
+        await self.server_status_publisher.stop()
         await super().close()
 
 
@@ -1455,16 +1462,17 @@ def main():
     # explicit overrides are non-secret and avoid embedding a live guild ID in
     # business logic; discord.json remains the normal source of truth.
     for env_name, channel_name in (("DISCORD_JOBS_CHANNEL_ID", "jobs"),
-                                   ("DISCORD_EVENTS_CHANNEL_ID", "events")):
+                                   ("DISCORD_EVENTS_CHANNEL_ID", "events"),
+                                   ("DISCORD_SERVER_STATUS_CHANNEL_ID", "server_status")):
         configured = os.environ.get(env_name)
         if configured:
             channels[channel_name] = configured
     try:
         sin_member_role_id = int(discord_config.get("roles", {}).get("sin_member", ""))
-        for name in ("sin_apply",):
+        for name in ("sin_apply", "server_status"):
             int(channels[name])
     except (KeyError, TypeError, ValueError) as error:
-        raise SystemExit("Configure numeric channels.sin_apply and roles.sin_member IDs in discord.json") from error
+        raise SystemExit("Configure numeric channels.sin_apply, channels.server_status, and roles.sin_member IDs in discord.json") from error
     # ``servers.json`` is a legacy local-development adapter.  Production JiN
     # discovery comes from sin_servers/sin_saves in the configured database;
     # loading the file by default would reintroduce local-dev into Discord and
