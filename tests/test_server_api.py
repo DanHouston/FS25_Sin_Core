@@ -1,4 +1,5 @@
 import json
+import inspect
 import threading
 import unittest
 from http.client import HTTPConnection
@@ -8,6 +9,9 @@ from fs25_network_core.server_api import make_server
 
 
 class ServerApiTests(unittest.TestCase):
+    def test_standard_central_api_port_is_8787(self):
+        self.assertEqual(inspect.signature(make_server).parameters["port"].default, 8787)
+
     def setUp(self):
         self.registry = MagicMock()
         self.registry.pair_code.return_value = ("local-dev", "one-time-response")

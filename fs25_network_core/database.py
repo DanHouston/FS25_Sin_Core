@@ -71,6 +71,18 @@ class Database:
         self.db.farm_field_reservations.create_index(
             [("server_key", 1), ("save_key", 1), ("world_id", 1), ("farmland_id", 1)], unique=True)
         self.db.farm_operations.create_index([("server_key", 1), ("save_key", 1), ("state", 1), ("created_at", 1)])
+        # World replacement is a Mongo transaction. Ensure every collection
+        # touched by the generation transition exists before a transaction
+        # attempts to update it (MongoDB cannot implicitly create a namespace
+        # from inside a transaction on all supported deployments).
+        self.db.world_generations.create_index(
+            [("server_key", 1), ("save_key", 1), ("state", 1)])
+        self.db.fs25_money_operations.create_index(
+            [("server_key", 1), ("save_key", 1), ("world_id", 1), ("state", 1)])
+        self.db.bank_bridge_operations.create_index(
+            [("server_key", 1), ("save_key", 1), ("world_id", 1), ("state", 1)])
+        self.db.farm_financial_provisioning.create_index(
+            [("server_key", 1), ("save_key", 1), ("world_id", 1), ("state", 1)])
         self.db.sin_farms.create_index([("server_key", 1), ("save_key", 1), ("farm_type", 1), ("canonical_name", 1)])
         self.db.sin_farms.create_index("source_request_id", unique=True,
             partialFilterExpression={"source_request_id": {"$type": "string"}})

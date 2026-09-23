@@ -166,7 +166,7 @@ Central machine (with `MONGODB_URI` and the normal central Python dependencies):
 
 ```powershell
 $env:SIN_API_HOST = "0.0.0.0" # use 127.0.0.1 for same-machine development
-$env:SIN_API_PORT = "8080"
+$env:SIN_API_PORT = "8787"
 python -m fs25_network_core.server_api
 ```
 
@@ -186,7 +186,7 @@ python -m fs25_network_core.agent --pair CODE
 python -m fs25_network_core.agent --watch
 ```
 
-For local development, `SIN_BACKEND_URL` may use `http://127.0.0.1:8080`.
+For local development, `SIN_BACKEND_URL` may use `http://127.0.0.1:8787`.
 HTTPS certificate validation is not disabled by the Agent. The manual flow is:
 
 1. Start the central API and the Agent.
@@ -214,14 +214,14 @@ In a separate central-host window:
 
 ```powershell
 $env:SIN_API_HOST = "0.0.0.0"
-$env:SIN_API_PORT = "8080"
+$env:SIN_API_PORT = "8787"
 python -m fs25_network_core.server_api
 ```
 
 On the persistent `SiN-FS25-01` VM:
 
 ```powershell
-$env:SIN_BACKEND_URL = "http://192.168.1.185:8080"
+$env:SIN_BACKEND_URL = "http://192.168.1.185:8787"
 $env:SIN_MAILBOX_DIR = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\modSettings\FS25_SiN_Server"
 $env:SIN_POLL_INTERVAL = "2"
 python -m fs25_network_core.agent --watch
@@ -323,11 +323,11 @@ Live process commands:
 # central host
 $env:MONGODB_DATABASE = "fs25_network"
 $env:SIN_API_HOST = "0.0.0.0"
-$env:SIN_API_PORT = "8080"
+$env:SIN_API_PORT = "8787"
 python -m fs25_network_core.server_api
 
 # dedicated-server VM
-$env:SIN_BACKEND_URL = "http://192.168.1.185:8080"
+$env:SIN_BACKEND_URL = "http://192.168.1.185:8787"
 $env:SIN_MAILBOX_DIR = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\modSettings\FS25_SiN_Server"
 python -m fs25_network_core.agent --watch
 ```

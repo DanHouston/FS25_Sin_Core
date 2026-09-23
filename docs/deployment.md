@@ -23,6 +23,10 @@ before and after archive creation. A GIANTS runtime load test remains required,
 but a source that cannot be parsed by the FS25 Lua dialect gate cannot enter a
 release artifact.
 
+The standard Central API port is **8787**. Central listens on the configured
+`SIN_API_PORT` (default `8787`), and every Agent `SIN_BACKEND_URL`/updater
+`-ApiUrl` must use the same port unless an explicit reverse proxy is in use.
+
 ## Creating a release
 
 From a clean committed checkout:

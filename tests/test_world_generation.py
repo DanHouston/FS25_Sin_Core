@@ -1,11 +1,15 @@
 """Replacement-save isolation tests for the authoritative generation boundary."""
 import unittest
+from unittest.mock import patch
 
 from fs25_network_core.farm_lifecycle import FarmLifecycle
 from fs25_network_core.integration_campaign import _MemoryDatabase
 
 
 class WorldGenerationTests(unittest.TestCase):
+    SERVER = "sin-fs25-01"
+    SAVE = "sin-fs25-main"
+
     def setUp(self):
         self.database = _MemoryDatabase()
         self.lifecycle = FarmLifecycle(self.database)
@@ -51,6 +55,39 @@ class WorldGenerationTests(unittest.TestCase):
         rows = list(self.db.world_generations.find({"server_key": "server", "save_key": "save"}))
         self.assertEqual({row["world_id"] for row in rows}, {"opaque-marker-one", "opaque-marker-two"})
         self.assertEqual(self.lifecycle.current_world_id("server", "save"), "opaque-marker-two")
+
+    def test_hobo_replacement_snapshot_activates_new_world_and_accepts_new_traffic(self):
+        self.lifecycle.record_snapshot(self.SERVER, self.SAVE, self.snapshot(
+            "courtright-generation", farms={"2": "Repton Does"}, farmlands={"22": 2}))
+        self.db.farm_operations.insert_one({"_id": "courtright-op", "operation_id": "courtright-op",
+            "server_key": self.SERVER, "save_key": self.SAVE,
+            "world_id": "courtright-generation", "state": "pending"})
+
+        hobo = self.snapshot(
+            "sin-world-20260922233019-1790134219-687362",
+            farms={"14": ""}, farmlands={str(index): 0 for index in range(1, 81)})
+        hobo["map_id"] = "FS25_HobosHollow.HobosHollow"
+        hobo["savegame_index"] = 3
+        with patch.object(self.database, "atomic", wraps=self.database.atomic) as transaction:
+            result = self.lifecycle.record_snapshot(self.SERVER, self.SAVE, hobo)
+
+        self.assertEqual(result["world_id"], "sin-world-20260922233019-1790134219-687362")
+        transaction.assert_called_once()
+        self.assertEqual(self.lifecycle.current_world_id(self.SERVER, self.SAVE), result["world_id"])
+        generations = list(self.db.world_generations.find({"server_key": self.SERVER, "save_key": self.SAVE}))
+        self.assertEqual({row["world_id"] for row in generations}, {"courtright-generation", result["world_id"]})
+        self.assertEqual(self.db.world_generations.find_one({"world_id": "courtright-generation"})["state"], "historical")
+        self.assertEqual(self.db.farm_operations.find_one({"_id": "courtright-op"})["state"], "world_superseded")
+        self.assertEqual(self.lifecycle.require_current_world(self.SERVER, self.SAVE, result["world_id"]), result["world_id"])
+        with self.assertRaises(ValueError):
+            self.lifecycle.require_current_world(self.SERVER, self.SAVE, "courtright-generation")
+
+    def test_snapshot_remains_accepted_when_system_farm_follow_up_needs_retry(self):
+        snapshot = self.snapshot("replacement", farms={"14": ""}, farmlands={"1": 0})
+        with patch.object(self.lifecycle, "ensure_system_farm", side_effect=ValueError("malformed legacy mapping")):
+            result = self.lifecycle.record_snapshot("server", "save", snapshot)
+        self.assertEqual(result["world_id"], "replacement")
+        self.assertEqual(self.lifecycle.current_world_id("server", "save"), "replacement")
 
     def test_generation_aware_onboarding_waits_for_real_financial_capability(self):
         self.lifecycle.record_snapshot("server", "save", self.snapshot("generation-a",

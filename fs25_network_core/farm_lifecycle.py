@@ -5,6 +5,7 @@ an FS25 numeric farm ID; IDs are learned from authenticated game receipts.
 """
 from datetime import datetime, timezone
 import hashlib
+import logging
 from pymongo.errors import DuplicateKeyError
 from .database import Database
 from .world_generation import WorldGenerationRegistry
@@ -18,6 +19,9 @@ OPERATION_STATES = {"pending", "dispatched", "succeeded", "failed", "reconciliat
 
 def _operation_id(*parts):
     return hashlib.sha256("|".join(str(part) for part in parts).encode("utf-8")).hexdigest()
+
+
+LOG = logging.getLogger(__name__)
 
 
 class FarmLifecycle:
@@ -59,16 +63,40 @@ class FarmLifecycle:
         if not isinstance(snapshot, dict) or snapshot.get("source") != "game":
             raise ValueError("game snapshot is required")
         world_id = snapshot.get("world_id")
+
+        def persist(session=None):
+            options = {"session": session} if session is not None else {}
+            if world_id:
+                self.worlds.activate(server_key, save_key, world_id, evidence={
+                    "map_id": snapshot.get("map_id"), "savegame_index": snapshot.get("savegame_index")},
+                    session=session)
+            now = self._now()
+            record = dict(snapshot)
+            scope = self._scope(server_key, save_key, world_id)
+            record.update(scope, received_at=now)
+            self.db.server_snapshots.update_one(scope, {"$set": record}, upsert=True, **options)
+            return record
+
+        # A replacement snapshot changes the active-world boundary and archives
+        # every old-world collection. Keep that transition and the authoritative
+        # snapshot in one Mongo transaction so a failed write cannot leave the
+        # old generation retired with no current generation available.
+        active = self.current_world_id(server_key, save_key) if world_id else None
+        if world_id and str(active or "") != str(world_id):
+            record = self.database.atomic(persist)
+        else:
+            record = persist()
         if world_id:
-            self.worlds.activate(server_key, save_key, world_id, evidence={
-                "map_id": snapshot.get("map_id"), "savegame_index": snapshot.get("savegame_index")})
-        now = self._now()
-        record = dict(snapshot)
-        scope = self._scope(server_key, save_key, world_id)
-        record.update(scope, received_at=now)
-        self.db.server_snapshots.update_one(scope, {"$set": record}, upsert=True)
-        if world_id:
-            self.ensure_system_farm(server_key, save_key)
+            # World activation and snapshot durability are the authoritative
+            # boundary. System-farm bootstrap is a retryable follow-up; a
+            # malformed historical mapping or transient bootstrap failure must
+            # not turn an otherwise valid replacement snapshot into a rejected
+            # world (and leave the Agent receiving 404s for the new marker).
+            try:
+                self.ensure_system_farm(server_key, save_key)
+            except Exception:
+                LOG.exception("system-farm bootstrap deferred after accepting snapshot server=%s save=%s world=%s",
+                              server_key, save_key, world_id)
         return record
 
     def _operation(self, operation_id):

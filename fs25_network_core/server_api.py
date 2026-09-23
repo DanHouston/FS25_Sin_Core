@@ -209,7 +209,9 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
             if not isinstance(snapshot, dict) or not snapshot.get("world_id"):
                 raise ValueError("authoritative world generation is required")
             result = self.farm_lifecycle.record_snapshot(record["server_key"], save_key, snapshot)
-        except ValueError:
+        except ValueError as error:
+            LOG.warning("snapshot rejected server=%s save=%s reason=%s",
+                        record["server_key"], save_key, str(error))
             _json_response(self, 400, {"error": "invalid_snapshot"})
             return
         _json_response(self, 200, {"status": "accepted", "save_key": save_key,

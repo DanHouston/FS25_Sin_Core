@@ -290,5 +290,7 @@ class DeploymentPackagingTests(unittest.TestCase):
         self.assertIn("MigrateLegacyMailbox", updater)
         self.assertIn("SHA256SUMS.txt", client)
         self.assertIn("Restart-SiN-Agent.ps1", updater)
+        self.assertIn('http://192.168.1.185:8787', updater)
+        self.assertNotIn('http://192.168.1.185:8080', updater)
         self.assertNotIn("serverBinding.xml", client)
         self.assertNotIn("MONGODB", client)

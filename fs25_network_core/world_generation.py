@@ -68,7 +68,7 @@ class WorldGenerationRegistry:
             raise ValueError("FS25 world generation is not current for this server/save")
         return actual
 
-    def activate(self, server_key, save_key, world_id, *, evidence=None):
+    def activate(self, server_key, save_key, world_id, *, evidence=None, session=None):
         """Record a game snapshot's marker and archive a replaced world.
 
         This deliberately retains historical rows.  Pending game mutations are
@@ -77,43 +77,51 @@ class WorldGenerationRegistry:
         because a replacement save reused a numeric farm or farmland ID.
         """
         world_id = self.validate(world_id)
-        scope, now = self._scope(server_key, save_key), self._now()
-        active = self.db.world_generations.find_one({**scope, "state": "active"})
-        if isinstance(active, dict) and str(active.get("world_id")) == world_id:
-            self.db.world_generations.update_one({"_id": active["_id"]}, {"$set": {
-                "last_seen_at": now, "evidence": dict(evidence or {})}})
-            return {"world_id": world_id, "changed": False}
 
-        if isinstance(active, dict):
-            self.db.world_generations.update_many({**scope, "state": "active"}, {"$set": {
-                "state": "historical", "superseded_at": now,
-                "superseded_by_world_id": world_id}})
-        # Rows created before this protection have no marker.  They are just
-        # as unsafe as an explicitly different marker once a real world is
-        # observed, so archive both forms rather than silently adopting them.
-        # MongoDB's $ne includes documents where the field is absent, which is
-        # precisely the legacy case.  A single predicate also keeps this
-        # fail-closed migration path compatible with the deterministic memory
-        # persistence adapter used by integration tests.
-        old_world = {"world_id": {"$ne": world_id}}
-        for name in WORLD_BOUND_COLLECTIONS:
-            collection = getattr(self.db, name)
-            for collection_scope in self._scopes_for_collection(name, server_key, save_key):
-                query = {**collection_scope, **old_world}
-                collection.update_many(query, {"$set": {
-                    "world_generation_state": "historical", "world_superseded_at": now,
-                    "superseded_by_world_id": world_id}})
-        for name in ("farm_operations", "permission_jobs", "land_operations",
-                     "fs25_money_operations", "bank_bridge_operations", "transfers"):
-            collection = getattr(self.db, name)
-            for collection_scope in self._scopes_for_collection(name, server_key, save_key):
-                collection.update_many({**collection_scope, **old_world,
-                                        "state": {"$in": ["requested", "accepted", "pending", "dispatched", "pending_game"]}},
-                                       {"$set": {"state": "world_superseded", "updated_at": now,
-                                                  "world_generation_state": "historical",
-                                                  "superseded_by_world_id": world_id}})
-        generation_id = f"{scope['server_key']}:{scope['save_key']}:{world_id}"
-        self.db.world_generations.update_one({"_id": generation_id}, {"$setOnInsert": {
-            "_id": generation_id, **scope, "world_id": world_id, "created_at": now}, "$set": {
-                "state": "active", "last_seen_at": now, "evidence": dict(evidence or {})}}, upsert=True)
-        return {"world_id": world_id, "changed": isinstance(active, dict)}
+        def apply(active_session=None):
+            options = {"session": active_session} if active_session is not None else {}
+            scope, now = self._scope(server_key, save_key), self._now()
+            active = self.db.world_generations.find_one({**scope, "state": "active"}, **options)
+            if isinstance(active, dict) and str(active.get("world_id")) == world_id:
+                self.db.world_generations.update_one({"_id": active["_id"]}, {"$set": {
+                    "last_seen_at": now, "evidence": dict(evidence or {})}}, **options)
+                return {"world_id": world_id, "changed": False}
+
+            if isinstance(active, dict):
+                self.db.world_generations.update_many({**scope, "state": "active"}, {"$set": {
+                    "state": "historical", "superseded_at": now,
+                    "superseded_by_world_id": world_id}}, **options)
+            # Rows created before this protection have no marker.  They are just
+            # as unsafe as an explicitly different marker once a real world is
+            # observed, so archive both forms rather than silently adopting them.
+            # MongoDB's $ne includes documents where the field is absent, which is
+            # precisely the legacy case.  A single predicate also keeps this
+            # fail-closed migration path compatible with the deterministic memory
+            # persistence adapter used by integration tests.
+            old_world = {"world_id": {"$ne": world_id}}
+            for name in WORLD_BOUND_COLLECTIONS:
+                collection = getattr(self.db, name)
+                for collection_scope in self._scopes_for_collection(name, server_key, save_key):
+                    query = {**collection_scope, **old_world}
+                    collection.update_many(query, {"$set": {
+                        "world_generation_state": "historical", "world_superseded_at": now,
+                        "superseded_by_world_id": world_id}}, **options)
+            for name in ("farm_operations", "permission_jobs", "land_operations",
+                         "fs25_money_operations", "bank_bridge_operations", "transfers"):
+                collection = getattr(self.db, name)
+                for collection_scope in self._scopes_for_collection(name, server_key, save_key):
+                    collection.update_many({**collection_scope, **old_world,
+                                            "state": {"$in": ["requested", "accepted", "pending", "dispatched", "pending_game"]}},
+                                           {"$set": {"state": "world_superseded", "updated_at": now,
+                                                      "world_generation_state": "historical",
+                                                      "superseded_by_world_id": world_id}}, **options)
+            generation_id = f"{scope['server_key']}:{scope['save_key']}:{world_id}"
+            self.db.world_generations.update_one({"_id": generation_id}, {"$setOnInsert": {
+                "_id": generation_id, **scope, "world_id": world_id, "created_at": now}, "$set": {
+                    "state": "active", "last_seen_at": now, "evidence": dict(evidence or {})}},
+                upsert=True, **options)
+            return {"world_id": world_id, "changed": isinstance(active, dict)}
+
+        if session is not None:
+            return apply(session)
+        return self.database.atomic(apply)

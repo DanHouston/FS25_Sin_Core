@@ -7,7 +7,7 @@ param(
     [string]$BackupRoot = "C:\SiN\Backups",
     [string]$DownloadRoot = "C:\SiN\Downloads",
     [string]$MailboxDir = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\modSettings\FS25_SiN_Server",
-    [string]$ApiUrl = "http://192.168.1.185:8080",
+    [string]$ApiUrl = "http://192.168.1.185:8787",
     [double]$PollInterval = 2,
     [string]$ModsPath = $env:SIN_FS25_MODS_DIR,
     [int]$KeepBackups = 5,
