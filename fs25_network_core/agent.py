@@ -590,11 +590,14 @@ class PairingAgent:
             }
         farmlands = {}
         farmland_ids = []
+        farmland_prices = {}
         for farmland in root.findall("./farmlands/farmland"):
             farmland_id = farmland.get("farmland_id")
             if farmland_id is None:
                 raise ValueError("map farmland ID is required")
             farmland_ids.append(farmland_id)
+            if farmland.get("price") is not None and str(farmland.get("price")).strip() != "":
+                farmland_prices[str(farmland_id)] = farmland.get("price")
             points = [[point.get("x"), point.get("z")]
                       for point in farmland.findall("./points/point")]
             # FS25 exposes farmland ownership through its density map, not a
@@ -614,6 +617,7 @@ class PairingAgent:
         payload["schema_version"] = root.get("schema_version", "1")
         payload["image_y_inverted"] = str(payload.get("image_y_inverted", "false")).lower() == "true"
         payload["farmland_ids"] = farmland_ids
+        payload["farmland_prices"] = farmland_prices
         payload["fields"] = fields
         payload["farmlands"] = farmlands
         return {"map": payload, "source_generation": root.get("source_generation")}

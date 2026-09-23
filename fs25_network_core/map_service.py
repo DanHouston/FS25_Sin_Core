@@ -270,6 +270,11 @@ class MapModel:
     image_y_inverted: bool = False
     coordinate_system: str = MAP_COORDINATE_SYSTEM
     farmland_ids: tuple = ()
+    # Runtime farmland purchase prices are observation-only metadata.  A
+    # missing price is deliberately different from a zero price: callers that
+    # enforce a price policy must fail closed when the exporter did not expose
+    # an authoritative value.
+    farmland_prices: Mapping[int, float] = None
 
     def __post_init__(self):
         map_id = _identity(self.map_id, "map_id")
@@ -302,6 +307,13 @@ class MapModel:
             farmland_ids = {int(value) for value in (self.farmland_ids or ())}
         except (TypeError, ValueError):
             raise MapValidationError("farmland_ids must be positive integers") from None
+        try:
+            farmland_prices = {int(key): _finite_number(value, "farmland price")
+                               for key, value in dict(self.farmland_prices or {}).items()}
+        except (AttributeError, TypeError, ValueError):
+            raise MapValidationError("farmland prices are invalid") from None
+        if any(key <= 0 or value < 0 for key, value in farmland_prices.items()):
+            raise MapValidationError("farmland prices must be non-negative")
         if any(key <= 0 or not isinstance(value, FieldGeometry) or key != value.field_id for key, value in fields.items()):
             raise MapValidationError("fields must be keyed by their positive field_id")
         if any(key <= 0 or not isinstance(value, FarmlandGeometry) or key != value.farmland_id
@@ -310,6 +322,7 @@ class MapModel:
         farmland_ids.update(farmlands)
         farmland_ids.update(value.farmland_id for value in fields.values()
                              if value.farmland_id is not None)
+        farmland_ids.update(farmland_prices)
         if any(value <= 0 for value in farmland_ids):
             raise MapValidationError("farmland_ids must be positive integers")
         if len(fields) > MAX_OVERLAYS * 10 or len(farmlands) > MAX_OVERLAYS * 10:
@@ -326,9 +339,10 @@ class MapModel:
         object.__setattr__(self, "farmlands", farmlands)
         object.__setattr__(self, "coordinate_system", coordinate_system)
         object.__setattr__(self, "farmland_ids", tuple(sorted(farmland_ids)))
+        object.__setattr__(self, "farmland_prices", farmland_prices)
 
     def to_dict(self):
-        return {"schema_version": MAP_SCHEMA_VERSION, "map_id": self.map_id,
+        payload = {"schema_version": MAP_SCHEMA_VERSION, "map_id": self.map_id,
                 "map_title": self.map_title, "world_width": self.world_width,
                 "world_depth": self.world_depth, "image_width": self.image_width,
                 "image_height": self.image_height,
@@ -338,6 +352,12 @@ class MapModel:
                 "farmland_ids": list(self.farmland_ids),
                 "fields": {str(key): value.to_dict() for key, value in self.fields.items()},
                 "farmlands": {str(key): value.to_dict() for key, value in self.farmlands.items()}}
+        # Do not rewrite legacy map revisions merely because the optional
+        # runtime price observation was not present in their payload.
+        if self.farmland_prices:
+            payload["farmland_prices"] = {
+                str(key): value for key, value in self.farmland_prices.items()}
+        return payload
 
     @property
     def world_bounds(self):
@@ -365,6 +385,8 @@ class MapModel:
                       for key, item in (value.get("fields") or {}).items()}
             farmlands = {int(key): FarmlandGeometry.from_dict(item)
                          for key, item in (value.get("farmlands") or {}).items()}
+            farmland_prices = {int(key): item
+                               for key, item in (value.get("farmland_prices") or {}).items()}
         except (AttributeError, TypeError, ValueError):
             raise MapValidationError("map geometry collections are invalid") from None
         return cls(value.get("map_id"), value.get("map_title"), value.get("world_width"),
@@ -372,7 +394,7 @@ class MapModel:
                    value.get("overview_asset_identity"), fields, farmlands,
                    value.get("version", MAP_SCHEMA_VERSION), value.get("image_y_inverted", False),
                    value.get("coordinate_system") or MAP_COORDINATE_SYSTEM,
-                   value.get("farmland_ids", ()))
+                   value.get("farmland_ids", ()), farmland_prices)
 
 
 @dataclass(frozen=True)
@@ -761,14 +783,15 @@ class MapStore:
             raise MapValidationError("source_generation must be positive")
         return generation
 
-    def record(self, server_key, save_key, world_id=None):
+    def record(self, server_key, save_key, world_id=None, session=None):
+        options = {"session": session} if session is not None else {}
         document = self.collection.find_one({
             "_id": self.key(server_key, save_key, world_id),
-            "server_key": str(server_key), "save_key": str(save_key)})
+            "server_key": str(server_key), "save_key": str(save_key)}, **options)
         return document if isinstance(document, Mapping) else None
 
-    def load_model(self, server_key, save_key, world_id=None):
-        document = self.record(server_key, save_key, world_id)
+    def load_model(self, server_key, save_key, world_id=None, session=None):
+        document = self.record(server_key, save_key, world_id, session=session)
         if document is None:
             return None
         payload = document.get("map_payload")
@@ -986,7 +1009,8 @@ class MapService:
         return self.render_map(server_key, save_key, highlight_fields=field_ids, labels=True,
                                world_id=world_id)
 
-    def eligible_field_map(self, server_key, save_key, available_farmland_ids, world_id=None):
+    def eligible_field_map(self, server_key, save_key, available_farmland_ids, world_id=None,
+                           max_farmland_price=None):
         """Return current map field -> farmland choices for available land.
 
         Field geometry is only the presentation/selection context.  The
@@ -1000,5 +1024,13 @@ class MapService:
             raise MapValidationError("available farmland IDs must be positive integers") from None
         if any(value <= 0 for value in available):
             raise MapValidationError("available farmland IDs must be positive integers")
+        price_limit = None
+        if max_farmland_price is not None:
+            price_limit = _finite_number(max_farmland_price, "maximum farmland price")
+            if price_limit <= 0:
+                raise MapValidationError("maximum farmland price must be positive")
         return {field_id: geometry.farmland_id for field_id, geometry in sorted(model.fields.items())
-                if geometry.farmland_id in available}
+                if geometry.farmland_id in available
+                and (price_limit is None
+                     or (geometry.farmland_id in model.farmland_prices
+                         and model.farmland_prices[geometry.farmland_id] < price_limit))}

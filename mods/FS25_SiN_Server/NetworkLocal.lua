@@ -1503,6 +1503,16 @@ function FS25SiNServer:processMapGeometryExport()
     xml:setInt("serverEvent#source_generation", self.runtimeGeneration or 1)
     local farmlandIds = {}
     local seenFarmlandIds = {}
+    local function readFarmlandPrice(farmlandId)
+        if g_farmlandManager == nil or type(g_farmlandManager.getFarmlandById) ~= "function" then
+            return nil
+        end
+        local priceOk, farmland = pcall(g_farmlandManager.getFarmlandById, g_farmlandManager, farmlandId)
+        if not priceOk or farmland == nil then return nil end
+        local price = tonumber(farmland.price)
+        if price == nil or price < 0 then return nil end
+        return price
+    end
     local function rememberFarmlandId(value)
         local farmlandId = tonumber(value)
         if farmlandId ~= nil and farmlandId > 0 and not seenFarmlandIds[farmlandId] then
@@ -1521,6 +1531,8 @@ function FS25SiNServer:processMapGeometryExport()
     for farmlandIndex, farmlandId in ipairs(farmlandIds) do
         local farmlandKey = string.format("serverEvent.farmlands.farmland(%d)", farmlandIndex - 1)
         xml:setInt(farmlandKey .. "#farmland_id", farmlandId)
+        local price = readFarmlandPrice(farmlandId)
+        if price ~= nil then xml:setString(farmlandKey .. "#price", tostring(price)) end
     end
     for index, record in ipairs(records) do
         local fieldKey = string.format("serverEvent.fields.field(%d)", index - 1)

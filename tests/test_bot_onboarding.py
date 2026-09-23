@@ -96,6 +96,23 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
             "member", "server", "save", "world-a", 22)
         self.assertIn("pending staff review", interaction.response.edit_message.await_args.kwargs["content"])
 
+    async def test_farm_request_view_pages_more_than_discord_option_limit(self):
+        fields = [{"field_id": field_id, "farmland_id": field_id}
+                  for field_id in range(1, 27)]
+        view = FarmRequestView(self.bot, "member", "server", "save", "world-a", "Hobo's Hollow", fields)
+        self.assertEqual(view.page_count, 2)
+        self.assertEqual(len(view.field_select.options), 25)
+        self.assertTrue(view.next_button is not None and not view.next_button.disabled)
+
+        interaction = MagicMock()
+        interaction.user.id = "member"
+        interaction.response.edit_message = AsyncMock()
+        await view._next_page(interaction)
+        self.assertEqual([option.value for option in view.field_select.options], ["26"])
+        self.assertTrue(view.previous_button is not None and not view.previous_button.disabled)
+        self.assertTrue(view.next_button is not None and view.next_button.disabled)
+        self.assertIn("page 2 of 2", interaction.response.edit_message.await_args.kwargs["content"])
+
     async def test_commands_replace_self_linking_and_all_have_channel_checks(self):
         commands = self.bot.tree.get_commands()
         from fs25_network_core.channel_policy import UNRESTRICTED_MEMBER_COMMANDS

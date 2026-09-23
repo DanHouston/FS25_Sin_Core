@@ -9,11 +9,13 @@ import logging
 from pymongo.errors import DuplicateKeyError
 from .database import Database
 from .world_generation import WorldGenerationRegistry
+from .map_service import MapStore, MapValidationError
 
 
 SYSTEM_FARM_NAME = "SiN Harvest"
 SYSTEM_FARM_TYPE = "system"
 MEMBER_FARM_TYPE = "member"
+FIRST_FIELD_MAX_PRICE = 750_000
 OPERATION_STATES = {"pending", "dispatched", "succeeded", "failed", "reconciliation_required"}
 
 
@@ -566,6 +568,17 @@ class FarmLifecycle:
                 raise ValueError("That starting field is not present on the current save")
             if owner != 0:
                 raise ValueError("That starting field is no longer available")
+            if selected_world:
+                try:
+                    map_model = MapStore(self.database).load_model(
+                        server_key, save_key, selected_world, session=session)
+                except MapValidationError:
+                    raise ValueError("Current-world farmland pricing is unavailable") from None
+                price = map_model.farmland_prices.get(farmland_id) if map_model else None
+                if price is None:
+                    raise ValueError("Current-world farmland pricing is unavailable")
+                if price >= FIRST_FIELD_MAX_PRICE:
+                    raise ValueError("The first field must cost less than $750,000")
             generation_key = selected_world or "legacy"
             request_id = hashlib.sha256(
                 f"{server_key}|{save_key}|{generation_key}|{discord_id}".encode()).hexdigest()

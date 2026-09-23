@@ -653,7 +653,7 @@ class AgentTests(unittest.TestCase):
                 'map_id="map" map_title="Map" world_width="100" world_depth="100" image_width="32" '
                 'image_height="32" overview_asset_identity="runtime-generated:map" version="1" '
                 'image_y_inverted="true" coordinate_system="giants-centered-xz"><fields/>'
-                '<farmlands><farmland farmland_id="22"><points><point x="-10" z="-10"/>'
+                '<farmlands><farmland farmland_id="22" price="749999"><points><point x="-10" z="-10"/>'
                 '<point x="10" z="-10"/><point x="10" z="10"/></points></farmland>'
                 '<farmland farmland_id="47"/></farmlands></serverEvent>',
                 encoding="utf-8")
@@ -661,6 +661,7 @@ class AgentTests(unittest.TestCase):
             payload = parsed["payload"]
             self.assertEqual(payload["source_generation"], "4")
             self.assertEqual(payload["map"]["farmland_ids"], ["22", "47"])
+            self.assertEqual(payload["map"]["farmland_prices"], {"22": "749999"})
             self.assertEqual(payload["map"]["farmlands"]["22"]["rings"][0][0], ["-10", "-10"])
             self.assertNotIn("47", payload["map"]["farmlands"])
 

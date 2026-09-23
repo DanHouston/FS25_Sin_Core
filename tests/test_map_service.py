@@ -26,7 +26,8 @@ def synthetic_model(width=32, height=32):
     )
     farmland = FarmlandGeometry(1, (((-45, -40), (10, -40), (10, 10), (-45, 10)),), area_ha=40)
     return MapModel("synthetic-map", "Synthetic Map", 100, 100, width, height,
-                    "fixture:synthetic-overview-v1", {22: field}, {1: farmland})
+                    "fixture:synthetic-overview-v1", {22: field}, {1: farmland},
+                    farmland_prices={1: 100_000})
 
 
 def rgba_base(width, height, color=(30, 40, 50, 255)):
@@ -129,6 +130,15 @@ class MapServiceTests(unittest.TestCase):
         payload["coordinate_system"] = None
         self.assertEqual(MapModel.from_dict(payload).coordinate_system, "giants-centered-xz")
 
+    def test_legacy_map_without_price_observations_keeps_its_revision(self):
+        payload = synthetic_model().to_dict()
+        payload.pop("farmland_prices")
+        legacy_model = MapModel.from_dict(payload)
+        database = _MapDatabase()
+        store = MapStore(database)
+        store.persist("server", "save", legacy_model)
+        self.assertEqual(store.load_model("server", "save").revision, legacy_model.revision)
+
     def test_malformed_geometry_and_unsafe_identity_are_rejected(self):
         with self.assertRaises(MapValidationError):
             FieldGeometry(22, 1, (((0, 0), (1, 1)),))
@@ -215,6 +225,21 @@ class MapServiceTests(unittest.TestCase):
         self.assertEqual(service.eligible_field_map("server", "save", [999], "world-a"), {})
         with self.assertRaises(MapUnavailable):
             service.eligible_field_map("server", "save", [1], "world-b")
+
+    def test_eligible_field_map_excludes_unknown_and_boundary_prices(self):
+        model = synthetic_model()
+        second = FieldGeometry(23, 2, (((5, -35), (35, -35), (35, -5), (5, -5)),))
+        third = FieldGeometry(24, 3, (((5, 5), (35, 5), (35, 35), (5, 35)),))
+        payload = model.to_dict()
+        payload["fields"]["23"] = second.to_dict()
+        payload["fields"]["24"] = third.to_dict()
+        payload["farmland_ids"] = [1, 2, 3]
+        payload["farmland_prices"] = {"1": 749_999, "2": 750_000}
+        scoped = MapModel.from_dict(payload)
+        service = MapService()
+        service.register_map("server", "save", scoped, base_rgba=rgba_base(32, 32), world_id="world-a")
+        self.assertEqual(service.eligible_field_map(
+            "server", "save", [1, 2, 3], "world-a", max_farmland_price=750_000), {22: 1})
 
     def test_unknown_overlay_and_missing_map_fail_without_path_access(self):
         service = MapService()

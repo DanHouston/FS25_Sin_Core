@@ -22,7 +22,7 @@ from .server_status import ServerStatusPublisher
 from .activity_telemetry import ActivityTelemetryProcessor
 from .business_workflows import (ChatService, ContractService, InvoiceService,
                                   CommunityEventService, TransferService)
-from .farm_lifecycle import FarmLifecycle, SYSTEM_FARM_NAME
+from .farm_lifecycle import FarmLifecycle, SYSTEM_FARM_NAME, FIRST_FIELD_MAX_PRICE
 from .map_service import MapService, MapStore, MapUnavailable, MapValidationError
 
 
@@ -205,12 +205,10 @@ class FarmRequestView(discord.ui.View):
         self.fields = {int(item["field_id"]): int(item["farmland_id"]) for item in fields}
         if not self.fields:
             raise ValueError("No currently available starting fields are selectable")
-        if len(self.fields) > 25:
-            raise ValueError("More than 25 fields are available; staff must provide a paged selector")
-        options = [discord.SelectOption(
-            label=f"Field {field_id}", value=str(field_id),
-            description=f"Available farmland {farmland_id}")
-            for field_id, farmland_id in sorted(self.fields.items())]
+        self.page_size = 25
+        self.page = 0
+        self.page_count = (len(self.fields) + self.page_size - 1) // self.page_size
+        options = self._page_options()
         self.field_select = discord.ui.Select(
             placeholder="Choose an available starting field", min_values=1, max_values=1,
             options=options, custom_id="sin:farm-request:field")
@@ -222,6 +220,34 @@ class FarmRequestView(discord.ui.View):
         self.submit_button.callback = self._submit_request
         self.add_item(self.submit_button)
         self.selected_field_id = None
+        self.previous_button = None
+        self.next_button = None
+        if self.page_count > 1:
+            self.previous_button = discord.ui.Button(
+                label="Previous fields", style=discord.ButtonStyle.secondary,
+                custom_id="sin:farm-request:previous", disabled=True)
+            self.previous_button.callback = self._previous_page
+            self.add_item(self.previous_button)
+            self.next_button = discord.ui.Button(
+                label="Next fields", style=discord.ButtonStyle.secondary,
+                custom_id="sin:farm-request:next", disabled=False)
+            self.next_button.callback = self._next_page
+            self.add_item(self.next_button)
+
+    def _page_options(self):
+        choices = sorted(self.fields.items())
+        start = self.page * self.page_size
+        return [discord.SelectOption(
+            label=f"Field {field_id}", value=str(field_id),
+            description=f"Available farmland {farmland_id}")
+            for field_id, farmland_id in choices[start:start + self.page_size]]
+
+    def _refresh_page(self):
+        self.field_select.options = self._page_options()
+        if self.previous_button is not None:
+            self.previous_button.disabled = self.page == 0
+        if self.next_button is not None:
+            self.next_button.disabled = self.page >= self.page_count - 1
 
     async def interaction_check(self, interaction: discord.Interaction):
         if str(interaction.user.id) != self.user_id:
@@ -234,6 +260,13 @@ class FarmRequestView(discord.ui.View):
                 "Select one available starting field. The associated farmland is reserved only when you submit.", ""]
         rows.extend(f"Field {field_id} → Farmland {farmland_id}"
                     for field_id, farmland_id in sorted(self.fields.items()))
+        if self.page_count > 1:
+            rows.insert(2, f"Showing fields page {self.page + 1} of {self.page_count}.")
+            choices = sorted(self.fields.items())
+            start = self.page * self.page_size
+            rows = rows[:4] + [
+                f"Field {field_id} -> Farmland {farmland_id}"
+                for field_id, farmland_id in choices[start:start + self.page_size]]
         if self.selected_field_id is not None:
             rows.extend(("", f"Selected: **Field {self.selected_field_id}** "
                          f"(Farmland {self.fields[self.selected_field_id]})"))
@@ -246,6 +279,22 @@ class FarmRequestView(discord.ui.View):
             await interaction.response.send_message("Choose a valid field from the current map.", ephemeral=True)
             return
         self.submit_button.disabled = False
+        await interaction.response.edit_message(content=self.content(), view=self)
+
+    async def _previous_page(self, interaction: discord.Interaction):
+        if self.page <= 0:
+            await interaction.response.send_message("You are already on the first field page.", ephemeral=True)
+            return
+        self.page -= 1
+        self._refresh_page()
+        await interaction.response.edit_message(content=self.content(), view=self)
+
+    async def _next_page(self, interaction: discord.Interaction):
+        if self.page >= self.page_count - 1:
+            await interaction.response.send_message("You are already on the last field page.", ephemeral=True)
+            return
+        self.page += 1
+        self._refresh_page()
         await interaction.response.edit_message(content=self.content(), view=self)
 
     async def _submit_request(self, interaction: discord.Interaction):
@@ -1291,9 +1340,10 @@ class NetworkBot(discord.Client):
             raise ValueError("No validated current-world map is available")
         available = self.farm_lifecycle.available_fields(server_key, save_key, world_id=world_id)
         field_map = self.map_service.eligible_field_map(
-            server_key, save_key, [farmland_id for farmland_id, owner in available.items() if owner == 0], world_id)
+            server_key, save_key, [farmland_id for farmland_id, owner in available.items() if owner == 0],
+            world_id, max_farmland_price=FIRST_FIELD_MAX_PRICE)
         if not field_map:
-            raise ValueError("No available starting fields are present on the current map")
+            raise ValueError("No available starting fields under $750,000 are present on the current map")
         fields = [{"field_id": field_id, "farmland_id": farmland_id}
                   for field_id, farmland_id in sorted(field_map.items())]
         image = self.map_service.render_map(
@@ -1311,7 +1361,8 @@ class NetworkBot(discord.Client):
             raise ValueError("the current-world map is unavailable")
         available = self.farm_lifecycle.available_fields(server_key, save_key, world_id=world_id)
         field_map = self.map_service.eligible_field_map(
-            server_key, save_key, [farmland_id for farmland_id, owner in available.items() if owner == 0], world_id)
+            server_key, save_key, [farmland_id for farmland_id, owner in available.items() if owner == 0],
+            world_id, max_farmland_price=FIRST_FIELD_MAX_PRICE)
         try:
             farmland_id = field_map[int(field_id)]
         except (KeyError, TypeError, ValueError):

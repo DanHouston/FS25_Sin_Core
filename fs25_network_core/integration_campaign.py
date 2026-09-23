@@ -433,11 +433,11 @@ class MailboxBoundaryAdapter:
         if invalid:
             field_47_points = '<point x="250" z="-650"/><point x="620" z="-650"/>'
         path = directory / f"{event_id}.xml"
-        farmland_22 = '<farmland farmland_id="22" area_ha="40"><points>' \
+        farmland_22 = '<farmland farmland_id="22" area_ha="40" price="120000"><points>' \
                       '<point x="-800" z="-750"/><point x="-300" z="-750"/>' \
                       '<point x="-300" z="-200"/><point x="-800" z="-200"/>' \
                       '</points></farmland>'
-        farmland_47 = '<farmland farmland_id="47" area_ha="55"><points>' \
+        farmland_47 = '<farmland farmland_id="47" area_ha="55" price="800000"><points>' \
                       '<point x="100" z="-750"/><point x="850" z="-750"/>' \
                       '<point x="850" z="-100"/><point x="100" z="-100"/>' \
                       '</points></farmland>'

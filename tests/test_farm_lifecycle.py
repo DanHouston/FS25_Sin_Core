@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 from fs25_network_core.authorization import AuthorizationManager
 from fs25_network_core.farm_lifecycle import FarmLifecycle, SYSTEM_FARM_NAME
 from fs25_network_core.integration_campaign import _MemoryDatabase
+from fs25_network_core.map_service import FieldGeometry, MapModel, MapStore
 
 
 class FarmLifecycleTests(unittest.TestCase):
@@ -336,6 +337,11 @@ class FarmRequestReservationTests(unittest.TestCase):
         self.lifecycle.record_snapshot("server", "save", {
             "source": "game", "world_id": "world-a", "farmlands": {"22": 0, "23": 0},
             "farms": {"1": "SiN Harvest"}, "players": {}})
+        model = MapModel(
+            "synthetic-map", "Synthetic Map", 100, 100, 32, 32, "fixture:map",
+            {1: FieldGeometry(1, 22, (((-40, -40), (0, -40), (0, 0)),))}, {},
+            farmland_prices={22: 100_000})
+        MapStore(self.database).persist("server", "save", model, world_id="world-a")
 
     def test_two_pending_requests_cannot_reserve_the_same_current_farmland(self):
         first = self.lifecycle.request_farm("member-a", "server", "save", 22, world_id="world-a", field_id=1)
@@ -358,6 +364,25 @@ class FarmRequestReservationTests(unittest.TestCase):
         self.assertIsNone(self.db.farm_field_reservations.find_one({"farmland_id": 22}))
         second = self.lifecycle.request_farm("member-b", "server", "save", 22, world_id="world-a", field_id=1)
         self.assertEqual(second["discord_id"], "member-b")
+
+    def test_first_field_price_must_be_strictly_below_limit(self):
+        model = MapModel(
+            "synthetic-map", "Synthetic Map", 100, 100, 32, 32, "fixture:map",
+            {1: FieldGeometry(1, 22, (((-40, -40), (0, -40), (0, 0)),))}, {},
+            farmland_prices={22: 750_000})
+        MapStore(self.database).persist("server", "save", model, world_id="world-a")
+        with self.assertRaisesRegex(ValueError, r"less than \$750,000"):
+            self.lifecycle.request_farm("member-a", "server", "save", 22,
+                                        world_id="world-a", field_id=1)
+
+    def test_first_field_price_is_required_for_authoritative_request(self):
+        model = MapModel(
+            "synthetic-map", "Synthetic Map", 100, 100, 32, 32, "fixture:map",
+            {1: FieldGeometry(1, 22, (((-40, -40), (0, -40), (0, 0)),))}, {})
+        MapStore(self.database).persist("server", "save", model, world_id="world-a")
+        with self.assertRaisesRegex(ValueError, "pricing is unavailable"):
+            self.lifecycle.request_farm("member-a", "server", "save", 22,
+                                        world_id="world-a", field_id=1)
 
 
 class SharedContractorAuthorityTests(unittest.TestCase):
