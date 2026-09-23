@@ -266,8 +266,11 @@ class PairingAgent:
             destination = self.commands / (operation_id + ".xml")
             # A durable receipt is authoritative evidence that this operation
             # was already consumed by the game. Do not recreate or redispatch
-            # its command during the fetch-before-ack window.
-            if (self.directory / "permission-receipts" / (operation_id + ".xml")).exists():
+            # its command during the fetch-before-ack window. A quarantined
+            # permanent rejection is also a terminal audit marker: redispatch
+            # could repeat a game-side mutation whose receipt was not trusted.
+            receipt_path = self.directory / "permission-receipts" / (operation_id + ".xml")
+            if receipt_path.exists() or any(receipt_path.parent.glob(receipt_path.name + ".failed*")):
                 continue
             if not destination.exists():
                 values = {"operation_id": operation_id, "operation_type": operation.get("operation_type", ""),

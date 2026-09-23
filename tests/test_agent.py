@@ -387,6 +387,27 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(agent.process_operations_once(), [])
             self.assertFalse((root / "permission-commands/already-acked.xml").exists())
 
+    def test_quarantined_receipt_suppresses_operation_redispatch(self):
+        class OperationResponse:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self):
+                return json.dumps({"operations": [{"operation_id": "already-rejected",
+                    "operation_type": "assign_farmland", "save_key": "main",
+                    "payload": {"farmland_id": 22, "farm_id": 2}}]}).encode()
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "serverBinding.xml").write_text('<serverBinding serverKey="server" credential="secret"/>', encoding="utf-8")
+            (root / "snapshot.xml").write_text('<networkLocal source="game" savegameIndex="3" worldId="hobo-world"/>', encoding="utf-8")
+            receipt_dir = root / "permission-receipts"
+            receipt_dir.mkdir()
+            (receipt_dir / "already-rejected.xml.failed").write_text(
+                '<networkLocalReceipt operation_id="already-rejected" status="applied"/>', encoding="utf-8")
+            agent = PairingAgent(root, "https://central", MagicMock(return_value=OperationResponse()))
+            self.assertEqual(agent.process_operations_once(), [])
+            self.assertFalse((root / "permission-commands/already-rejected.xml").exists())
+
     def test_permission_manifest_replace_retries_transient_windows_access_denied(self):
         class OperationResponse:
             status = 200
