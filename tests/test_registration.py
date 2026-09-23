@@ -8,7 +8,10 @@ from xml.etree import ElementTree
 
 from fs25_network_core.agent import PairingAgent
 from fs25_network_core.authorization import AuthorizationManager
+from fs25_network_core.event_processing import CentralEventProcessor
+from fs25_network_core.integration_campaign import _MemoryDatabase, _MemoryCollection
 from fs25_network_core.lua_validation import validate_fs25_lua_source
+from pymongo.errors import DuplicateKeyError
 
 
 class RegistrationTests(unittest.TestCase):
@@ -495,3 +498,172 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn('self:emitServerEvent("player_activity_minute"', source)
         self.assertIn('eventType ~= "player_activity_minute"', source)
         self.assertIn('self.eventDirectory .. eventId .. ".xml"', source)
+
+
+class CrossSaveAutoEnrollmentTests(unittest.TestCase):
+    SERVER = "sin-fs25-01"
+    MAIN_SAVE = "sin-fs25-main"
+    HOBO_SAVE = "sin-fs25-hobo"
+    UNIQUE_ID = "stable-player"
+    DISCORD_ID = "discord-repton"
+
+    def setUp(self):
+        self.database = _MemoryDatabase()
+        self.auth = AuthorizationManager(self.database)
+        self.db = self.database.db
+
+    def seed_approved_main_identity(self):
+        self.db.game_identities.insert_one({
+            "server_id": self.SERVER, "save_id": self.MAIN_SAVE,
+            "discord_id": self.DISCORD_ID, "fs25_unique_user_id": self.UNIQUE_ID,
+            "game_player_id": self.UNIQUE_ID, "approved_by": "staff"})
+        self.db.community_applications.insert_one({
+            "_id": self.DISCORD_ID, "state": "approved", "farm_name": "Repton Does"})
+
+    def test_approved_identity_auto_enrolls_once_on_new_save(self):
+        self.seed_approved_main_identity()
+        result = self.auth.registration_request(self.SERVER, self.HOBO_SAVE, self.UNIQUE_ID)
+        self.assertEqual(result["status"], "registered")
+        target = self.db.game_identities.find_one({
+            "server_id": self.SERVER, "save_id": self.HOBO_SAVE,
+            "fs25_unique_user_id": self.UNIQUE_ID})
+        self.assertEqual(target["discord_id"], self.DISCORD_ID)
+        self.assertEqual(target["registration_source"], "approved_cross_save_auto_enrollment")
+        self.assertNotIn("approved_by", target)
+        for forbidden in ("farm_id", "observation_session", "observation_sequence", "world_id"):
+            self.assertNotIn(forbidden, target)
+        for collection in ("farm_requests", "memberships", "permission_jobs", "land_operations",
+                            "sin_farms", "farm_operations"):
+            self.assertEqual(list(getattr(self.db, collection).find({})), [], collection)
+
+    def test_reconnect_and_central_restart_are_idempotent(self):
+        self.seed_approved_main_identity()
+        first = self.auth.registration_request(self.SERVER, self.HOBO_SAVE, self.UNIQUE_ID)
+        restarted = AuthorizationManager(self.database)
+        second = restarted.registration_request(self.SERVER, self.HOBO_SAVE, self.UNIQUE_ID)
+        self.assertEqual(first, second)
+        rows = list(self.db.game_identities.find({
+            "server_id": self.SERVER, "save_id": self.HOBO_SAVE,
+            "fs25_unique_user_id": self.UNIQUE_ID}))
+        self.assertEqual(len(rows), 1)
+
+        processor = CentralEventProcessor(self.database)
+        message = processor.activity_message(
+            {"server_key": self.SERVER, "display_name": "SiN Test Server 01"}, self.HOBO_SAVE,
+            {"event_type": "player_connected", "unique_user_id": self.UNIQUE_ID,
+             "display_name": "Repton | Repton Does", "farm_id": 0})
+        self.assertNotIn("SiN Registration: Required", message)
+
+    def test_zero_prior_identity_preserves_registration_code_flow(self):
+        result = self.auth.registration_request(self.SERVER, self.HOBO_SAVE, self.UNIQUE_ID)
+        self.assertEqual(result["status"], "registration_required")
+        self.assertEqual(len(result["code"]), 8)
+
+    def test_unapproved_prior_identity_does_not_auto_enroll(self):
+        self.db.game_identities.insert_one({
+            "server_id": self.SERVER, "save_id": self.MAIN_SAVE,
+            "discord_id": self.DISCORD_ID, "game_player_id": self.UNIQUE_ID})
+        self.db.community_applications.insert_one({
+            "_id": self.DISCORD_ID, "state": "pending", "farm_name": "Repton Does"})
+        result = self.auth.registration_request(self.SERVER, self.HOBO_SAVE, self.UNIQUE_ID)
+        self.assertEqual(result["status"], "registration_required")
+        self.assertIsNone(self.db.game_identities.find_one({
+            "server_id": self.SERVER, "save_id": self.HOBO_SAVE,
+            "fs25_unique_user_id": self.UNIQUE_ID}))
+
+    def test_unapproved_target_link_still_requires_registration_membership(self):
+        self.db.game_identities.insert_one({
+            "server_id": self.SERVER, "save_id": self.HOBO_SAVE,
+            "discord_id": self.DISCORD_ID, "game_player_id": self.UNIQUE_ID,
+            "fs25_unique_user_id": self.UNIQUE_ID})
+        self.db.community_applications.insert_one({
+            "_id": self.DISCORD_ID, "state": "pending", "farm_name": "Repton Does"})
+        processor = CentralEventProcessor(self.database)
+        message = processor.activity_message(
+            {"server_key": self.SERVER, "display_name": "SiN Test Server 01"}, self.HOBO_SAVE,
+            {"event_type": "player_connected", "unique_user_id": self.UNIQUE_ID,
+             "display_name": "Observed", "farm_id": 0})
+        self.assertIn("SiN Registration: Required", message)
+
+    def test_ambiguous_prior_links_fail_closed(self):
+        for discord_id in ("discord-a", "discord-b"):
+            self.db.game_identities.insert_one({
+                "server_id": self.SERVER, "save_id": discord_id,
+                "discord_id": discord_id, "game_player_id": self.UNIQUE_ID})
+            self.db.community_applications.insert_one({
+                "_id": discord_id, "state": "approved", "farm_name": discord_id})
+        with self.assertRaisesRegex(ValueError, "ambiguous existing links"):
+            self.auth.registration_request(self.SERVER, self.HOBO_SAVE, self.UNIQUE_ID)
+        self.assertIsNone(self.db.game_identities.find_one({
+            "server_id": self.SERVER, "save_id": self.HOBO_SAVE,
+            "fs25_unique_user_id": self.UNIQUE_ID}))
+
+    def test_different_unique_id_requires_registration(self):
+        self.seed_approved_main_identity()
+        result = self.auth.registration_request(self.SERVER, self.HOBO_SAVE, "different-player")
+        self.assertEqual(result["status"], "registration_required")
+
+    def test_identity_on_another_server_does_not_authorize_enrollment(self):
+        self.db.game_identities.insert_one({
+            "server_id": "another-server", "save_id": self.MAIN_SAVE,
+            "discord_id": self.DISCORD_ID, "game_player_id": self.UNIQUE_ID})
+        self.db.community_applications.insert_one({
+            "_id": self.DISCORD_ID, "state": "approved", "farm_name": "Repton Does"})
+        result = self.auth.registration_request(self.SERVER, self.HOBO_SAVE, self.UNIQUE_ID)
+        self.assertEqual(result["status"], "registration_required")
+
+    def test_target_save_conflict_fails_closed(self):
+        self.seed_approved_main_identity()
+        self.db.game_identities.insert_one({
+            "server_id": self.SERVER, "save_id": self.HOBO_SAVE,
+            "discord_id": self.DISCORD_ID, "game_player_id": "another-player"})
+        with self.assertRaisesRegex(ValueError, "another FS25 identity"):
+            self.auth.registration_request(self.SERVER, self.HOBO_SAVE, self.UNIQUE_ID)
+
+    def test_staff_farm_approval_upgrades_auto_link_without_pregranting_authority(self):
+        self.seed_approved_main_identity()
+        self.auth.registration_request(self.SERVER, self.HOBO_SAVE, self.UNIQUE_ID)
+        self.db.farm_requests.insert_one({
+            "_id": "request", "server_id": self.SERVER, "save_id": self.HOBO_SAVE,
+            "discord_id": self.DISCORD_ID, "farm_name": "Repton Does",
+            "starting_field": "22", "state": "requested"})
+        operation = self.auth.approve_request(
+            "request", self.SERVER, self.HOBO_SAVE, 2, self.UNIQUE_ID,
+            {"source": "game", "players": {self.UNIQUE_ID: "Repton Does"},
+             "farms": {2: "Repton Does"}, "session": "hobo-session", "sequence": 1},
+            "staff", True)
+        self.assertTrue(operation)
+        target = self.db.game_identities.find_one({
+            "server_id": self.SERVER, "save_id": self.HOBO_SAVE,
+            "fs25_unique_user_id": self.UNIQUE_ID})
+        self.assertEqual(target["approved_by"], "staff")
+        self.assertEqual(list(self.db.memberships.find({})), [])
+        self.assertEqual(list(self.db.permission_jobs.find({})), [])
+
+    def test_concurrent_unique_index_winner_is_reused(self):
+        self.seed_approved_main_identity()
+
+        class RaceCollection(_MemoryCollection):
+            def __init__(self):
+                super().__init__()
+                self.raced = False
+
+            def insert_one(self, document, **kwargs):
+                if not self.raced:
+                    self.raced = True
+                    self.rows.append(dict(document))
+                    raise DuplicateKeyError("concurrent target identity")
+                return super().insert_one(document, **kwargs)
+
+        race_collection = RaceCollection()
+        race_collection.raced = True
+        self.database.db.game_identities = race_collection
+        self.db.game_identities.insert_one({
+            "server_id": self.SERVER, "save_id": self.MAIN_SAVE,
+            "discord_id": self.DISCORD_ID, "fs25_unique_user_id": self.UNIQUE_ID,
+            "game_player_id": self.UNIQUE_ID, "approved_by": "staff"})
+        race_collection.raced = False
+        result = self.auth.registration_request(self.SERVER, self.HOBO_SAVE, self.UNIQUE_ID)
+        self.assertEqual(result["status"], "registered")
+        self.assertEqual(len(list(self.db.game_identities.find({
+            "server_id": self.SERVER, "save_id": self.HOBO_SAVE}))), 1)

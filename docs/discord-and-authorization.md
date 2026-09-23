@@ -103,11 +103,17 @@ Central.
 
 ## Community membership before farms
 
-Players link their stable FS25 identity with `/register code:<CODE>` after the
-server-side SiN registration prompt. This identity link is independent of
-community application approval and farm authorization; it grants neither a
-farm nor manager permissions. The server key is internal metadata and is not a
-Discord command argument.
+Players normally do not repeat `/register` when moving between logical saves
+on the same registered server. When a registration request has no target-save
+link, Central may create a new save-scoped link automatically if exactly one
+existing link for that stable FS25 identity belongs to an approved Discord
+member. The automatic operation creates only the identity linkage; it copies no
+farm, land, authority, contract, session, operation, or FS25 economy state.
+Zero, unapproved, or cross-server matches retain the targeted
+`/register code:<CODE>` path. Ambiguous or conflicting matches fail closed for
+operator resolution. Registration is independent of farm authorization and
+grants neither a farm nor manager permissions. The server key is internal
+metadata and is not a Discord command argument.
 
 New Discord users first use `/apply nickname:<name> farm_name:<farm>` in
 `#sin-apply`. This creates only a community application; it grants no game,
@@ -236,14 +242,18 @@ the authoritative farm, ownership, and manager receipts are processed.
 - `farm_requests`: requester, requested server/save, farm name, starting field,
   state, reviewer, decision time, and approval operation ID.
 - `game_identities`: unique Discord and stable game identity per server/save,
-  approving staff member, approval time, observed session and sequence.
+  optional cross-save enrollment provenance, approving staff member, approval
+  time, observed session and sequence. Auto-enrollment provenance is linkage
+  metadata only and is never authority evidence.
 - `memberships`: desired versus applied role, farm and player, revision and state.
 - `permission_jobs`: operation ID, desired role, approver and durable acknowledgment.
 
 Approval writes the identity, membership, permission job, and reviewed request
 in a single MongoDB transaction. Existing conflicting identities are rejected;
-the same game identity cannot be claimed twice in a server/save. Old self-linked
-identities without staff approval cannot be used for assignments.
+the same game identity cannot be claimed twice in a server/save. An
+auto-enrolled link remains non-authorizing until the normal staff farm approval
+adds its approval evidence. Old self-linked identities without staff approval
+cannot be used for assignments.
 
 Starting-field ownership is assigned by a durable server-authoritative operation
 and remains pending until the mod acknowledges the exact server, save, farm,

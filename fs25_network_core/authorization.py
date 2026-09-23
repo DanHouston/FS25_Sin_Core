@@ -13,6 +13,7 @@ import uuid
 import secrets
 from datetime import datetime, timezone, timedelta
 from .world_generation import WorldGenerationRegistry
+from pymongo.errors import DuplicateKeyError
 
 
 ROLES = {"farm_manager", "contractor", "worker", "visitor", "revoked"}
@@ -134,15 +135,117 @@ class AuthorizationManager:
                  "$setOnInsert": {"_id": key(server_id, save_id, unique_user_id), "issued_at": issued_at}}, upsert=True)
         return token, now + timedelta(seconds=ttl_seconds)
 
+    def _matching_game_identities(self, server_id, save_id, unique_user_id, session=None):
+        """Return one de-duplicated set of identity links for a stable game ID.
+
+        Older approved links used ``game_player_id`` while newer records also
+        carry ``fs25_unique_user_id``.  Query both fields explicitly so the
+        cross-save enrollment path remains compatible with either record shape.
+        """
+        base = {"server_id": server_id}
+        if save_id is not None:
+            base["save_id"] = save_id
+        matches = []
+        seen = set()
+        for field in ("fs25_unique_user_id", "game_player_id"):
+            query = dict(base, **{field: unique_user_id})
+            cursor = self.db.game_identities.find(query, session=session)
+            for row in cursor.limit(50):
+                if not isinstance(row, dict):
+                    continue
+                fingerprint = row.get("_id")
+                if fingerprint is None:
+                    fingerprint = tuple((key, row.get(key)) for key in (
+                        "server_id", "save_id", "discord_id", "fs25_unique_user_id", "game_player_id"))
+                if fingerprint in seen:
+                    continue
+                seen.add(fingerprint)
+                matches.append(row)
+        return matches
+
+    def _auto_enroll_registration(self, server_id, save_id, unique_user_id):
+        """Resolve or create a save-local link from one approved server identity.
+
+        This deliberately creates only a ``game_identities`` record.  Farm,
+        membership, authority, land, contract, session, and FS25 economy state
+        remain untouched and continue through their existing save/world flows.
+        """
+        now = datetime.now(timezone.utc)
+
+        def enroll(session):
+            target_rows = self._matching_game_identities(
+                server_id, save_id, unique_user_id, session=session)
+            if len(target_rows) > 1:
+                raise ValueError("FS25 identity has conflicting links")
+            if target_rows:
+                return {"status": "registered", "fs25_unique_user_id": unique_user_id}
+
+            source_rows = self._matching_game_identities(
+                server_id, None, unique_user_id, session=session)
+            if not source_rows:
+                return None
+
+            # Multiple save rows for the same Discord member are one
+            # unambiguous identity.  Different members, or an unowned legacy
+            # row, must never be guessed through automatic enrollment.
+            discord_ids = {str(row.get("discord_id", "")).strip()
+                           for row in source_rows}
+            if not discord_ids or "" in discord_ids or len(discord_ids) != 1:
+                raise ValueError(
+                    "FS25 identity has ambiguous existing links; explicit resolution is required")
+            discord_id = next(iter(discord_ids))
+            application = self.community_db.community_applications.find_one(
+                {"_id": discord_id, "state": "approved"}, session=session)
+            if not application:
+                return None
+
+            # A target-save row for this Discord member with a different game
+            # identity is a real conflict, even though it did not match the
+            # stable ID query above.
+            target_owner_rows = list(self.db.game_identities.find(
+                {"server_id": server_id, "save_id": save_id,
+                 "discord_id": discord_id}, session=session).limit(2))
+            if len(target_owner_rows) > 1:
+                raise ValueError("Target save has conflicting identity links")
+            if target_owner_rows:
+                owner = target_owner_rows[0]
+                owner_ids = {owner.get("fs25_unique_user_id"), owner.get("game_player_id")}
+                if unique_user_id not in owner_ids:
+                    raise ValueError(
+                        "Target save already links this Discord member to another FS25 identity")
+                return {"status": "registered", "fs25_unique_user_id": unique_user_id}
+
+            identity = {
+                "server_id": server_id,
+                "save_id": save_id,
+                "discord_id": discord_id,
+                "fs25_unique_user_id": unique_user_id,
+                "game_player_id": unique_user_id,
+                "registered_at": now,
+                # This is linkage provenance only.  It is intentionally not
+                # an approval/authority field and carries no world state.
+                "registration_source": "approved_cross_save_auto_enrollment",
+            }
+            self.db.game_identities.insert_one(identity, session=session)
+            return {"status": "registered", "fs25_unique_user_id": unique_user_id}
+
+        try:
+            return self.database.atomic(enroll)
+        except DuplicateKeyError:
+            # A concurrent request may have won the unique target-save index.
+            # Re-read after the failed transaction and treat the durable row as
+            # the idempotent result; never create a second identity or code.
+            target_rows = self._matching_game_identities(server_id, save_id, unique_user_id)
+            if len(target_rows) == 1:
+                return {"status": "registered", "fs25_unique_user_id": unique_user_id}
+            raise
+
     def registration_request(self, server_id, save_id, unique_user_id, observed_name=None, transient_user_id=None):
         if not isinstance(unique_user_id, str) or not unique_user_id.strip():
             raise ValueError("FS25 uniqueUserId is required")
-        rows = list(self.db.game_identities.find({"server_id": server_id, "save_id": save_id,
-            "$or": [{"fs25_unique_user_id": unique_user_id}, {"game_player_id": unique_user_id}]}).limit(2))
-        if len(rows) > 1:
-            raise ValueError("FS25 identity has conflicting links")
-        if rows:
-            return {"status": "registered", "fs25_unique_user_id": unique_user_id}
+        linked = self._auto_enroll_registration(server_id, save_id, unique_user_id)
+        if linked is not None:
+            return linked
         token, expires_at = self.create_registration_code(server_id, save_id, unique_user_id)
         self.db.observed_fs25_identities.update_one(
             {"server_id": server_id, "save_id": save_id, "fs25_unique_user_id": unique_user_id},
@@ -188,8 +291,7 @@ class AuthorizationManager:
 
     def resolve_player_identity(self, server_id, save_id, unique_user_id):
         """Resolve one trusted game identity and its approved SiN membership."""
-        rows = list(self.db.game_identities.find({"server_id": server_id, "save_id": save_id,
-            "$or": [{"fs25_unique_user_id": unique_user_id}, {"game_player_id": unique_user_id}]}).limit(2))
+        rows = self._matching_game_identities(server_id, save_id, unique_user_id)
         if len(rows) != 1:
             return {"linked": False, "discord_user_id": None, "application_approved": False,
                     "canonical_name": None, "fully_registered": False,
@@ -264,7 +366,10 @@ class AuthorizationManager:
                 raise ValueError("Created farm name must match the requested farm name")
             scope = dict(server_id=server_id, save_id=save_id, discord_id=request["discord_id"])
             existing = self.db.game_identities.find_one(scope, session=session)
-            if existing and (existing["game_player_id"] != player_id or not existing.get("approved_by")):
+            if existing and existing.get("game_player_id") != player_id:
+                raise ValueError("Existing identity requires operator reconciliation")
+            if existing and not existing.get("approved_by") \
+                    and existing.get("registration_source") != "approved_cross_save_auto_enrollment":
                 raise ValueError("Existing identity requires operator reconciliation")
             claimed = self.db.game_identities.find_one({"server_id": server_id, "save_id": save_id,
                                                         "game_player_id": player_id}, session=session)
@@ -274,6 +379,17 @@ class AuthorizationManager:
                 self.db.game_identities.insert_one(dict(**scope, game_player_id=player_id,
                     approved_by=str(approved_by), approved_at=datetime.now(timezone.utc),
                     observation_session=snapshot["session"], observation_sequence=snapshot["sequence"]), session=session)
+            elif not existing.get("approved_by"):
+                # Cross-save auto-enrollment proves only the member's stable
+                # identity linkage.  Staff farm approval remains the separate
+                # authority boundary and adds the normal approval evidence.
+                self.db.game_identities.update_one(
+                    scope,
+                    {"$set": {"approved_by": str(approved_by),
+                              "approved_at": datetime.now(timezone.utc),
+                              "observation_session": snapshot["session"],
+                              "observation_sequence": snapshot["sequence"]}},
+                    session=session)
             operation = request.get("operation_id") or str(uuid.uuid4())
             now = datetime.now(timezone.utc)
             land_values = dict(

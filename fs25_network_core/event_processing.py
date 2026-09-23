@@ -221,7 +221,10 @@ class CentralEventProcessor:
             return None
         unique_id = payload.get("unique_user_id")
         resolved = self.authorization.resolve_player_identity(server["server_key"], save_key, unique_id) if unique_id else {"fully_registered": False}
-        registered = resolved.get("linked", False)
+        # A save-local link alone is not sufficient for the public activity
+        # presentation; the member must also retain approved SiN membership.
+        # Cross-save auto-enrollment returns both linked and fully_registered.
+        registered = resolved.get("fully_registered", False)
         name = resolved.get("canonical_name") if resolved.get("fully_registered", False) else payload.get("display_name", "Player")
         verb = "joined" if payload.get("event_type") == "player_connected" else "left"
         icon = "🟢" if verb == "joined" else "🔴"

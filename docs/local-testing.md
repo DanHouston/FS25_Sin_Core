@@ -274,7 +274,10 @@ Agent/API returns. The dedicated-server pseudo-user is excluded.
 
 Player identity registration is a separate durable link from Discord user ID to
 the stable FS25 `uniqueUserId`. It does not approve an application, create a
-farm, assign land, or grant manager authority. The authoritative flow is:
+farm, assign land, or grant manager authority. A first request on another
+logical save of the same server can be auto-enrolled from one unambiguous,
+currently approved existing identity; no user command is needed in that case.
+The authoritative flow is:
 
 ```text
 FS25_SiN_Server registration-request XML
@@ -285,11 +288,13 @@ FS25_SiN_Server registration-request XML
   -> FS25_SiN_Server prompt and quarantine state
 ```
 
-An unregistered player receives a code targeted to that player and remains out
-of a farm while the request is pending. In Discord use `/register code:<CODE>`;
-the server key is internal and is not a visible command argument. Codes are
-single-use, expiring, hash-backed, and are reusable for the same active FS25
-identity request. Registration alone never creates farm authorization.
+An unregistered player with no eligible prior link receives a code targeted to
+that player and remains out of a farm while the request is pending. In Discord
+use `/register code:<CODE>`; the server key is internal and is not a visible
+command argument. Codes are single-use, expiring, hash-backed, and are reusable
+for the same active FS25 identity request. Registration alone never creates farm
+authorization. Ambiguous/conflicting existing links fail closed for operator
+resolution rather than selecting an identity.
 
 The dedicated-server pseudo-user (`userId=1`, farm `0`, observed name
 `Server`) is excluded from registration and player activity. Registration
@@ -299,10 +304,12 @@ requests on transient API failures and quarantines malformed or permanently
 rejected mailbox files.
 
 For the persistent VM, start the central API and Agent as usual, deploy the
-updated mod ZIP if required, then join as an unregistered player. Confirm one
-prompt and a registration request, run `/register code:<CODE>`, wait a few
-seconds, and confirm the prompt stops and the player is released from the
-registration quarantine. Reusing the code must fail. Disconnect/reconnect and
+updated mod ZIP if required, then join the target logical save. For a member
+with one approved identity on the same server, confirm that Central returns
+`registered`, no new code is shown, and the player is released from
+registration quarantine. For a genuinely new identity, confirm one prompt and
+a registration request, run `/register code:<CODE>`, wait a few seconds, and
+confirm the prompt stops. Reusing the code must fail. Disconnect/reconnect and
 confirm the player is recognized without the registration-required activity
 suffix. Inspect failed files in `registration-requests\*.failed` and the
 registration response directory without opening or copying credential-bearing
