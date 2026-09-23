@@ -32,6 +32,16 @@ def _format_timestamp(value):
     return _as_text(value, "unknown")
 
 
+def _is_recent_timestamp(value, now, threshold_seconds=60):
+    """Return whether a successful update is strictly newer than the threshold."""
+    if not isinstance(value, datetime):
+        return False
+    observed = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    current = now if isinstance(now, datetime) else datetime.now(timezone.utc)
+    current = current if current.tzinfo else current.replace(tzinfo=timezone.utc)
+    return (current - observed).total_seconds() < threshold_seconds
+
+
 def _format_game_time(snapshot):
     """Render optional authoritative game-clock observations compactly."""
     month = snapshot.get("current_month")
@@ -112,21 +122,26 @@ class ServerStatusProjection:
             "time_scale": _as_text(snapshot.get("time_scale")),
             "players": names,
             "last_update": _format_timestamp(snapshot.get("received_at") or runtime.get("last_seen_at")),
+            "last_update_fresh": _is_recent_timestamp(
+                snapshot.get("received_at") or runtime.get("last_seen_at"), self.now(), 60
+            ),
         }
 
     @staticmethod
     def render(projection):
         players = projection["players"]
         player_text = ", ".join(players) if players else "None"
+        state_light = "🟢" if projection.get("state") == "online" else "🔴"
+        update_light = "🟢" if projection.get("last_update_fresh") else "🔴"
         return (f"**{projection['display_name']}** (`{projection['server_key']}`)\n"
-                f"State: **{projection['state']}**\n"
+                f"State: {state_light}\n"
                 f"Active save: `{projection['save_key']}`\n"
                 f"World: `{projection['world_id']}`\n"
                 f"Map: `{projection['map_id']}`\n"
                 f"Game time: {projection['game_time']}\n"
                 f"Time scale: `{projection['time_scale']}x`\n"
                 f"Players ({len(players)}): {player_text}\n"
-                f"Last successful update: {projection['last_update']}")
+                f"Last successful update: {update_light}")
 
     @staticmethod
     def content_hash(content):

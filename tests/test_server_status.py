@@ -85,6 +85,69 @@ class ServerStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(projection["time_scale"], "5")
         self.assertNotIn("Courtright", ServerStatusProjection.render(projection))
 
+    async def test_status_lights_use_strict_sixty_second_update_boundary(self):
+        database = _MemoryDatabase()
+        _server(database)
+        now = datetime(2026, 9, 23, 18, 0, tzinfo=timezone.utc)
+        snapshot = database.db.server_snapshots.find_one({"world_id": "hobo-world"})
+        database.db.server_snapshots.update_one(
+            {"world_id": "hobo-world"},
+            {"$set": {"received_at": now - timedelta(seconds=59)}},
+        )
+        database.db.sin_servers.update_one(
+            {"server_key": "sin-fs25-01"},
+            {"$set": {"last_seen_at": now - timedelta(seconds=10)}},
+        )
+        projection = ServerStatusProjection(database, now=lambda: now).project(
+            database.db.sin_servers.find_one({"server_key": "sin-fs25-01"})
+        )
+        content = ServerStatusProjection.render(projection)
+        self.assertEqual(projection["state"], "online")
+        self.assertTrue(projection["last_update_fresh"])
+        self.assertIn("State: 🟢", content)
+        self.assertIn("Last successful update: 🟢", content)
+        self.assertNotIn("<t:", content)
+
+        database.db.server_snapshots.update_one(
+            {"world_id": "hobo-world"},
+            {"$set": {"received_at": now - timedelta(seconds=60)}},
+        )
+        projection = ServerStatusProjection(database, now=lambda: now).project(
+            database.db.sin_servers.find_one({"server_key": "sin-fs25-01"})
+        )
+        content = ServerStatusProjection.render(projection)
+        self.assertFalse(projection["last_update_fresh"])
+        self.assertIn("State: 🟢", content)
+        self.assertIn("Last successful update: 🔴", content)
+
+    async def test_status_lights_show_offline_and_missing_update_as_red(self):
+        database = _MemoryDatabase()
+        _server(database)
+        now = datetime(2026, 9, 23, 18, 0, tzinfo=timezone.utc)
+        database.db.sin_servers.update_one(
+            {"server_key": "sin-fs25-01"},
+            {"$set": {"last_seen_at": now - timedelta(seconds=91)}},
+        )
+        database.db.server_snapshots.update_one(
+            {"world_id": "hobo-world"},
+            {"$set": {"received_at": None}},
+        )
+        database.db.sin_servers.update_one(
+            {"server_key": "sin-fs25-01"},
+            {"$set": {"active_runtime": {
+                "save_key": "sin-fs25-hobo", "world_id": "hobo-world",
+                "last_seen_at": None,
+            }}},
+        )
+        projection = ServerStatusProjection(database, now=lambda: now).project(
+            database.db.sin_servers.find_one({"server_key": "sin-fs25-01"})
+        )
+        content = ServerStatusProjection.render(projection)
+        self.assertEqual(projection["state"], "offline")
+        self.assertFalse(projection["last_update_fresh"])
+        self.assertIn("State: 🔴", content)
+        self.assertIn("Last successful update: 🔴", content)
+
     async def test_one_card_is_idempotent_and_edits_in_place(self):
         database = _MemoryDatabase()
         _server(database)
