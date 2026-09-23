@@ -111,6 +111,13 @@ persists the normalized payload in `sin_maps`; JiN lazily loads that record
 into MapService when publishing a contract card. It is not a continuous
 telemetry stream.
 
+`FieldManager:getFields()` is not assumed to be an array: GIANTS runtimes may
+return a table keyed by internal field identity. The server exporter therefore
+enumerates it with `pairs()` and normalizes each field's authoritative numeric
+ID. If the runtime field API is unavailable or no polygons can be extracted,
+the exporter retries without creating a misleading partial map and emits one
+bounded diagnostic explaining why publication was skipped.
+
 ## Contract cards
 
 `NetworkBot` now carries an optional `MapService`. A contract records its

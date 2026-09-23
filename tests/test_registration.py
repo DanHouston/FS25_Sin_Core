@@ -413,6 +413,14 @@ class RegistrationTests(unittest.TestCase):
             self.assertIn(runtime_source, source)
         self.assertIn("self.mapGeometryExported", source)
 
+    def test_map_export_handles_keyed_field_manager_tables_and_reports_skips(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8")
+        self.assertIn("function FS25SiNServer:reportMapGeometryExportFailure(reason)", source)
+        self.assertIn("for _, field in pairs(fields) do", source)
+        self.assertIn("no field polygons were available from FieldManager:getFields", source)
+        self.assertNotIn("for _, field in ipairs(fields) do", source)
+
     def test_permission_mailbox_consumption_removes_exact_command_and_manifest_files(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
             encoding="utf-8")

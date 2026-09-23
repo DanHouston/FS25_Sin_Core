@@ -135,6 +135,7 @@ function FS25SiNServer:loadMap()
     self.mapGeometryExported = false
     self.mapGeometryExportElapsed = 5000
     self.mapGeometryExportUnavailableLogged = false
+    self.mapGeometryExportFailureLogged = false
     self.previousPlayers = {}
     self.connectedPlayers = {}
     self.identityNames = {}
@@ -1105,7 +1106,10 @@ function FS25SiNServer:reportMapProbe()
     if fieldManager ~= nil and fieldManager.getFields ~= nil then
         local ok, fields = pcall(fieldManager.getFields, fieldManager)
         if ok and type(fields) == "table" then
-            for _, field in ipairs(fields) do
+            -- FieldManager may key this table by its internal field ID rather
+            -- than packing it as an array; pairs() keeps the probe truthful
+            -- for both shapes.
+            for _, field in pairs(fields) do
                 fieldCount = fieldCount + 1
                 local idOk, fieldId = false, nil
                 if field ~= nil and field.getId ~= nil then
@@ -1353,13 +1357,25 @@ function FS25SiNServer:emitServerEvent(eventType, values, requestedEventId)
     return true
 end
 
+function FS25SiNServer:reportMapGeometryExportFailure(reason)
+    -- The exporter retries while the runtime is loading, but does not spam
+    -- the FS25 log when a map does not expose a required field API.
+    if not self.mapGeometryExportFailureLogged then
+        Logging.warning("[SiN Map] runtime geometry export skipped: %s", tostring(reason))
+        self.mapGeometryExportFailureLogged = true
+    end
+    return false
+end
+
 -- Export field geometry once per FS25 runtime session.  This is a bounded,
 -- authenticated mailbox event: Central receives coordinates, never a map
 -- filesystem path or raster asset.  A deterministic event ID lets Central's
 -- existing processed-event key make restarts/retries idempotent.
 function FS25SiNServer:processMapGeometryExport()
     if self.serverKey == nil or self.serverCredential == nil or self.eventDirectory == nil
-        or g_currentMission == nil or not g_currentMission:getIsServer() then return false end
+        or g_currentMission == nil or not g_currentMission:getIsServer() then
+        return self:reportMapGeometryExportFailure("server runtime or authenticated event mailbox unavailable")
+    end
     local mission = g_currentMission
     local info = mission.missionInfo or {}
     local mapId = tostring(info.mapId or info.mapFilename or info.mapXMLFilename or "")
@@ -1367,11 +1383,18 @@ function FS25SiNServer:processMapGeometryExport()
     local terrainSize = tonumber(mission.terrainSize)
     local fieldManager = mission.fieldManager or g_fieldManager
     if mapId == "" or terrainSize == nil or terrainSize <= 0 or fieldManager == nil
-        or fieldManager.getFields == nil or getWorldTranslation == nil then return false end
+        or fieldManager.getFields == nil or getWorldTranslation == nil then
+        return self:reportMapGeometryExportFailure("map identity, terrain, field manager, or world translation API unavailable")
+    end
     local ok, fields = pcall(fieldManager.getFields, fieldManager)
-    if not ok or type(fields) ~= "table" then return false end
+    if not ok or type(fields) ~= "table" then
+        return self:reportMapGeometryExportFailure("FieldManager:getFields failed")
+    end
     local records = {}
-    for _, field in ipairs(fields) do
+    -- GIANTS exposes the field table by internal key on some FS25 builds;
+    -- ipairs() silently skips those entries.  pairs() handles both keyed and
+    -- array-shaped tables without changing the normalized field IDs.
+    for _, field in pairs(fields) do
         local idOk, fieldId = false, nil
         if field ~= nil and field.getId ~= nil then idOk, fieldId = pcall(field.getId, field) end
         local numericFieldId = tonumber(fieldId)
@@ -1395,26 +1418,36 @@ function FS25SiNServer:processMapGeometryExport()
             end
         end
     end
-    if #records == 0 then return false end
+    if #records == 0 then
+        return self:reportMapGeometryExportFailure("no field polygons were available from FieldManager:getFields")
+    end
     table.sort(records, function(left, right) return left.id < right.id end)
     local safeMapId = string.gsub(mapId, "[^%w_-]", "_")
     local safeSaveId = string.gsub(tostring(mission.missionInfo.savegameIndex or 0), "[^%w_-]", "_")
-    if self.runtimeIdentityReady ~= true then return false end
+    if self.runtimeIdentityReady ~= true then
+        return self:reportMapGeometryExportFailure("runtime identity unavailable")
+    end
     local eventId = string.gsub(self.serverKey .. "-map-" .. safeMapId .. "-" .. safeSaveId .. "-" .. self.runtimeNonce, "[^%w_-]", "_")
     if self.eventSeen[eventId] or fileExists(self.eventDirectory .. eventId .. ".xml") then
         self.eventSeen[eventId] = true
         self.mapGeometryExported = true
+        self.mapGeometryExportFailureLogged = false
         return true
     end
     local path = self.eventDirectory .. eventId .. ".xml"
     local xml = XMLFile.create("networkLocalMapGeometry", path, "serverEvent")
-    if xml == nil then return false end
+    if xml == nil then
+        return self:reportMapGeometryExportFailure("could not create map_geometry mailbox XML")
+    end
     xml:setString("serverEvent#event_id", eventId)
     xml:setString("serverEvent#event_type", "map_geometry")
     xml:setString("serverEvent#server_key", self.serverKey)
     xml:setString("serverEvent#server_credential", self.serverCredential)
     xml:setString("serverEvent#save_id", tostring(mission.missionInfo.savegameIndex or 0))
-    if self.worldIdentityReady ~= true or self.worldId == nil then xml:delete(); return false end
+    if self.worldIdentityReady ~= true or self.worldId == nil then
+        xml:delete()
+        return self:reportMapGeometryExportFailure("world identity unavailable")
+    end
     xml:setString("serverEvent#world_id", tostring(self.worldId))
     xml:setInt("serverEvent#schema_version", 1)
     xml:setString("serverEvent#map_id", mapId)
@@ -1465,6 +1498,7 @@ function FS25SiNServer:processMapGeometryExport()
     xml:save(); xml:delete()
     self.eventSeen[eventId] = true
     self.mapGeometryExported = true
+    self.mapGeometryExportFailureLogged = false
     Logging.info("[SiN Map] runtime geometry queued map=%s fields=%s", mapId, tostring(#records))
     return true
 end
