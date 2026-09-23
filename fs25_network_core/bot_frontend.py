@@ -1298,10 +1298,10 @@ def main():
             channels[channel_name] = configured
     try:
         sin_member_role_id = int(discord_config.get("roles", {}).get("sin_member", ""))
-        for name in ("sin_apply", "sin_applications"):
+        for name in ("sin_apply",):
             int(channels[name])
     except (KeyError, TypeError, ValueError) as error:
-        raise SystemExit("Configure numeric channels.sin_apply, channels.sin_applications, and roles.sin_member IDs in discord.json") from error
+        raise SystemExit("Configure numeric channels.sin_apply and roles.sin_member IDs in discord.json") from error
     # ``servers.json`` is a legacy local-development adapter.  Production JiN
     # discovery comes from sin_servers/sin_saves in the configured database;
     # loading the file by default would reintroduce local-dev into Discord and

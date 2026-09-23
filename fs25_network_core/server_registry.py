@@ -22,11 +22,13 @@ class ServerRegistry:
         old = self.db.sin_servers.find_one({"server_key": server_key})
         if old and old.get("credential_hash"):
             self.db.sin_servers.update_one({"_id": old["_id"]}, {"$set": {"display_name": display_name.strip(),
-                "discord_guild_id": str(guild_id), "discord_activity_channel_id": str(channel_id), "updated_at": now}})
+                "discord_guild_id": str(guild_id), "discord_activity_channel_id": str(channel_id),
+                "discord_chat_channel_id": str(channel_id), "updated_at": now}})
             return self.db.sin_servers.find_one({"_id": old["_id"]}), None
         pairing = secrets.token_urlsafe(8).replace("-", "").replace("_", "").upper()
         record = {"_id": server_key, "server_key": server_key, "display_name": display_name.strip(),
                   "discord_guild_id": str(guild_id), "discord_activity_channel_id": str(channel_id),
+                  "discord_chat_channel_id": str(channel_id),
                   "enabled": True, "credential_hash": None, "paired_at": None,
                   "pairing_code_hash": _hash(pairing), "pairing_expires_at": now + timedelta(minutes=30),
                   "created_at": now, "updated_at": now}

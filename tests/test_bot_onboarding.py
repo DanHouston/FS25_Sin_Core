@@ -14,14 +14,16 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         with patch.dict(os.environ, {"DISCORD_OPERATOR_ROLE_IDS": "42"}):
             self.bot = NetworkBot(MagicMock(), {"local-dev": {"save_id": "test", "development": True}}, 1,
-                                  channels={"link_account": 10, "farm_approvals": 11, "bank": 12})
+                                  channels={"staff": 11, "operations": 12, "sin_apply": 10})
 
     async def asyncTearDown(self):
         await self.bot.close()
 
     async def test_commands_replace_self_linking_and_all_have_channel_checks(self):
         commands = self.bot.tree.get_commands()
-        self.assertEqual({command.name for command in commands}, set(COMMAND_CHANNELS))
+        from fs25_network_core.channel_policy import UNRESTRICTED_MEMBER_COMMANDS
+        self.assertEqual({command.name for command in commands},
+                         set(COMMAND_CHANNELS) | set(UNRESTRICTED_MEMBER_COMMANDS))
         self.assertIsNone(self.bot.tree.get_command("link"))
         self.assertIsNone(self.bot.tree.get_command("farmland_assign"))
         for command in commands:

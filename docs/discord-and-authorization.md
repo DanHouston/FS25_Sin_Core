@@ -63,6 +63,21 @@ command sync; old code-issuance and verification methods now reject all calls.
 
 ## Channels
 
+The production routing contract is stable Discord channel IDs, never channel
+names. The current architecture uses `#sin-apply` for `/apply`, `#staff` for
+applications and farm approvals, `#operations` for reconciliation and other
+human intervention, `#audit-log` for historical administrative events, and
+`#sin-jobs` for persistent contract cards. Member self-service commands,
+including `/register`, `/farm_request`, `/farm_status`, `/balance`, `/deposit`,
+`/withdraw`, contracts, invoices, and events, are not tied to retired feature
+channels. `#bank`, `#link-account`, `#sin-applications`, `#farm-approvals`, and
+`#bank-reconciliation` are legacy names and are no longer required.
+
+Each playable server record stores `discord_chat_channel_id` explicitly for
+future FS25 chat routing; it is not derived from `server_key` or a channel
+name. Channel renames therefore do not affect routing. Missing required staff
+destinations fail clearly rather than falling back.
+
 ## Community membership before farms
 
 Players link their stable FS25 identity with `/register code:<CODE>` after the
@@ -71,8 +86,8 @@ community application approval and farm authorization; it grants neither a
 farm nor manager permissions. The server key is internal metadata and is not a
 Discord command argument.
 
-New Discord users first use `/apply nickname:<name> farm_name:<farm>` in any
-channel in the configured guild. This creates only a community application; it grants no game,
+New Discord users first use `/apply nickname:<name> farm_name:<farm>` in
+`#sin-apply`. This creates only a community application; it grants no game,
 banking, farm, or wallet access. Network Admins review it in `#sin-applications`
 with `/application_pending`, `/application_approve`, or `/application_deny`.
 Approval sets the server nickname to `nickname | farm name` and grants the SiN

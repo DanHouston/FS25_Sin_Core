@@ -5,7 +5,7 @@ from fs25_network_core.channel_policy import COMMAND_CHANNELS, UNRESTRICTED_MEMB
 
 class ChannelPolicyTests(unittest.TestCase):
     def test_each_command_accepts_its_designated_channel(self):
-        channels = {"link_account": 11, "bank": 12, "farm_approvals": 13, "sin_apply": 14, "sin_applications": 15}
+        channels = {"staff": 11, "operations": 12, "sin_apply": 14}
         for command, channel_key in COMMAND_CHANNELS.items():
             with self.subTest(command=command):
                 require_command_channel(command, 1, 1, channels[channel_key], channels)
@@ -14,9 +14,9 @@ class ChannelPolicyTests(unittest.TestCase):
                         require_command_channel(command, 1, 1, 99, channels)
 
     def test_rejects_dm_other_guild_missing_mapping_and_unknown_command(self):
-        for command, guild, channels in [("farm_assign", None, {"farm_approvals": 12}),
+        for command, guild, channels in [("farm_assign", None, {"staff": 12}),
                                          ("farm_assign", 2, {"farm_approvals": 12}),
-                                         ("farm_assign", 1, {}), ("unknown", 1, {"bank": 12})]:
+                                         ("farm_assign", 1, {}), ("unknown", 1, {"staff": 12})]:
             with self.subTest(command=command, guild=guild, channels=channels):
                 with self.assertRaises(ValueError):
                     require_command_channel(command, guild, 1, 12, channels)
