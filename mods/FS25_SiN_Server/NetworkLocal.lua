@@ -248,11 +248,12 @@ function FS25SiNServer:enforceFarmChange(player)
     local authorityFarmId = managerAuthority[tostring(user:getUniqueUserId())]
     local authorized = authorityFarmId ~= nil and tonumber(authorityFarmId) == tonumber(farm.farmId)
     self:enforceAuthorizedManagerState(user, farm, authorized, "immediate")
-    local contractorFarmId = contractorAuthority[tostring(user:getUniqueUserId())]
-    if contractorFarmId ~= nil and tonumber(contractorFarmId) ~= tonumber(farm.farmId) then
-        local contractorFarm = g_farmManager:getFarmById(tonumber(contractorFarmId))
-        if contractorFarm ~= nil then
-            self:enforceAuthorizedContractorState(user, contractorFarm, "immediate-contractor")
+    local contractor = contractorAuthority[tostring(user:getUniqueUserId())]
+    if contractor ~= nil and tonumber(contractor.sourceFarmId) == tonumber(farm.farmId) then
+        local sourceFarm = g_farmManager:getFarmById(tonumber(contractor.sourceFarmId))
+        local contractorFarm = g_farmManager:getFarmById(tonumber(contractor.targetFarmId))
+        if sourceFarm ~= nil and contractorFarm ~= nil then
+            self:enforceAuthorizedContractorState(user, sourceFarm, contractorFarm, "immediate-contractor")
         end
     end
     self:scheduleDeferredManagerSync(user, farm)
@@ -308,12 +309,13 @@ function FS25SiNServer:processDeferredManagerSyncs()
                         Logging.error("[SiN Authorization] deferred permission sync failed userId=%s farmId=%s error=%s",
                             tostring(user:getId()), tostring(farm.farmId), tostring(errorMessage))
                     end
-                    local contractorFarmId = contractorAuthority[uniqueId]
-                    if contractorFarmId ~= nil and tonumber(contractorFarmId) ~= tonumber(farm.farmId) then
-                        local contractorFarm = g_farmManager:getFarmById(tonumber(contractorFarmId))
-                        if contractorFarm ~= nil then
+                    local contractor = contractorAuthority[uniqueId]
+                    if contractor ~= nil and tonumber(contractor.sourceFarmId) == tonumber(farm.farmId) then
+                        local sourceFarm = g_farmManager:getFarmById(tonumber(contractor.sourceFarmId))
+                        local contractorFarm = g_farmManager:getFarmById(tonumber(contractor.targetFarmId))
+                        if sourceFarm ~= nil and contractorFarm ~= nil then
                             local contractorOk, contractorError = pcall(self.enforceAuthorizedContractorState,
-                                self, user, contractorFarm, "deferred-contractor")
+                                self, user, sourceFarm, contractorFarm, "deferred-contractor")
                             if not contractorOk then
                                 Logging.error("[SiN Authorization] deferred contractor sync failed userId=%s farmId=%s error=%s",
                                     tostring(user:getId()), tostring(contractorFarm.farmId), tostring(contractorError))
@@ -355,7 +357,16 @@ function FS25SiNServer:loadManagerAuthority()
         local key = string.format("managerAuthority.contractor(%d)", index)
         local playerId = authority:getString(key .. "#gamePlayerId")
         if playerId == nil then break end
-        contractors[tostring(playerId)] = authority:getInt(key .. "#farmId")
+        local targetFarmId = authority:getInt(key .. "#farmId")
+        local sourceFarmId = authority:getInt(key .. "#sourceFarmId")
+        if sourceFarmId ~= nil and sourceFarmId > 0 and targetFarmId ~= nil and targetFarmId > 0
+            and sourceFarmId ~= targetFarmId then
+            contractors[tostring(playerId)] = {
+                sourceFarmId=sourceFarmId, targetFarmId=targetFarmId}
+        else
+            Logging.warning("[SiN Authorization] ignoring contractor authority without a valid source farm userId=%s sourceFarmId=%s targetFarmId=%s",
+                tostring(playerId), tostring(sourceFarmId), tostring(targetFarmId))
+        end
         index = index + 1
     end
     authority:delete()
@@ -526,57 +537,78 @@ function FS25SiNServer:enforceAuthorizedManagerState(user, farm, authorized, syn
     return afterManager == (authorized == true)
 end
 
-function FS25SiNServer:enforceAuthorizedContractorState(user, farm, syncReason)
-    if user == nil or farm == nil or farm.farmId == nil or farm.farmId <= 0 then return false end
-    local userId = user:getId()
-    local _, beforePermissions = self:readFarmManagerState(farm, userId)
-    local permissionKeys = self:getFarmPermissionKeys(farm, beforePermissions)
-    if next(permissionKeys) == nil then error("FS25 contractor permission set is unavailable") end
-    if farm.setUserPermission == nil then error("FS25 setUserPermission is unavailable") end
-    for permission, _ in pairs(permissionKeys) do
-        if beforePermissions[permission] ~= true then
-            farm:setUserPermission(userId, permission, true)
-        end
+function FS25SiNServer:enforceAuthorizedContractorState(user, sourceFarm, targetFarm, syncReason)
+    if user == nil or sourceFarm == nil or targetFarm == nil
+        or sourceFarm.farmId == nil or sourceFarm.farmId <= 0
+        or targetFarm.farmId == nil or targetFarm.farmId <= 0
+        or sourceFarm.farmId == targetFarm.farmId then return false end
+    if sourceFarm.setIsContractingFor == nil or sourceFarm.getIsContractingFor == nil then
+        error("FS25 native contractor API is unavailable")
     end
-    local _, afterPermissions = self:readFarmManagerState(farm, userId)
-    self:replicateFarmPermissions(userId, farm, afterPermissions, false, farm.farmId, syncReason)
-    local permissionCount, grantedCount = self:countFarmPermissions(afterPermissions)
-    Logging.info("[SiN Authorization] contractor state sync=%s uniqueUserId=%s farmId=%s permissionCount=%s grantedPermissions=%s",
+    local before = sourceFarm:getIsContractingFor(targetFarm.farmId) == true
+    if not before then
+        -- FS25 stores contractor access on the source farm and addresses the
+        -- target farm by ID.  The native setter performs the multiplayer
+        -- synchronization; the getter below is the authoritative read-back.
+        sourceFarm:setIsContractingFor(targetFarm.farmId, true, false)
+    end
+    local after = sourceFarm:getIsContractingFor(targetFarm.farmId) == true
+    Logging.info("[SiN Authorization] contractor state sync=%s uniqueUserId=%s sourceFarmId=%s targetFarmId=%s beforeContracting=%s afterContracting=%s",
         tostring(syncReason or "reconciliation"), self:shortIdentity(user:getUniqueUserId()),
-        tostring(farm.farmId), tostring(permissionCount), tostring(grantedCount))
-    for permission, _ in pairs(permissionKeys) do
-        if afterPermissions[permission] ~= true then return false end
-    end
-    return true
+        tostring(sourceFarm.farmId), tostring(targetFarm.farmId), tostring(before), tostring(after))
+    return after
 end
 
-function FS25SiNServer:revokeAuthorizedContractorState(user, farm, syncReason)
-    if user == nil or farm == nil or farm.farmId == nil or farm.farmId <= 0 then return false end
-    local userId = user:getId()
-    local manager, beforePermissions = self:readFarmManagerState(farm, userId)
-    -- A derived contractor grant must never be used to demote an independent
-    -- manager relationship. Central only creates this command for contractor
-    -- memberships; fail closed if runtime state contradicts that model.
-    if manager then error("refusing to revoke contractor permissions from a farm manager") end
-    if type(farm.defaultPermissions) ~= "table" or farm.setUserPermission == nil then
-        error("FS25 contractor revocation permission state is unavailable")
+function FS25SiNServer:revokeAuthorizedContractorState(user, sourceFarm, targetFarm, syncReason, cleanupLegacy)
+    if sourceFarm == nil or targetFarm == nil or sourceFarm.farmId == nil or sourceFarm.farmId <= 0
+        or targetFarm.farmId == nil or targetFarm.farmId <= 0
+        or sourceFarm.farmId == targetFarm.farmId then return false end
+    if sourceFarm.setIsContractingFor == nil or sourceFarm.getIsContractingFor == nil then
+        error("FS25 native contractor API is unavailable")
     end
-    local permissionKeys = self:getFarmPermissionKeys(farm, beforePermissions)
-    if next(permissionKeys) == nil then error("FS25 contractor permission set is unavailable") end
-    for permission, _ in pairs(permissionKeys) do
-        local defaultPermission = farm.defaultPermissions[permission] == true
-        if beforePermissions[permission] ~= defaultPermission then
-            farm:setUserPermission(userId, permission, defaultPermission)
+    local before = sourceFarm:getIsContractingFor(targetFarm.farmId) == true
+    if before then
+        sourceFarm:setIsContractingFor(targetFarm.farmId, false, false)
+    end
+    local after = sourceFarm:getIsContractingFor(targetFarm.farmId) == true
+    local cleanupOk = true
+    if cleanupLegacy then
+        -- The pre-native implementation incorrectly wrote target-farm user
+        -- permissions.  Remove only that legacy residue, and only when the
+        -- player is not currently a member/manager of the target farm.
+        if user == nil then
+            cleanupOk = false
+        else
+            local currentFarm = g_farmManager ~= nil and g_farmManager:getFarmByUserId(user:getId()) or nil
+            if currentFarm ~= nil and tonumber(currentFarm.farmId) == tonumber(targetFarm.farmId) then
+                cleanupOk = false
+            else
+                local manager, beforePermissions = self:readFarmManagerState(targetFarm, user:getId())
+                if manager then error("refusing to clean legacy contractor permissions from a farm manager") end
+                if type(targetFarm.defaultPermissions) ~= "table" or targetFarm.setUserPermission == nil then
+                    error("FS25 legacy contractor cleanup permission state is unavailable")
+                end
+                local permissionKeys = self:getFarmPermissionKeys(targetFarm, beforePermissions)
+                for permission, _ in pairs(permissionKeys) do
+                    local defaultPermission = targetFarm.defaultPermissions[permission] == true
+                    if beforePermissions[permission] ~= defaultPermission then
+                        targetFarm:setUserPermission(user:getId(), permission, defaultPermission)
+                    end
+                end
+                local _, afterPermissions = self:readFarmManagerState(targetFarm, user:getId())
+                for permission, _ in pairs(permissionKeys) do
+                    if afterPermissions[permission] ~= (targetFarm.defaultPermissions[permission] == true) then
+                        cleanupOk = false
+                    end
+                end
+            end
         end
     end
-    local afterManager, afterPermissions = self:readFarmManagerState(farm, userId)
-    self:replicateFarmPermissions(userId, farm, afterPermissions, afterManager, farm.farmId, syncReason)
-    for permission, _ in pairs(permissionKeys) do
-        if afterPermissions[permission] ~= (farm.defaultPermissions[permission] == true) then return false end
-    end
-    Logging.info("[SiN Authorization] contractor revoked sync=%s uniqueUserId=%s farmId=%s",
-        tostring(syncReason or "reconciliation"), self:shortIdentity(user:getUniqueUserId()), tostring(farm.farmId))
-    return afterManager == false
+    Logging.info("[SiN Authorization] contractor revoked sync=%s uniqueUserId=%s sourceFarmId=%s targetFarmId=%s beforeContracting=%s afterContracting=%s legacyCleanup=%s cleanupOk=%s",
+        tostring(syncReason or "reconciliation"), tostring(user ~= nil and self:shortIdentity(user:getUniqueUserId()) or "unavailable"),
+        tostring(sourceFarm.farmId), tostring(targetFarm.farmId), tostring(before), tostring(after),
+        tostring(cleanupLegacy == true), tostring(cleanupOk))
+    return not after and cleanupOk
 end
 
 function FS25SiNServer:findPlayerObject(userId, user)
@@ -1832,14 +1864,26 @@ function FS25SiNServer:processPermissionCommands()
                         local currentFarm = userId ~= nil and g_farmManager:getFarmByUserId(userId) or nil
                         local manager = farm ~= nil and userId ~= nil and farm:isUserFarmManager(userId)
                         local applied = requestedRole == "farm_manager" and currentFarm ~= nil and currentFarm.farmId == farmId and manager
-                        Logging.info("[SiN (SimNet) Server] Permission diagnostic operation=%s player=%s userId=%s farm=%s currentFarm=%s manager=%s hasSetUserPermission=%s", operationId, tostring(playerId), tostring(userId), tostring(farmId), tostring(currentFarm and currentFarm.farmId), tostring(manager), tostring(farm ~= nil and farm.setUserPermission ~= nil))
+                        local supported = requestedRole == "farm_manager"
+                        local reason = supported
+                            and ("Verified FS25 state: userId=" .. tostring(userId) .. "; currentFarm=" .. tostring(currentFarm and currentFarm.farmId) .. "; manager=" .. tostring(manager))
+                            or "unsupported permission role has no verified native FS25 adapter"
+                        Logging.info("[SiN (SimNet) Server] Permission diagnostic operation=%s player=%s userId=%s farm=%s currentFarm=%s role=%s manager=%s supported=%s", operationId, tostring(playerId), tostring(userId), tostring(farmId), tostring(currentFarm and currentFarm.farmId), tostring(requestedRole), tostring(manager), tostring(supported))
                         local receipt = XMLFile.create("networkLocalReceipt", self.receiptDirectory .. operationId .. ".xml", "permissionReceipt")
                         receipt:setString("permissionReceipt#operation_id", operationId)
+                        receipt:setString("permissionReceipt#operation_type", "permission")
+                        receipt:setString("permissionReceipt#role", tostring(requestedRole or ""))
+                        receipt:setString("permissionReceipt#game_player_id", tostring(playerId or ""))
                         receipt:setString("permissionReceipt#server_id", command:getString("permissionCommand#server_id"))
                         receipt:setString("permissionReceipt#save_id", command:getString("permissionCommand#save_id"))
-                         receipt:setString("permissionReceipt#revision", command:getString("permissionCommand#revision"))
+                        receipt:setInt("permissionReceipt#farm_id", farmId or 0)
+                        receipt:setInt("permissionReceipt#current_farm_id", currentFarm ~= nil and currentFarm.farmId or 0)
+                        receipt:setBool("permissionReceipt#manager", manager == true and applied)
+                        receipt:setBool("permissionReceipt#permission_applied", applied == true)
+                        receipt:setBool("permissionReceipt#authoritative_readback", applied)
+                        receipt:setString("permissionReceipt#revision", command:getString("permissionCommand#revision"))
                          receipt:setString("permissionReceipt#status", applied and "applied" or "pending_validation")
-                         receipt:setString("permissionReceipt#receipt", "Verified FS25 state: userId=" .. tostring(userId) .. "; currentFarm=" .. tostring(currentFarm and currentFarm.farmId) .. "; manager=" .. tostring(manager))
+                         receipt:setString("permissionReceipt#receipt", reason)
                          self:setReceiptWorldId(receipt, "permissionReceipt")
                          self:saveReceiptAndConsume(receipt, command, operationId)
                     end
@@ -1861,16 +1905,20 @@ end
 function FS25SiNServer:processContractorPermissionCommand(command, operationId)
     local playerId = command:getString("permissionCommand#game_player_id")
     local farmId = command:getInt("permissionCommand#farm_id")
+    local sourceFarmId = command:getInt("permissionCommand#source_farm_id")
     local user = nil
     if g_currentMission.userManager ~= nil then
         for _, candidate in ipairs(g_currentMission.userManager:getUsers()) do
             if tostring(candidate:getUniqueUserId()) == tostring(playerId) then user = candidate; break end
         end
     end
-    local farm = g_farmManager:getFarmById(farmId)
-    local applied, reason = false, "contractor user or farm unavailable"
-    if user ~= nil and farm ~= nil then
-        local ok, errorMessage = pcall(self.enforceAuthorizedContractorState, self, user, farm, "command")
+    local sourceFarm = sourceFarmId ~= nil and g_farmManager:getFarmById(sourceFarmId) or nil
+    local targetFarm = g_farmManager:getFarmById(farmId)
+    local currentFarm = user ~= nil and g_farmManager:getFarmByUserId(user:getId()) or nil
+    local applied, reason = false, "contractor user, source farm, or target farm unavailable"
+    if user ~= nil and sourceFarm ~= nil and targetFarm ~= nil and currentFarm ~= nil
+        and tonumber(currentFarm.farmId) == tonumber(sourceFarmId) then
+        local ok, errorMessage = pcall(self.enforceAuthorizedContractorState, self, user, sourceFarm, targetFarm, "command")
         applied = ok and errorMessage == true
         reason = applied and "contractor permissions applied" or tostring(errorMessage)
     end
@@ -1879,6 +1927,14 @@ function FS25SiNServer:processContractorPermissionCommand(command, operationId)
     receipt:setString("permissionReceipt#server_id", command:getString("permissionCommand#server_id"))
     receipt:setString("permissionReceipt#save_id", command:getString("permissionCommand#save_id"))
     receipt:setString("permissionReceipt#revision", command:getString("permissionCommand#revision"))
+    receipt:setString("permissionReceipt#operation_type", "permission")
+    receipt:setString("permissionReceipt#role", "contractor")
+    receipt:setString("permissionReceipt#game_player_id", tostring(playerId or ""))
+    receipt:setInt("permissionReceipt#source_farm_id", sourceFarmId or 0)
+    receipt:setInt("permissionReceipt#target_farm_id", farmId or 0)
+    receipt:setInt("permissionReceipt#current_farm_id", currentFarm ~= nil and currentFarm.farmId or 0)
+    receipt:setBool("permissionReceipt#contracting_for", applied)
+    receipt:setBool("permissionReceipt#authoritative_readback", applied)
     receipt:setString("permissionReceipt#status", applied and "applied" or "pending_validation")
     receipt:setString("permissionReceipt#receipt", reason)
     self:setReceiptWorldId(receipt, "permissionReceipt")
@@ -1888,16 +1944,20 @@ end
 function FS25SiNServer:processContractorRevocationCommand(command, operationId)
     local playerId = command:getString("permissionCommand#game_player_id")
     local farmId = command:getInt("permissionCommand#farm_id")
+    local sourceFarmId = command:getInt("permissionCommand#source_farm_id")
+    local legacyCleanup = command:getBool("permissionCommand#legacy_cleanup") == true
     local user = nil
     if g_currentMission.userManager ~= nil then
         for _, candidate in ipairs(g_currentMission.userManager:getUsers()) do
             if tostring(candidate:getUniqueUserId()) == tostring(playerId) then user = candidate; break end
         end
     end
-    local farm = g_farmManager:getFarmById(farmId)
-    local applied, reason = false, "contractor user or farm unavailable"
-    if user ~= nil and farm ~= nil then
-        local ok, errorMessage = pcall(self.revokeAuthorizedContractorState, self, user, farm, "command-revoke")
+    local sourceFarm = sourceFarmId ~= nil and g_farmManager:getFarmById(sourceFarmId) or nil
+    local targetFarm = g_farmManager:getFarmById(farmId)
+    local applied, reason = false, "contractor source or target farm unavailable"
+    if sourceFarm ~= nil and targetFarm ~= nil then
+        local ok, errorMessage = pcall(self.revokeAuthorizedContractorState, self, user, sourceFarm, targetFarm,
+            "command-revoke", legacyCleanup)
         applied = ok and errorMessage == true
         reason = applied and "contractor permissions revoked" or tostring(errorMessage)
     end
@@ -1906,6 +1966,13 @@ function FS25SiNServer:processContractorRevocationCommand(command, operationId)
     receipt:setString("permissionReceipt#server_id", command:getString("permissionCommand#server_id"))
     receipt:setString("permissionReceipt#save_id", command:getString("permissionCommand#save_id"))
     receipt:setString("permissionReceipt#revision", command:getString("permissionCommand#revision"))
+    receipt:setString("permissionReceipt#operation_type", "permission")
+    receipt:setString("permissionReceipt#role", "revoked")
+    receipt:setString("permissionReceipt#game_player_id", tostring(playerId or ""))
+    receipt:setInt("permissionReceipt#source_farm_id", sourceFarmId or 0)
+    receipt:setInt("permissionReceipt#target_farm_id", farmId or 0)
+    receipt:setBool("permissionReceipt#contracting_for", false)
+    receipt:setBool("permissionReceipt#authoritative_readback", applied)
     receipt:setString("permissionReceipt#status", applied and "applied" or "pending_validation")
     receipt:setString("permissionReceipt#receipt", reason)
     self:setReceiptWorldId(receipt, "permissionReceipt")
@@ -2293,12 +2360,13 @@ function FS25SiNServer:reconcileManagerAuthorityDrift()
                     end
                 end
             end
-            local contractorFarmId = contractors[uniqueId]
-            if contractorFarmId ~= nil and tonumber(contractorFarmId) ~= tonumber(farm.farmId) then
-                local contractorFarm = g_farmManager:getFarmById(tonumber(contractorFarmId))
-                if contractorFarm ~= nil then
+            local contractor = contractors[uniqueId]
+            if contractor ~= nil and tonumber(contractor.sourceFarmId) == tonumber(farm.farmId) then
+                local sourceFarm = g_farmManager:getFarmById(tonumber(contractor.sourceFarmId))
+                local contractorFarm = g_farmManager:getFarmById(tonumber(contractor.targetFarmId))
+                if sourceFarm ~= nil and contractorFarm ~= nil then
                     local contractorOk, contractorError = pcall(self.enforceAuthorizedContractorState,
-                        self, user, contractorFarm, "periodic-contractor")
+                        self, user, sourceFarm, contractorFarm, "periodic-contractor")
                     if not contractorOk then
                         Logging.error("[SiN Authorization] contractor drift repair failed uniqueUserId=%s farmId=%s error=%s",
                             self:shortIdentity(uniqueId), tostring(contractorFarm.farmId), tostring(contractorError))

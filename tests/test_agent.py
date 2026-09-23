@@ -616,7 +616,7 @@ class AgentTests(unittest.TestCase):
         response.status = 200
         response.read.return_value = json.dumps({
             "managers": [{"game_player_id": "stable-player", "farm_id": 2}],
-            "contractors": [{"game_player_id": "stable-player", "farm_id": 99}],
+            "contractors": [{"game_player_id": "stable-player", "farm_id": 99, "source_farm_id": 2}],
         }).encode("utf-8")
         response.__enter__.return_value = response
         with tempfile.TemporaryDirectory() as folder:
@@ -629,7 +629,7 @@ class AgentTests(unittest.TestCase):
             self.assertTrue(agent.process_manager_authority_once())
             authority = (root / "manager-authority.xml").read_text(encoding="utf-8")
             self.assertIn('manager gamePlayerId="stable-player" farmId="2"', authority)
-            self.assertIn('contractor gamePlayerId="stable-player" farmId="99"', authority)
+            self.assertIn('contractor gamePlayerId="stable-player" farmId="99" sourceFarmId="2"', authority)
 
     def test_map_geometry_event_preserves_farmland_identity_and_optional_geometry(self):
         with tempfile.TemporaryDirectory() as folder:

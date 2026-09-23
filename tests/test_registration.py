@@ -218,7 +218,10 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn('requestedRole == "revoked"', source)
         self.assertIn("processContractorRevocationCommand", source)
         self.assertIn("revokeAuthorizedContractorState", source)
-        self.assertIn("refusing to revoke contractor permissions from a farm manager", source)
+        self.assertIn("setIsContractingFor", source)
+        self.assertIn("getIsContractingFor", source)
+        self.assertIn("sourceFarmId", source)
+        self.assertIn("refusing to clean legacy contractor permissions from a farm manager", source)
 
     def test_server_runtime_exposes_read_only_economy_capability_probe(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(

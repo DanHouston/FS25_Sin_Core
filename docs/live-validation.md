@@ -148,18 +148,29 @@ The corrected policy is deterministically covered through Central, Agent XML,
 and a reference executor, but that is not GIANTS runtime proof. On the exact
 deployed artifact:
 
-1. Connect an approved, linked member who is Farm Manager of a personal farm.
-2. Confirm Central has both server/save-scoped memberships: personal
-   `farm_manager` and SiN Harvest `contractor`.
-3. Switch to SiN Harvest and run `sinPermissions`; confirm the contractor
-   permissions are present without changing the personal manager relationship.
+1. Connect an approved, linked member who is Farm Manager of a personal farm;
+   a player in FS25 farm 0 is intentionally ineligible until they join/create
+   a real source farm.
+2. Confirm Central has both server/save/world-scoped memberships: personal
+   `farm_manager` and SiN Harvest `contractor`, with `source_farm_id` equal to
+   the member's current farm and target equal to the authoritative SiN Harvest
+   farm ID.
+3. Confirm the Agent XML contains `sourceFarmId` and `farmId`, then run
+   `sinPermissions` after switching to the source farm. The server log and
+   receipt must show native `setIsContractingFor(targetFarmId, true)` followed
+   by `getIsContractingFor(targetFarmId)==true`; no target-farm membership is
+   required.
 4. Reconnect, restart the Agent, restart Central, and restart FS25 one at a
-   time; confirm the same two relationships are reconciled and remain usable.
-5. Repeat with another approved member and confirm neither membership changes
-   the other member's permissions.
+   time; confirm the same source-to-SiN Harvest edge is reconciled and remains
+   usable. A delayed/old-world receipt must be rejected and quarantined.
+5. Repeat with another approved member and confirm neither member's personal
+   manager relationship changes. Remember that native FS25 contracting is
+   farm-to-farm, so other members of the same source farm may inherit the edge.
 6. On a disposable identity whose approved membership is removed, confirm the
-   durable revocation receipt restores SiN Harvest defaults without demoting the
-   member's unrelated personal-farm manager authority.
+   durable native revocation receipt reads `contracting_for=false` and restores
+   the source farm's relationship without demoting the member's unrelated
+   personal-farm manager authority. If a legacy target-only row is present,
+   verify the bounded cleanup is receipt-gated; do not edit Mongo manually.
 
 Do not call shared contractor authority LIVE PASS until those observations and
 the exact release hash are retained.

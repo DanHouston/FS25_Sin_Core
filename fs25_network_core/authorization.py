@@ -459,14 +459,21 @@ class AuthorizationManager:
             raise ValueError("Request is unknown or already reviewed")
 
     def assign(self, discord_id, server_id, save_id, farm_id, role, farms, approved_by,
-               session=None, allow_unapproved_identity=False, idempotent=False, world_id=None):
+               session=None, allow_unapproved_identity=False, idempotent=False, world_id=None,
+               source_farm_id=None, source_farm_name=None):
         """Called only after the Discord/operator boundary authorizes approved_by."""
         if role not in ROLES or type(farm_id) is not int or farm_id <= 0 or not approved_by:
             raise ValueError("Invalid farm, role, or approver")
         if farm_id not in farms:
             raise ValueError("Farm is absent from the server snapshot")
+        if role == "contractor":
+            if type(source_farm_id) is not int or source_farm_id <= 0 or source_farm_id == farm_id:
+                raise ValueError("A contractor relationship requires a distinct positive source farm")
+            if source_farm_id not in farms:
+                raise ValueError("Source farm is absent from the server snapshot")
         user = str(discord_id)
-        relationship_id = key(server_id, save_id, world_id or "legacy", user, farm_id)
+        relationship_id = key(server_id, save_id, world_id or "legacy", user,
+                               source_farm_id if role == "contractor" else "manager", farm_id)
         operation_id = str(uuid.uuid4())
 
         def assign(session):
@@ -479,6 +486,8 @@ class AuthorizationManager:
                 raise ValueError("A registered game identity is required before manager authority can be assigned")
             relationship_query = {"server_id": server_id, "save_id": save_id,
                                   "discord_id": user, "farm_id": farm_id}
+            if role == "contractor":
+                relationship_query["source_farm_id"] = source_farm_id
             if world_id:
                 relationship_query["world_id"] = str(world_id)
             old = self.db.memberships.find_one(relationship_query, session=session)
@@ -522,6 +531,9 @@ class AuthorizationManager:
                           game_player_id=identity["game_player_id"], farm_id=farm_id,
                           farm_name=farms[farm_id], desired_role=role, applied_role=old.get("applied_role") if old else None,
                           revision=revision, state="pending", operation_id=operation_id, approved_by=str(approved_by))
+            if role == "contractor":
+                record["source_farm_id"] = source_farm_id
+                record["source_farm_name"] = source_farm_name or farms.get(source_farm_id, "")
             if world_id:
                 record["world_id"] = str(world_id)
             self.db.memberships.replace_one({"_id": membership_id}, record, upsert=True, session=session)
@@ -529,6 +541,8 @@ class AuthorizationManager:
                 server_id=server_id, save_id=save_id, game_player_id=identity["game_player_id"],
                 farm_id=farm_id, role=role, revision=revision, state="pending",
                 approved_by=str(approved_by), created_at=datetime.now(timezone.utc))
+            if role == "contractor":
+                job["source_farm_id"] = source_farm_id
             if world_id:
                 job["world_id"] = str(world_id)
             self.db.permission_jobs.insert_one(job, session=session)
@@ -536,7 +550,7 @@ class AuthorizationManager:
         return assign(session) if session is not None else self.database.atomic(assign)
 
     def revoke_contractor(self, discord_id, server_id, save_id, farm_id, approved_by,
-                          session=None, idempotent=True, world_id=None):
+                          session=None, idempotent=True, world_id=None, source_farm_id=None):
         """Durably remove a previously derived shared-farm contractor grant.
 
         This is deliberately narrower than a general farm-role editor.  The
@@ -546,15 +560,36 @@ class AuthorizationManager:
         """
         if type(farm_id) is not int or farm_id <= 0 or not approved_by:
             raise ValueError("Invalid farm or revocation approver")
+        if source_farm_id is not None and (type(source_farm_id) is not int or source_farm_id <= 0
+                                           or source_farm_id == farm_id):
+            raise ValueError("Invalid contractor source farm")
         user = str(discord_id)
 
         def revoke(session):
             relationship_query = {
                 "server_id": server_id, "save_id": save_id,
                 "discord_id": user, "farm_id": farm_id}
+            if source_farm_id is not None:
+                relationship_query["source_farm_id"] = source_farm_id
             if world_id:
                 relationship_query["world_id"] = str(world_id)
             relationship = self.db.memberships.find_one(relationship_query, session=session)
+            legacy_cleanup = False
+            if relationship is None and source_farm_id is not None:
+                # Pre-native-contractor records carried only the target farm.
+                # They are eligible for one bounded cleanup only when the
+                # current authoritative observation supplies the source farm.
+                legacy_query = {"server_id": server_id, "save_id": save_id,
+                                "discord_id": user, "farm_id": farm_id,
+                                "source_farm_id": {"$exists": False}}
+                if world_id:
+                    legacy_query["world_id"] = str(world_id)
+                legacy_rows = list(self.db.memberships.find(legacy_query, session=session).limit(2))
+                if len(legacy_rows) > 1:
+                    raise ValueError("Multiple legacy contractor relationships require reconciliation")
+                if legacy_rows:
+                    relationship = legacy_rows[0]
+                    legacy_cleanup = True
             if not relationship:
                 return None
             if relationship.get("desired_role") not in {"contractor", "revoked"} \
@@ -582,6 +617,17 @@ class AuthorizationManager:
                           farm_id=farm_id, desired_role="revoked", revision=revision,
                           state="pending", operation_id=operation_id,
                           approved_by=str(approved_by))
+            if source_farm_id is not None:
+                record["source_farm_id"] = source_farm_id
+            if legacy_cleanup:
+                self.db.permission_jobs.update_many(
+                    {"membership_id": membership_id, "role": "contractor",
+                     "source_farm_id": {"$exists": False},
+                     "state": {"$in": ["pending", "dispatched"]}},
+                    {"$set": {"state": "reconciliation_required",
+                              "reconciliation_reason": "legacy contractor job has no source farm",
+                              "updated_at": datetime.now(timezone.utc)}}, session=session)
+                record["legacy_cleanup"] = True
             if world_id:
                 record["world_id"] = str(world_id)
             self.db.memberships.replace_one({"_id": membership_id}, record, upsert=True, session=session)
@@ -590,16 +636,79 @@ class AuthorizationManager:
                 save_id=save_id, game_player_id=game_player_id, farm_id=farm_id,
                 role="revoked", revision=revision, state="pending",
                 approved_by=str(approved_by), created_at=datetime.now(timezone.utc))
+            if source_farm_id is not None:
+                job["source_farm_id"] = source_farm_id
+            if legacy_cleanup:
+                job["legacy_cleanup"] = True
             if world_id:
                 job["world_id"] = str(world_id)
             self.db.permission_jobs.insert_one(job, session=session)
             return operation_id
         return revoke(session) if session is not None else self.database.atomic(revoke)
 
+    @staticmethod
+    def _receipt_bool(receipt, key):
+        value = receipt.get(key)
+        return value is True or str(value).strip().lower() in {"true", "1", "yes"}
+
+    def _validate_permission_receipt(self, job, receipt):
+        """Validate structured authoritative FS25 read-back before applying a job."""
+        if not isinstance(receipt, dict):
+            raise ValueError("A structured permission receipt is required")
+        if receipt.get("operation_id") != job.get("_id"):
+            raise ValueError("Permission receipt does not match the queued operation")
+        if receipt.get("status") not in {"applied", "already_applied"}:
+            raise ValueError("Permission receipt is not an authoritative success")
+        if not str(receipt.get("receipt") or "").strip():
+            raise ValueError("Permission receipt explanation is required")
+        if job.get("role") == "contractor":
+            try:
+                source = int(receipt.get("source_farm_id"))
+                target = int(receipt.get("target_farm_id"))
+                expected_source = int(job.get("source_farm_id"))
+                expected_target = int(job.get("farm_id"))
+            except (TypeError, ValueError):
+                raise ValueError("Contractor receipt must include source and target farm read-back") from None
+            if (source, target) != (expected_source, expected_target):
+                raise ValueError("Contractor receipt farm relationship does not match the queued operation")
+            contracting = self._receipt_bool(receipt, "contracting_for")
+            expected = job.get("role") == "contractor"
+            if contracting != expected or not self._receipt_bool(receipt, "authoritative_readback"):
+                raise ValueError("Contractor receipt lacks authoritative relationship success evidence")
+        elif job.get("role") == "revoked":
+            try:
+                source = int(receipt.get("source_farm_id"))
+                target = int(receipt.get("target_farm_id"))
+                expected_source = int(job.get("source_farm_id"))
+                expected_target = int(job.get("farm_id"))
+            except (TypeError, ValueError):
+                raise ValueError("Contractor revocation receipt must include source and target farm read-back") from None
+            if (source, target) != (expected_source, expected_target) \
+                    or self._receipt_bool(receipt, "contracting_for") \
+                    or not self._receipt_bool(receipt, "authoritative_readback"):
+                raise ValueError("Contractor revocation lacks authoritative relationship success evidence")
+        elif job.get("role") == "farm_manager":
+            try:
+                target = int(receipt.get("farm_id"))
+                current = int(receipt.get("current_farm_id"))
+            except (TypeError, ValueError):
+                raise ValueError("Manager receipt must include current farm read-back") from None
+            if target != int(job.get("farm_id")) or current != target \
+                    or not self._receipt_bool(receipt, "manager") \
+                    or not self._receipt_bool(receipt, "authoritative_readback"):
+                raise ValueError("Manager receipt lacks authoritative success evidence")
+        else:
+            # Legacy worker/visitor roles have no native adapter in this
+            # runtime.  Keep the generic boundary receipt-gated and require a
+            # role-specific authoritative read-back before they can ever be
+            # committed; a manager receipt must never satisfy another role.
+            if receipt.get("role") != job.get("role") \
+                    or not self._receipt_bool(receipt, "permission_applied") \
+                    or not self._receipt_bool(receipt, "authoritative_readback"):
+                raise ValueError("Permission receipt lacks role-specific authoritative success evidence")
+
     def acknowledge(self, operation_id, authenticated_server_id, save_id, revision, receipt, world_id=None):
         """Only after the mod confirms the exact job was applied and persisted."""
-        if not receipt:
-            raise ValueError("A durable mod receipt is required")
 
         def acknowledge(session):
             query = {"_id": operation_id, "server_id": authenticated_server_id,
@@ -609,6 +718,21 @@ class AuthorizationManager:
             job = self.db.permission_jobs.find_one(query, session=session)
             if not job:
                 raise ValueError("Unknown operation or wrong server/save/revision")
+            try:
+                self._validate_permission_receipt(job, receipt)
+            except ValueError:
+                if job.get("state") in {"pending", "dispatched"}:
+                    now = datetime.now(timezone.utc)
+                    self.db.permission_jobs.update_one({"_id": operation_id,
+                        "state": {"$in": ["pending", "dispatched"]}},
+                        {"$set": {"state": "reconciliation_required", "receipt": receipt,
+                                  "updated_at": now}}, session=session)
+                    self.db.memberships.update_one({"_id": job["membership_id"],
+                        "operation_id": operation_id, "revision": revision,
+                        "state": {"$in": ["pending", "active"]}},
+                        {"$set": {"state": "reconciliation_required", "receipt": receipt,
+                                  "updated_at": now}}, session=session)
+                raise
             if job["state"] == "applied":
                 return "applied"
             result = self.db.memberships.update_one({"_id": job["membership_id"], "operation_id": operation_id,

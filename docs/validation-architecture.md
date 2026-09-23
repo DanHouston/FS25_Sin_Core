@@ -82,6 +82,17 @@ python scripts/validate_release.py release --version <version> --require-clean
 The tag workflow runs the same static check, complete suite, compile/diff
 proof, build, and packaged-artifact validator before `gh release create`.
 
+Authority receipts have their own fail-closed contract inside the contract and
+integration layers. A permission job is not applied merely because a receipt
+file exists or says `applied`: manager receipts must read back the matching
+current farm and manager state; contractor/revocation receipts must read back
+the matching `source_farm_id -> target_farm_id` native relationship; and any
+unsupported role must provide a role-specific authoritative read-back. Pending,
+failed, false, malformed, wrong-save, or wrong-generation receipts are retained
+as bounded reconciliation evidence and are never committed as applied. The
+Agent quarantines permanent HTTP rejection and malformed receipts so an old
+Hobo/Courtright message cannot retry forever.
+
 ## Remaining live-only gaps
 
 The static gate is intentionally not described as a GIANTS compiler. A real
@@ -91,4 +102,3 @@ geometry extraction, Discord attachment delivery, Mongo durability, and all
 authoritative farm/land/authority operations. FS25 money, loans, teleport,
 farm deletion, and asset mutation remain capability-gated and are not enabled
 by this validation work.
-

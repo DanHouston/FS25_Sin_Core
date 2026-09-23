@@ -370,10 +370,17 @@ class SharedContractorAuthorityTests(unittest.TestCase):
         self.db = self.database.db
         self.db.sin_farms.insert_one({"_id": "sin-harvest", "server_key": "server", "save_key": "save",
             "farm_type": "system", "canonical_name": "SiN Harvest", "state": "active", "fs25_farm_id": 99})
+        self.lifecycle.record_snapshot("server", "save", {
+            "source": "game", "world_id": "world-a",
+            "farms": {"2": "Repton Does", "99": "SiN Harvest"},
+            "farmlands": {"22": 0}, "players": {}})
 
-    def approved_identity(self, discord_id, player_id):
+    def approved_identity(self, discord_id, player_id, farm_id=2):
         self.db.game_identities.insert_one({"server_id": "server", "save_id": "save",
             "discord_id": discord_id, "game_player_id": player_id, "fs25_unique_user_id": player_id})
+        self.db.observed_fs25_identities.insert_one({"server_key": "server", "save_key": "save",
+            "world_id": "world-a", "fs25_unique_user_id": player_id, "current_farm_id": farm_id,
+            "last_seen_at": "now"})
         self.db.community_applications.insert_one({"_id": discord_id, "state": "approved",
             "farm_name": discord_id + " Farm"})
 
@@ -397,7 +404,10 @@ class SharedContractorAuthorityTests(unittest.TestCase):
         self.assertEqual((job["server_id"], job["save_id"], job["game_player_id"], job["farm_id"], job["role"]),
                          ("server", "save", "stable-repton", 99, "contractor"))
 
-        self.authorization.acknowledge(job["_id"], "server", "save", job["revision"], "fs25-receipt")
+        self.authorization.acknowledge(job["_id"], "server", "save", job["revision"], {
+            "operation_id": job["_id"], "status": "applied", "receipt": "contractor relation verified",
+            "source_farm_id": 2, "target_farm_id": 99, "contracting_for": True,
+            "authoritative_readback": True}, world_id="world-a")
         relationships = self.memberships_for("repton")
         self.assertEqual([(row["farm_id"], row["desired_role"], row["applied_role"], row["state"])
                           for row in relationships], [
@@ -426,9 +436,62 @@ class SharedContractorAuthorityTests(unittest.TestCase):
 
         self.approved_identity("repton", "stable-repton")
         self.db.sin_farms.insert_one({"_id": "duplicate", "server_key": "server", "save_key": "save",
-            "farm_type": "system", "canonical_name": "SiN Harvest", "state": "active", "fs25_farm_id": 100})
+            "farm_type": "system", "canonical_name": "SiN Harvest", "state": "active", "fs25_farm_id": 100,
+            "world_id": "world-a"})
         self.lifecycle.operations_for("server", "save")
         self.assertIsNone(self.db.memberships.find_one({"discord_id": "repton"}))
+
+    def test_farm_zero_is_not_a_contractor_source_until_player_joins_farm(self):
+        self.approved_identity("repton", "stable-repton", farm_id=0)
+        self.lifecycle.operations_for("server", "save")
+        self.assertIsNone(self.db.memberships.find_one({"discord_id": "repton"}))
+        self.db.observed_fs25_identities.update_one(
+            {"fs25_unique_user_id": "stable-repton"}, {"$set": {"current_farm_id": 2}})
+        self.lifecycle.operations_for("server", "save")
+        membership = self.db.memberships.find_one({"discord_id": "repton", "farm_id": 99})
+        self.assertEqual((membership["source_farm_id"], membership["state"]), (2, "pending"))
+
+    def test_reconciliation_required_false_positive_is_reissued_not_committed(self):
+        self.approved_identity("repton", "stable-repton")
+        self.lifecycle.operations_for("server", "save")
+        first = self.db.permission_jobs.find_one({"role": "contractor"})
+        with self.assertRaises(ValueError):
+            self.authorization.acknowledge(first["_id"], "server", "save", first["revision"], {
+                "operation_id": first["_id"], "status": "pending_validation", "receipt": "false positive",
+                "source_farm_id": 2, "target_farm_id": 99, "contracting_for": False,
+                "authoritative_readback": False}, world_id="world-a")
+        self.assertEqual(self.db.memberships.find_one({"_id": first["membership_id"]})["state"],
+                         "reconciliation_required")
+        self.lifecycle.operations_for("server", "save")
+        second = self.db.permission_jobs.find_one({"membership_id": first["membership_id"], "revision": 2})
+        self.assertEqual(second["state"], "pending")
+        self.authorization.acknowledge(second["_id"], "server", "save", second["revision"], {
+            "operation_id": second["_id"], "status": "applied", "receipt": "contractor relation verified",
+            "source_farm_id": 2, "target_farm_id": 99, "contracting_for": True,
+            "authoritative_readback": True}, world_id="world-a")
+        self.assertEqual(self.db.memberships.find_one({"_id": first["membership_id"]})["state"], "active")
+
+    def test_legacy_target_only_contractor_is_quarantined_then_receipt_gated_cleanup(self):
+        self.approved_identity("repton", "stable-repton")
+        self.db.memberships.insert_one({"_id": "legacy", "server_id": "server", "save_id": "save",
+            "world_id": "world-a", "discord_id": "repton", "game_player_id": "stable-repton",
+            "farm_id": 99, "desired_role": "contractor", "applied_role": "contractor",
+            "state": "active", "operation_id": "legacy-op", "revision": 1})
+        self.db.permission_jobs.insert_one({"_id": "legacy-job", "membership_id": "legacy",
+            "server_id": "server", "save_id": "save", "game_player_id": "stable-repton",
+            "farm_id": 99, "role": "contractor", "revision": 1, "state": "pending"})
+        self.lifecycle.operations_for("server", "save")
+        membership = self.db.memberships.find_one({"_id": "legacy"})
+        revoke = self.db.permission_jobs.find_one({"membership_id": "legacy", "role": "revoked"})
+        self.assertEqual((membership["source_farm_id"], membership["legacy_cleanup"], membership["state"]),
+                         (2, True, "pending"))
+        self.assertEqual(self.db.permission_jobs.find_one({"_id": "legacy-job"})["state"],
+                         "reconciliation_required")
+        self.authorization.acknowledge(revoke["_id"], "server", "save", revoke["revision"], {
+            "operation_id": revoke["_id"], "status": "applied", "receipt": "legacy relation removed",
+            "source_farm_id": 2, "target_farm_id": 99, "contracting_for": False,
+            "authoritative_readback": True}, world_id="world-a")
+        self.assertEqual(self.db.memberships.find_one({"_id": "legacy"})["state"], "revoked")
 
     def test_loss_of_approval_revokes_only_the_shared_relationship_after_receipt(self):
         self.approved_identity("repton", "stable-repton")
@@ -438,7 +501,10 @@ class SharedContractorAuthorityTests(unittest.TestCase):
             "operation_id": "personal-op", "revision": 1})
         self.lifecycle.operations_for("server", "save")
         grant = self.db.permission_jobs.find_one({"farm_id": 99, "role": "contractor"})
-        self.authorization.acknowledge(grant["_id"], "server", "save", grant["revision"], "grant-receipt")
+        self.authorization.acknowledge(grant["_id"], "server", "save", grant["revision"], {
+            "operation_id": grant["_id"], "status": "applied", "receipt": "contractor relation verified",
+            "source_farm_id": 2, "target_farm_id": 99, "contracting_for": True,
+            "authoritative_readback": True}, world_id="world-a")
         self.db.community_applications.update_one({"_id": "repton"}, {"$set": {"state": "denied"}})
 
         self.lifecycle.operations_for("server", "save")
@@ -446,7 +512,10 @@ class SharedContractorAuthorityTests(unittest.TestCase):
         revoke = self.db.permission_jobs.find_one({"membership_id": shared["_id"], "role": "revoked"})
         self.assertEqual((shared["desired_role"], shared["applied_role"], shared["state"]),
                          ("revoked", "contractor", "pending"))
-        self.authorization.acknowledge(revoke["_id"], "server", "save", revoke["revision"], "revoke-receipt")
+        self.authorization.acknowledge(revoke["_id"], "server", "save", revoke["revision"], {
+            "operation_id": revoke["_id"], "status": "applied", "receipt": "contractor relation revoked",
+            "source_farm_id": 2, "target_farm_id": 99, "contracting_for": False,
+            "authoritative_readback": True}, world_id="world-a")
 
         personal = self.db.memberships.find_one({"_id": "personal"})
         shared = self.db.memberships.find_one({"discord_id": "repton", "farm_id": 99})

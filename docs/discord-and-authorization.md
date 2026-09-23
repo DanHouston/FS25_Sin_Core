@@ -48,18 +48,33 @@ switching farms. The FS25_SiN_Server authority loop only demotes a manager when 
 matching persisted SiN manager authorization exists; joining a farm never grants
 manager status.
 
-Every linked identity whose community application is currently approved receives
-a separate, server/save-scoped **contractor** relationship for the one active
-`SiN Harvest` system-farm mapping. This is a derived relationship, not the
-member's primary farm: for example, Repton can remain `farm_manager` of Repton
-Does / Farm 2 while independently holding `contractor` access to SiN Harvest.
-The normal Central operations poll reconciles all approved identities, including
-members who existed before the feature was deployed; reconnects and service or
-FS25 restarts therefore do not require re-registration or a manual per-member
-grant. A missing, duplicate, inactive, or invalid system-farm mapping grants
-nothing. If approval is later lost, Central queues a contractor-only revocation
-through the same durable permission-command/receipt path. It never demotes or
-overwrites the member's personal manager relationship.
+Every linked identity whose community application is currently approved and
+whose current FS25 observation shows a real source farm (`farm_id > 0`) receives
+a separate, server/save/world-scoped **contractor** relationship for the one
+active `SiN Harvest` system-farm mapping. The relationship is the native FS25
+farm-to-farm edge `source farm -> SiN Harvest`; it is not a player permission
+row and it is not the member's primary farm. A player with `farm_id=0` has no
+source farm and therefore receives no contractor operation until a later
+authoritative snapshot shows that they joined/created a valid farm. For example,
+Repton can remain `farm_manager` of Repton Does / Farm 2 while independently
+holding native contractor access from Farm 2 to SiN Harvest. Other members of
+Farm 2 may consequently inherit the same vanilla farm-level contracting edge;
+that is the deliberate FS25 security boundary, not an individual-player grant.
+
+The normal Central operations poll reconciles all eligible approved identities,
+including members who existed before the feature was deployed; reconnects and
+service or FS25 restarts therefore do not require re-registration or a manual
+per-member grant. A missing, duplicate, inactive, invalid, or farm-0 source
+observation grants nothing. If approval is later lost or the source farm
+changes, Central queues a contractor-only native revocation through the same
+durable permission-command/receipt path. It never demotes or overwrites the
+member's personal manager relationship. Pre-native target-only records are
+treated as non-authorizing legacy residue and are cleaned only through an
+explicit receipt-gated native revocation when a current source farm is known.
+Pending, failed, false, malformed, or wrong-generation receipts move the job to
+`reconciliation_required`; only a structured receipt containing matching source
+and target farms plus an authoritative FS25 read-back can commit `active` or
+`revoked`.
 
 Players request a farm. Only Network Admins associate Discord identities with
 observed game players and farms. `/link` is removed on the next successful guild

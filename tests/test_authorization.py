@@ -82,8 +82,10 @@ class AuthorizationTests(unittest.TestCase):
 
         self.auth.assign("123", "server", "save", 2, "farm_manager", {2: "Personal"},
                          "farm-approval", allow_unapproved_identity=True)
-        self.auth.assign("123", "server", "save", 99, "contractor", {99: "SiN Harvest"},
-                         "farm-approval", allow_unapproved_identity=True)
+        self.auth.assign("123", "server", "save", 99, "contractor",
+                         {2: "Personal", 99: "SiN Harvest"}, "farm-approval",
+                         allow_unapproved_identity=True, source_farm_id=2,
+                         source_farm_name="Personal")
 
         records = [call.args[1] for call in self.db.memberships.replace_one.call_args_list]
         self.assertEqual([(record["farm_id"], record["desired_role"]) for record in records],
@@ -114,16 +116,49 @@ class AuthorizationTests(unittest.TestCase):
         self.db.memberships.update_one.assert_not_called()
 
     def test_replayed_acknowledgment_does_not_apply_again(self):
-        self.db.permission_jobs.find_one.return_value = {"state": "applied"}
-        self.assertEqual(self.auth.acknowledge("job", "server", "save", 1, "receipt"), "applied")
+        self.db.permission_jobs.find_one.return_value = {"_id": "job", "state": "applied",
+                                                         "role": "farm_manager", "farm_id": 2}
+        receipt = {"operation_id": "job", "status": "applied", "receipt": "already applied",
+                   "farm_id": 2, "current_farm_id": 2, "manager": True,
+                   "authoritative_readback": True}
+        self.assertEqual(self.auth.acknowledge("job", "server", "save", 1, receipt), "applied")
         self.db.memberships.update_one.assert_not_called()
 
     def test_revocation_acknowledgment_marks_membership_revoked(self):
-        self.db.permission_jobs.find_one.return_value = dict(state="pending", membership_id="member", role="revoked")
+        self.db.permission_jobs.find_one.return_value = dict(_id="job", state="pending", membership_id="member",
+                                                             role="revoked", farm_id=99, source_farm_id=2)
         self.db.memberships.update_one.return_value.modified_count = 1
-        self.auth.acknowledge("job", "server", "save", 2, "receipt")
+        receipt = {"operation_id": "job", "status": "applied", "receipt": "revoked and verified",
+                   "source_farm_id": 2, "target_farm_id": 99, "contracting_for": False,
+                   "authoritative_readback": True}
+        self.auth.acknowledge("job", "server", "save", 2, receipt)
         update = self.db.memberships.update_one.call_args.args[1]["$set"]
         self.assertEqual(update, {"applied_role": "revoked", "state": "revoked"})
+
+    def test_pending_or_false_authority_receipt_cannot_commit_permission(self):
+        self.db.permission_jobs.find_one.return_value = {
+            "_id": "job", "state": "pending", "membership_id": "member", "role": "contractor",
+            "farm_id": 99, "source_farm_id": 2, "revision": 1}
+        self.db.memberships.update_one.return_value.modified_count = 1
+        receipt = {"operation_id": "job", "status": "pending_validation", "receipt": "not verified",
+                   "source_farm_id": 2, "target_farm_id": 99, "contracting_for": False,
+                   "authoritative_readback": False}
+        with self.assertRaisesRegex(ValueError, "not an authoritative success"):
+            self.auth.acknowledge("job", "server", "save", 1, receipt)
+        update = self.db.permission_jobs.update_one.call_args.args[1]["$set"]
+        self.assertEqual(update["state"], "reconciliation_required")
+        self.assertNotIn("applied_role", update)
+
+    def test_manager_receipt_cannot_be_satisfied_by_generic_success_text(self):
+        self.db.permission_jobs.find_one.return_value = {
+            "_id": "job", "state": "pending", "membership_id": "member", "role": "farm_manager",
+            "farm_id": 2, "revision": 1}
+        self.db.memberships.update_one.return_value.modified_count = 1
+        receipt = {"operation_id": "job", "status": "applied", "receipt": "ok",
+                   "farm_id": 2, "current_farm_id": 2, "manager": False,
+                   "authoritative_readback": False}
+        with self.assertRaisesRegex(ValueError, "authoritative success evidence"):
+            self.auth.acknowledge("job", "server", "save", 1, receipt)
 
     def test_shared_contractor_revocation_is_a_new_receipt_gated_revision(self):
         self.db.memberships.find_one.return_value = {

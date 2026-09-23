@@ -376,7 +376,8 @@ class PairingAgent:
             for contractor in contractors:
                 if isinstance(contractor, dict) and contractor.get("game_player_id") is not None:
                     ElementTree.SubElement(root, "contractor", gamePlayerId=str(contractor["game_player_id"]),
-                                            farmId=str(contractor.get("farm_id", 0)))
+                                            farmId=str(contractor.get("farm_id", 0)),
+                                            sourceFarmId=str(contractor.get("source_farm_id", 0)))
             destination = self.directory / "manager-authority.xml"
             temporary = destination.with_suffix(".tmp")
             ElementTree.ElementTree(root).write(temporary, encoding="utf-8", xml_declaration=True)

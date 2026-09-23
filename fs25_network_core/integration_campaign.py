@@ -883,14 +883,16 @@ def _semantic_shared_contractor_authority(root: Path) -> Mapping[str, object]:
                     "server_id": "sin-campaign", "save_id": "campaign-save", "state": "pending"}))
                 return _Response({"operations": [{"operation_id": job["_id"], "operation_type": "permission",
                     "server_key": "sin-campaign", "save_key": "campaign-save", "state": "pending",
-                    "payload": {key: job[key] for key in ("game_player_id", "farm_id", "role", "revision")}}
+                    "payload": {**{key: job[key] for key in ("game_player_id", "farm_id", "role", "revision")},
+                                **({"source_farm_id": job["source_farm_id"]}
+                                   if job.get("source_farm_id") is not None else {})}}
                     for job in jobs]})
             if path.endswith("/api/server/operation-receipts"):
                 payload = json.loads(request.data.decode("utf-8"))
                 receipt = payload["receipt"]
                 self.receipt_calls += 1
                 state = self.authorization.acknowledge(receipt["operation_id"], "sin-campaign",
-                    "campaign-save", int(receipt["revision"]), receipt.get("receipt"))
+                    "campaign-save", int(receipt["revision"]), receipt, receipt.get("world_id"))
                 return _Response({"status": "accepted", "operation_id": receipt["operation_id"], "state": state})
             raise AssertionError(f"unexpected shared authority endpoint: {path}")
 
@@ -907,6 +909,12 @@ def _semantic_shared_contractor_authority(root: Path) -> Mapping[str, object]:
         "discord_id": "repton", "game_player_id": "stable-repton", "farm_id": 2,
         "desired_role": "farm_manager", "applied_role": "farm_manager", "state": "active",
         "operation_id": "personal-op", "revision": 1})
+    lifecycle.record_snapshot("sin-campaign", "campaign-save", {
+        "source": "game", "world_id": "campaign-world-a",
+        "farms": {"2": "Campaign Farm", "99": "SiN Harvest"},
+        "farmlands": {"22": 0}, "players": {}})
+    database.db.observed_fs25_identities.insert_one({"server_key": "sin-campaign", "save_key": "campaign-save",
+        "world_id": "campaign-world-a", "fs25_unique_user_id": "stable-repton", "current_farm_id": 2})
     _write_binding_and_snapshot(root)
     central = SharedAuthorityCentral(lifecycle, authorization)
     agent = PairingAgent(root, "http://offline", central)

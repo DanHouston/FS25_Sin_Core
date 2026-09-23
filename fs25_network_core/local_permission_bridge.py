@@ -42,7 +42,15 @@ class LocalPermissionBridge:
             "save_id": self.save_id, "state": "pending"})
         delivered = []
         for job in jobs:
+            if job.get("role") == "contractor" and not job.get("source_farm_id"):
+                # Pre-native target-only jobs are historical residue, not a
+                # safe command. Central normally quarantines them during its
+                # operations poll; keep this local bridge fail-closed too.
+                continue
             payload = {key: job[key] for key in ("_id", "server_id", "save_id", "game_player_id", "farm_id", "role", "revision")}
+            for key in ("source_farm_id", "legacy_cleanup"):
+                if key in job:
+                    payload[key] = job[key]
             destination = self.commands / (job["_id"] + ".xml")
             if not destination.exists():
                 temporary = destination.with_suffix(".tmp")
@@ -88,10 +96,11 @@ class LocalPermissionBridge:
                 continue
             ET.SubElement(authority, "manager", gamePlayerId=manager["game_player_id"], farmId=str(manager["farm_id"]))
         for contractor in relationships:
-            if contractor.get("desired_role") != "contractor":
+            if contractor.get("desired_role") != "contractor" or not contractor.get("source_farm_id"):
                 continue
             ET.SubElement(authority, "contractor", gamePlayerId=contractor["game_player_id"],
-                          farmId=str(contractor["farm_id"]))
+                          farmId=str(contractor["farm_id"]),
+                          sourceFarmId=str(contractor.get("source_farm_id", 0)))
         temporary = self.directory / "manager-authority.tmp"
         ET.ElementTree(authority).write(temporary, encoding="utf-8", xml_declaration=True)
         temporary.replace(self.directory / "manager-authority.xml")
@@ -102,15 +111,22 @@ class LocalPermissionBridge:
             return []
         applied = []
         for path in self.receipts.glob("*.xml"):
-            receipt = ET.parse(path).getroot().attrib
-            required = {"operation_id", "server_id", "save_id", "revision", "status", "receipt"}
-            if not required.issubset(receipt) or receipt["status"] != "applied":
-                continue
-            if receipt["server_id"] != self.server_id or receipt["save_id"] != self.save_id:
-                continue
-            self.authorization.acknowledge(receipt["operation_id"], self.server_id, self.save_id,
-                                           int(receipt["revision"]), receipt["receipt"])
-            applied.append(receipt["operation_id"])
+            try:
+                receipt = ET.parse(path).getroot().attrib
+                required = {"operation_id", "server_id", "save_id", "revision", "status", "receipt"}
+                if not required.issubset(receipt) or receipt["status"] not in {"applied", "already_applied"}:
+                    raise ValueError("receipt is not a definitive success")
+                if receipt["server_id"] != self.server_id or receipt["save_id"] != self.save_id:
+                    raise ValueError("receipt scope does not match this bridge")
+                self.authorization.acknowledge(receipt["operation_id"], self.server_id, self.save_id,
+                                               int(receipt["revision"]), receipt, receipt.get("world_id"))
+                applied.append(receipt["operation_id"])
+            except (ET.ParseError, KeyError, TypeError, ValueError, OSError):
+                failed = path.with_suffix(path.suffix + ".failed")
+                try:
+                    path.replace(failed)
+                except OSError:
+                    LOG.warning("could not quarantine invalid permission receipt path=%s", path)
         return applied
 
     def process_events(self, publisher=None):

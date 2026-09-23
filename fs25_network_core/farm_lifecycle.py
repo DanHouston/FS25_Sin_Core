@@ -288,6 +288,72 @@ class FarmLifecycle:
             return None
         return mapping if farm_id > 0 else None
 
+    def _current_observed_farm(self, server_key, save_key, identity):
+        """Return the current-world source farm observed for one identity.
+
+        Contractor authority is a native FS25 farm-to-farm relationship.  A
+        stable identity alone is insufficient: the player must currently have
+        a real source farm.  Farm 0/spectator and missing observations are
+        deliberately treated as ineligible until the next authoritative
+        snapshot/activity observation.
+        """
+        unique_id = str(identity.get("fs25_unique_user_id") or identity.get("game_player_id") or "").strip()
+        if not unique_id:
+            return None
+        query = {"server_key": server_key, "save_key": save_key,
+                 "fs25_unique_user_id": unique_id}
+        world_id = self.current_world_id(server_key, save_key)
+        if world_id:
+            query["world_id"] = str(world_id)
+        try:
+            observed = self.db.observed_fs25_identities.find_one(
+                query, sort=[("last_seen_at", -1)])
+        except TypeError:
+            observed = self.db.observed_fs25_identities.find_one(query)
+        if not isinstance(observed, dict):
+            return None
+        try:
+            farm_id = int(observed.get("current_farm_id", 0) or 0)
+        except (TypeError, ValueError):
+            return None
+        return farm_id if farm_id > 0 else None
+
+    def _current_farm_names(self, server_key, save_key):
+        snapshot = self.latest_snapshot(server_key, save_key)
+        farms = snapshot.get("farms") if isinstance(snapshot, dict) else None
+        if not isinstance(farms, dict):
+            return {}
+        result = {}
+        for farm_id, name in farms.items():
+            try:
+                result[int(farm_id)] = str(name or "")
+            except (TypeError, ValueError):
+                continue
+        return result
+
+    def _quarantine_legacy_contractor(self, relationship, reason):
+        """Remove a pre-native contractor row from actionable authority.
+
+        The old implementation had no source-farm evidence and therefore
+        cannot safely be treated as a current farm-to-farm grant.  Keep the
+        record for audit/recovery, but make it non-actionable until a bounded
+        native cleanup or explicit operator reconciliation completes.
+        """
+        if relationship.get("state") in {"active", "pending", "dispatched"}:
+            self.db.memberships.update_one(
+                {"_id": relationship.get("_id"),
+                 "state": {"$in": ["active", "pending", "dispatched"]}},
+                {"$set": {"state": "reconciliation_required",
+                          "reconciliation_reason": reason[:300],
+                          "updated_at": self._now()}})
+        self.db.permission_jobs.update_many(
+            {"membership_id": relationship.get("_id"), "role": "contractor",
+             "source_farm_id": {"$exists": False},
+             "state": {"$in": ["pending", "dispatched"]}},
+            {"$set": {"state": "reconciliation_required",
+                      "reconciliation_reason": reason[:300],
+                      "updated_at": self._now()}})
+
     def _reconcile_shared_contractor_authorizations(self, server_key, save_key):
         """Derive SiN Harvest access for every currently approved identity.
 
@@ -300,6 +366,7 @@ class FarmLifecycle:
         if not system:
             return {}
         shared_farm_id = int(system["fs25_farm_id"])
+        farm_names = self._current_farm_names(server_key, save_key)
         eligible = {}
         identities = self.db.game_identities.find({"server_id": server_key, "save_id": save_key})
         for identity in identities:
@@ -308,17 +375,40 @@ class FarmLifecycle:
                 continue
             application = self.db.community_applications.find_one(
                 {"_id": discord_id, "state": "approved"})
-            if application:
-                eligible[discord_id] = identity
+            source_farm_id = self._current_observed_farm(server_key, save_key, identity) \
+                if application else None
+            # A player in spectator/farm 0 has no native source farm.  Do not
+            # manufacture a relationship; the next current-farm observation
+            # will make the normal reconciliation path eligible.
+            if application and source_farm_id and source_farm_id != shared_farm_id \
+                    and source_farm_id in farm_names:
+                eligible[discord_id] = dict(identity,
+                                            source_farm_id=source_farm_id,
+                                            source_farm_name=farm_names[source_farm_id])
 
+        # A pre-native row has target-farm permissions but no provable source
+        # farm.  Clean that residue first; do not create a second native grant
+        # in the same poll, because the cleanup must remain receipt-gated.
+        membership_scope = {"server_id": server_key, "save_id": save_key, "farm_id": shared_farm_id}
+        world_id = self.current_world_id(server_key, save_key)
+        if world_id:
+            membership_scope["world_id"] = world_id
+        existing_relationships = list(self.db.memberships.find({
+            **membership_scope, "desired_role": {"$in": ["contractor", "revoked"]}}))
+        legacy_users = {str(row.get("discord_id")) for row in existing_relationships
+                        if row.get("desired_role") == "contractor" and not row.get("source_farm_id")}
         operations = {}
         for discord_id in sorted(eligible):
+            if discord_id in legacy_users:
+                continue
             try:
                 operation = self.authorization.assign(
                     discord_id, server_key, save_key, shared_farm_id,
-                    "contractor", {shared_farm_id: SYSTEM_FARM_NAME},
+                    "contractor", {shared_farm_id: SYSTEM_FARM_NAME,
+                                    eligible[discord_id]["source_farm_id"]: eligible[discord_id]["source_farm_name"]},
                     "shared-contractor-policy", world_id=self.current_world_id(server_key, save_key), allow_unapproved_identity=True,
-                    idempotent=True)
+                    idempotent=True, source_farm_id=eligible[discord_id]["source_farm_id"],
+                    source_farm_name=eligible[discord_id]["source_farm_name"])
                 if operation:
                     operations[discord_id] = operation
             except ValueError:
@@ -327,21 +417,70 @@ class FarmLifecycle:
                 # suppress this grant rather than guess an authority target.
                 continue
 
-        membership_scope = {"server_id": server_key, "save_id": save_key, "farm_id": shared_farm_id}
-        world_id = self.current_world_id(server_key, save_key)
-        if world_id:
-            membership_scope["world_id"] = world_id
         relationships = self.db.memberships.find({
             **membership_scope,
             "desired_role": {"$in": ["contractor", "revoked"]}})
         for relationship in relationships:
             discord_id = str(relationship.get("discord_id") or "")
-            if discord_id in eligible or relationship.get("desired_role") == "revoked":
+            desired = eligible.get(discord_id)
+            relationship_source = relationship.get("source_farm_id")
+            try:
+                relationship_source = int(relationship_source) if relationship_source is not None else None
+            except (TypeError, ValueError):
+                relationship_source = None
+            if desired and relationship.get("desired_role") == "contractor" \
+                    and relationship_source == desired["source_farm_id"] \
+                    and relationship.get("state") in {"pending", "active"}:
                 continue
+            if desired and relationship.get("desired_role") == "contractor" \
+                    and relationship_source == desired["source_farm_id"] \
+                    and relationship.get("state") == "reconciliation_required":
+                try:
+                    operation = self.authorization.assign(
+                        discord_id, server_key, save_key, shared_farm_id,
+                        "contractor", {shared_farm_id: SYSTEM_FARM_NAME,
+                                        desired["source_farm_id"]: desired["source_farm_name"]},
+                        "shared-contractor-policy", world_id=world_id, allow_unapproved_identity=True,
+                        idempotent=True, source_farm_id=desired["source_farm_id"],
+                        source_farm_name=desired["source_farm_name"])
+                    if operation:
+                        operations[discord_id] = operation
+                except ValueError:
+                    pass
+                continue
+            if relationship.get("desired_role") == "revoked" \
+                    and relationship.get("state") in {"pending", "active", "reconciliation_required"}:
+                continue
+            if desired and relationship.get("desired_role") == "revoked" \
+                    and relationship.get("state") == "revoked":
+                try:
+                    operation = self.authorization.assign(
+                        discord_id, server_key, save_key, shared_farm_id,
+                        "contractor", {shared_farm_id: SYSTEM_FARM_NAME,
+                                        desired["source_farm_id"]: desired["source_farm_name"]},
+                        "shared-contractor-policy", world_id=world_id, allow_unapproved_identity=True,
+                        idempotent=True, source_farm_id=desired["source_farm_id"],
+                        source_farm_name=desired["source_farm_name"])
+                    if operation:
+                        operations[discord_id] = operation
+                except ValueError:
+                    continue
+                continue
+            if relationship_source is None:
+                if desired:
+                    # The known current source is sufficient to perform a
+                    # bounded cleanup of the pre-native target-permission
+                    # record; it is never exposed as current authority.
+                    relationship_source = desired["source_farm_id"]
+                else:
+                    self._quarantine_legacy_contractor(
+                        relationship, "legacy contractor relationship has no provable source farm")
+                    continue
             try:
                 operation = self.authorization.revoke_contractor(
                     discord_id, server_key, save_key, shared_farm_id,
-                    "shared-contractor-policy", world_id=world_id, idempotent=True)
+                    "shared-contractor-policy", world_id=world_id, idempotent=True,
+                    source_farm_id=relationship_source)
                 if operation:
                     operations[discord_id] = operation
             except ValueError:

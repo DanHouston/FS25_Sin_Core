@@ -91,10 +91,12 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
                     "world_id": str(world_id),
                     "state": "pending"}).sort("created_at", 1).limit(50))
                 for job in permission_jobs:
-                    operations.append({"operation_id": job["_id"], "operation_type": "permission",
-                        "server_key": record["server_key"], "save_key": save_key, "payload": {
+                        operations.append({"operation_id": job["_id"], "operation_type": "permission",
+                            "server_key": record["server_key"], "save_key": save_key, "payload": {
                             "game_player_id": job["game_player_id"], "farm_id": job["farm_id"],
-                            "role": job["role"], "revision": job["revision"]}, "state": "pending"})
+                            "role": job["role"], "revision": job["revision"],
+                            **({"source_farm_id": job["source_farm_id"]} if job.get("source_farm_id") is not None else {}),
+                            **({"legacy_cleanup": True} if job.get("legacy_cleanup") else {})}, "state": "pending"})
                 safe = [{key: operation.get(key) for key in
                          ("operation_id", "operation_type", "server_key", "save_key", "payload", "state")}
                         for operation in operations]
@@ -116,10 +118,13 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
                     "state": {"$in": ["pending", "active"]},
                     "desired_role": {"$in": ["farm_manager", "contractor"]}})
                 managers = [row for row in relationships if row.get("desired_role") == "farm_manager"]
-                contractors = [row for row in relationships if row.get("desired_role") == "contractor"]
+                contractors = [row for row in relationships
+                               if row.get("desired_role") == "contractor"
+                               and row.get("source_farm_id") not in (None, 0, "0")]
                 _json_response(self, 200, {"save_key": save_key, "managers": [
                     {"game_player_id": row["game_player_id"], "farm_id": row["farm_id"]} for row in managers],
-                    "contractors": [{"game_player_id": row["game_player_id"], "farm_id": row["farm_id"]}
+                    "contractors": [{"game_player_id": row["game_player_id"], "farm_id": row["farm_id"],
+                                     "source_farm_id": row["source_farm_id"]}
                                     for row in contractors]})
                 return
             policy = self.event_processor.registry.clock_policy(record["server_key"], save_key)
@@ -289,7 +294,7 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
             elif receipt.get("revision") is not None and receipt.get("operation_type") not in {"ensure_farm", "provision_farm"}:
                 result = self.event_processor.authorization.acknowledge(
                     receipt["operation_id"], record["server_key"], save_key,
-                    int(receipt["revision"]), receipt.get("receipt"), world_id)
+                    int(receipt["revision"]), receipt, world_id)
                 result = {"operation_id": receipt["operation_id"], "state": result}
             else:
                 result = self.farm_lifecycle.accept_receipt(record["server_key"], save_key, receipt, world_id)

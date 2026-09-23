@@ -50,6 +50,25 @@ class MailboxOperationHarness:
             for key in ("server_id", "save_id", "revision"):
                 if root.get(key) is not None:
                     receipt.set(key, root.get(key))
+            if root.get("world_id") is not None:
+                receipt.set("world_id", root.get("world_id"))
+            if root.get("operation_type") == "permission":
+                role = root.get("role", "")
+                receipt.set("role", role)
+                successful = status in {"applied", "already_applied"}
+                if role in {"contractor", "revoked"}:
+                    receipt.set("source_farm_id", root.get("source_farm_id", "0"))
+                    receipt.set("target_farm_id", root.get("farm_id", "0"))
+                    receipt.set("contracting_for", str(role == "contractor" and successful).lower())
+                    receipt.set("authoritative_readback", str(successful).lower())
+                elif role == "farm_manager":
+                    receipt.set("farm_id", root.get("farm_id", "0"))
+                    receipt.set("current_farm_id", root.get("farm_id", "0") if successful else "0")
+                    receipt.set("manager", str(successful).lower())
+                    receipt.set("authoritative_readback", str(successful).lower())
+                else:
+                    receipt.set("permission_applied", str(successful).lower())
+                    receipt.set("authoritative_readback", str(successful).lower())
             receipt.set("receipt", "deterministic reference executor")
             ElementTree.ElementTree(receipt).write(
                 receipt_path, encoding="utf-8", xml_declaration=True)
