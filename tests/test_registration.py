@@ -170,6 +170,23 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn('"modSettings/" .. SERVER_MAILBOX_NAME .. "/"', source)
         self.assertNotIn('"modSettings/FS25SiNServer/"', source)
 
+    def test_new_save_world_identity_retries_after_save_directory_becomes_available(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8"
+        )
+        identity = source[source.index("function FS25SiNServer:initializeWorldIdentity()"):]
+        identity = identity[:identity.index("function FS25SiNServer:shortIdentity")]
+        self.assertIn("self.worldIdentityRetryable = true", identity)
+        self.assertIn("self.worldIdentityRetryElapsed", source)
+        self.assertIn("self.worldIdentityRetryInterval = 5000", source)
+        self.assertIn("existing save marker is malformed; refusing world-scoped operations", identity)
+        self.assertIn("self.worldIdentityRetryable = false", identity)
+        self.assertIn('local path = tostring(saveDirectory) .. "FS25_SiN_Server_world.xml"', identity)
+        self.assertNotIn('self.directory .. "FS25_SiN_Server_world.xml"', identity)
+        update = source[source.index("function FS25SiNServer:update(dt)"):]
+        self.assertIn("self.worldIdentityRetryable == true", update)
+        self.assertIn("self:initializeWorldIdentity()", update)
+
     def test_updater_migration_is_complete_and_conflict_safe(self):
         source = (Path(__file__).parents[1] / "scripts" / "Update-SiN.ps1").read_text(encoding="utf-8")
         self.assertIn('[switch]$MigrateLegacyMailbox', source)

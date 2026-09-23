@@ -83,6 +83,12 @@ and receives a new marker. Restoring a copied save restores that save's marker.
 This is a SiN-managed marker, not a claimed GIANTS save UUID. Its location and
 `missionInfo.savegameDirectory` persistence are **LIVE VALIDATION REQUIRED**.
 
+Fresh saves can expose their save directory only after FS25 completes its first
+successful save. The server mod therefore keeps world-scoped traffic fail-closed
+and retries marker initialization during the same runtime when the directory or
+file-creation API was only temporarily unavailable. A readable marker with no
+world ID remains a hard failure and is never silently replaced.
+
 Until a snapshot bearing that marker reaches Central, every world-bound action
 is fail-closed. Central archives legacy/no-marker rows and prior marker rows;
 they remain audit history but cannot be served as current farms, farmland,

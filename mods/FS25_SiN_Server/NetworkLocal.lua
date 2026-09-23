@@ -48,10 +48,16 @@ end
 -- save has no marker and receives a different value before Central accepts
 -- any game-scoped command or authority material.
 function FS25SiNServer:initializeWorldIdentity()
+    -- A new FS25 save can expose its savegameDirectory only after the first
+    -- successful save.  Keep the runtime fail-closed while allowing that
+    -- transient startup condition to be retried; a readable but malformed
+    -- marker remains non-retryable so it is never silently replaced.
+    self.worldIdentityRetryable = false
     local info = g_currentMission ~= nil and g_currentMission.missionInfo or nil
     local saveDirectory = info ~= nil and info.savegameDirectory or nil
     if saveDirectory == nil or tostring(saveDirectory) == "" then
         self.worldIdentityReady = false
+        self.worldIdentityRetryable = true
         Logging.error("[SiN World] FS25 savegameDirectory is unavailable; refusing world-scoped operations")
         return false
     end
@@ -63,12 +69,19 @@ function FS25SiNServer:initializeWorldIdentity()
     if markerExists then
         if XMLFile == nil or XMLFile.load == nil then
             self.worldIdentityReady = false
-            Logging.error("[SiN World] cannot read existing save marker; refusing world-scoped operations")
+            self.worldIdentityRetryable = true
+            Logging.error("[SiN World] XMLFile.load is unavailable for the existing save marker; refusing world-scoped operations")
             return false
         end
         local loaded = XMLFile.load("networkLocalWorldIdentity", path)
-        worldId = loaded ~= nil and loaded:getString("sinWorldIdentity#worldId") or nil
-        if loaded ~= nil then loaded:delete() end
+        if loaded == nil then
+            self.worldIdentityReady = false
+            self.worldIdentityRetryable = true
+            Logging.error("[SiN World] existing save marker could not be loaded; refusing world-scoped operations")
+            return false
+        end
+        worldId = loaded:getString("sinWorldIdentity#worldId")
+        loaded:delete()
         -- A partial or malformed marker is ambiguous: silently replacing it
         -- would make one unchanged FS25 save look like a new world and could
         -- strand pending receipts.  Keep the runtime fail-closed for an
@@ -81,6 +94,8 @@ function FS25SiNServer:initializeWorldIdentity()
     else
         if XMLFile == nil or XMLFile.create == nil then
             self.worldIdentityReady = false
+            self.worldIdentityRetryable = true
+            Logging.error("[SiN World] XMLFile.create is unavailable for a new save marker; refusing world-scoped operations")
             return false
         end
         -- This is an opaque creation nonce, not a timestamp-derived identity:
@@ -89,15 +104,26 @@ function FS25SiNServer:initializeWorldIdentity()
         worldId = "sin-world-" .. tostring(getDate("%Y%m%d%H%M%S")) .. "-" .. tick
             .. "-" .. tostring(math.random(100000, 999999))
         local xml = XMLFile.create("networkLocalWorldIdentity", path, "sinWorldIdentity")
-        if xml == nil then self.worldIdentityReady = false; return false end
+        if xml == nil then
+            self.worldIdentityReady = false
+            self.worldIdentityRetryable = true
+            Logging.error("[SiN World] could not create a new save marker; refusing world-scoped operations")
+            return false
+        end
         xml:setString("sinWorldIdentity#worldId", worldId)
         xml:setInt("sinWorldIdentity#schemaVersion", 1)
         local saved = xml:save(); xml:delete()
-        if saved ~= true then self.worldIdentityReady = false; return false end
+        if saved ~= true then
+            self.worldIdentityReady = false
+            self.worldIdentityRetryable = true
+            Logging.error("[SiN World] could not save new world marker; refusing world-scoped operations")
+            return false
+        end
         Logging.info("[SiN World] initialized FS25-save marker=%s", self:shortIdentity(worldId))
     end
     self.worldId = tostring(worldId)
     self.worldIdentityReady = true
+    self.worldIdentityRetryable = false
     return true
 end
 
@@ -126,6 +152,10 @@ function FS25SiNServer:loadMap()
     createFolder(self.registrationRequestDirectory)
     createFolder(self.registrationResponseDirectory)
     self:initializeRuntimeGeneration()
+    self.worldIdentityReady = false
+    self.worldIdentityRetryable = true
+    self.worldIdentityRetryElapsed = 0
+    self.worldIdentityRetryInterval = 5000
     self:initializeWorldIdentity()
     self.bindingPath = self.directory .. "serverBinding.xml"
     self:loadServerBinding()
@@ -1261,6 +1291,14 @@ end
 function FS25SiNServer:update(dt)
     if g_currentMission ~= nil and g_currentMission:getIsClient() then
         self:updateClientRegistrationWarning(dt)
+    end
+    if not self.failed and g_currentMission ~= nil and self.worldIdentityReady ~= true
+        and self.worldIdentityRetryable == true then
+        self.worldIdentityRetryElapsed = self.worldIdentityRetryElapsed + dt
+        if self.worldIdentityRetryElapsed >= self.worldIdentityRetryInterval then
+            self.worldIdentityRetryElapsed = 0
+            self:initializeWorldIdentity()
+        end
     end
     if self.failed or g_currentMission == nil or not g_currentMission:getIsServer() then
         return
