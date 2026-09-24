@@ -72,6 +72,26 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(picker["save_key"], "hobo-save")
         self.assertEqual(picker["world_id"], "hobo-world")
 
+    async def test_farm_request_picker_blocks_existing_current_world_personal_farm_before_map_load(self):
+        self.bot.farm_lifecycle.current_world_id = MagicMock(return_value="world-a")
+        self.bot.farm_lifecycle.assert_personal_farm_request_allowed = MagicMock(
+            side_effect=ValueError("You already have a personal farm (Repton Does) in this current FS25 world"))
+        self.bot.ensure_registered_map = MagicMock(return_value=True)
+        with self.assertRaisesRegex(ValueError, "already have a personal farm"):
+            self.bot.farm_request_picker_context(
+                {"server_key": "server", "saves": [{"save_key": "save"}]}, "member")
+        self.bot.farm_lifecycle.assert_personal_farm_request_allowed.assert_called_once_with(
+            "member", "server", "save", world_id="world-a")
+        self.bot.ensure_registered_map.assert_not_called()
+
+    async def test_farm_request_command_passes_requester_to_current_world_guard(self):
+        source = Path(__file__).parents[1] / "fs25_network_core" / "bot_frontend.py"
+        text = source.read_text(encoding="utf-8")
+        self.assertIn(
+            "self.farm_request_picker_context, config, str(interaction.user.id)",
+            text,
+        )
+
     async def test_farm_request_view_rejects_other_user_and_submits_selected_field(self):
         view = FarmRequestView(self.bot, "member", "server", "save", "world-a", "Courtright", [
             {"field_id": 22, "farmland_id": 1}])

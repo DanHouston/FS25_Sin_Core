@@ -343,6 +343,48 @@ class FarmRequestReservationTests(unittest.TestCase):
             farmland_prices={22: 100_000})
         MapStore(self.database).persist("server", "save", model, world_id="world-a")
 
+    def test_existing_current_world_personal_farm_is_blocked_before_reservation(self):
+        self.db.sin_farms.insert_one({
+            "_id": "personal-a", "server_key": "server", "save_key": "save",
+            "world_id": "world-a", "farm_type": "member", "owner_discord_id": "member-a",
+            "canonical_name": "Farm A", "state": "active", "fs25_farm_id": 7,
+        })
+        with self.assertRaisesRegex(ValueError, "already have a personal farm"):
+            self.lifecycle.request_farm("member-a", "server", "save", 22,
+                                        world_id="world-a", field_id=1)
+        self.assertIsNone(self.db.farm_requests.find_one({"discord_id": "member-a"}))
+        self.assertIsNone(self.db.farm_field_reservations.find_one({"farmland_id": 22}))
+
+    def test_existing_current_world_request_is_blocked_before_second_reservation(self):
+        first = self.lifecycle.request_farm("member-a", "server", "save", 22,
+                                            world_id="world-a", field_id=1)
+        with self.assertRaisesRegex(ValueError, "pending farm request"):
+            self.lifecycle.request_farm("member-a", "server", "save", 23,
+                                        world_id="world-a", field_id=2)
+        self.assertEqual(self.db.farm_requests.find_one({"_id": first["_id"]})["starting_field"], 22)
+        self.assertIsNone(self.db.farm_field_reservations.find_one({"farmland_id": 23}))
+
+    def test_historical_personal_farm_does_not_block_new_current_world_request(self):
+        self.db.sin_farms.insert_one({
+            "_id": "old-personal-a", "server_key": "server", "save_key": "save",
+            "world_id": "world-old", "farm_type": "member", "owner_discord_id": "member-a",
+            "canonical_name": "Old Farm", "state": "active", "fs25_farm_id": 2,
+        })
+        request = self.lifecycle.request_farm("member-a", "server", "save", 22,
+                                              world_id="world-a", field_id=1)
+        self.assertEqual(request["world_id"], "world-a")
+
+    def test_contractor_relationship_does_not_count_as_personal_farm(self):
+        self.db.memberships.insert_one({
+            "_id": "contractor-a", "server_id": "server", "save_id": "save",
+            "world_id": "world-a", "discord_id": "member-a", "farm_id": 99,
+            "desired_role": "contractor", "applied_role": "contractor", "state": "active",
+            "source_farm_id": 7,
+        })
+        request = self.lifecycle.request_farm("member-a", "server", "save", 22,
+                                              world_id="world-a", field_id=1)
+        self.assertEqual(request["discord_id"], "member-a")
+
     def test_two_pending_requests_cannot_reserve_the_same_current_farmland(self):
         with patch.object(self.db.farm_field_reservations, "update_one",
                           wraps=self.db.farm_field_reservations.update_one) as update_one:

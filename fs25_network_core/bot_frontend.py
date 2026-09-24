@@ -660,7 +660,8 @@ class NetworkBot(discord.Client):
             config = server_config(interaction, server, "farm_request")
             await interaction.response.defer(ephemeral=True)
             try:
-                picker = await asyncio.to_thread(self.farm_request_picker_context, config)
+                picker = await asyncio.to_thread(
+                    self.farm_request_picker_context, config, str(interaction.user.id))
                 view = FarmRequestView(self, interaction.user.id, picker["server_key"], picker["save_key"],
                                        picker["world_id"], picker["map_title"], picker["fields"])
                 await interaction.followup.send(
@@ -1341,7 +1342,7 @@ class NetworkBot(discord.Client):
             logging.warning("Stored runtime map geometry is invalid; using text-only contract card")
             return False
 
-    def farm_request_picker_context(self, config):
+    def farm_request_picker_context(self, config, discord_id=None):
         """Build the map and selector from one current-world eligible set."""
         saves = config.get("saves") or []
         active_save_key = config.get("active_save_key")
@@ -1358,6 +1359,9 @@ class NetworkBot(discord.Client):
         world_id = self.farm_lifecycle.current_world_id(server_key, save_key)
         if not world_id:
             raise ValueError("No current FS25 world generation is available")
+        if discord_id is not None:
+            self.farm_lifecycle.assert_personal_farm_request_allowed(
+                str(discord_id), server_key, save_key, world_id=world_id)
         if not self.ensure_registered_map(server_key, save_key, world_id):
             raise ValueError("No validated current-world map is available")
         available = self.farm_lifecycle.available_fields(server_key, save_key, world_id=world_id)

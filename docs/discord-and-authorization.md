@@ -302,9 +302,14 @@ changes block that access. Local development withdrawals are disabled, and its
 test identities do not authorize central wallets. /balance still shows the central
 Discord wallet, not a test wallet. No money is moved by onboarding.
 
-One desired manager per farm and one farm per user per save are supported. Other
-members may be workers or visitors. Only one pending permission operation per
-membership is allowed. Farm moves, identity corrections, manager handover,
+One desired manager per farm and one personal farm per approved identity per
+active server/save/world are supported. `/farm_request` blocks before opening
+the picker when that identity already has a current-world member farm or an
+in-flight request, and the same check is repeated inside the atomic reservation
+transaction. Historical generations do not block a new world, and SiN Harvest
+contractor membership is not a personal farm. Other members may be workers or
+visitors. Only one pending permission operation per membership is allowed. Farm
+moves, identity corrections, manager handover,
 rejected-job recovery and pending-job supersession need further workflows.
 
 ## Remaining game integration

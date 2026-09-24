@@ -98,6 +98,13 @@ class DatabaseConfigurationTests(unittest.TestCase):
                      ("fs25_unique_user_id", 1), ("connected_at", -1)]
             for keys, _options in session_indexes
         ))
+        personal_farm_indexes = fake_database.sin_farms.create_calls
+        self.assertTrue(any(
+            keys == [("server_key", 1), ("save_key", 1),
+                     ("world_id", 1), ("owner_discord_id", 1)]
+            and options.get("unique") is True
+            for keys, options in personal_farm_indexes
+        ))
         for collection in fake_database.collections.values():
             for keys, _options in collection.create_calls:
                 self.assertNotEqual(keys, "_id")

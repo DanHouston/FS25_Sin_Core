@@ -17,6 +17,12 @@ SYSTEM_FARM_TYPE = "system"
 MEMBER_FARM_TYPE = "member"
 FIRST_FIELD_MAX_PRICE = 750_000
 OPERATION_STATES = {"pending", "dispatched", "succeeded", "failed", "reconciliation_required"}
+PERSONAL_FARM_STATES = {"provisioned", "active"}
+PERSONAL_FARM_REQUEST_STATES = {
+    "requested", "pending", "provisioning", "land_pending", "land_assigning",
+    "awaiting_manager", "manager_authorization_required", "financial_capability_required",
+    "reconciliation_required", "active",
+}
 
 
 def _operation_id(*parts):
@@ -546,6 +552,45 @@ class FarmLifecycle:
         fields = snapshot.get("farmlands") or {}
         return {int(field_id): int(owner or 0) for field_id, owner in fields.items()}
 
+    def assert_personal_farm_request_allowed(self, discord_id, server_key, save_key,
+                                             *, world_id=None, session=None):
+        """Enforce one personal farm/request for this identity in this world.
+
+        Only generation-scoped member-farm mappings count.  The SiN Harvest
+        system farm and contractor memberships are deliberately unrelated to a
+        player's personal farm entitlement.  Legacy rows without a world ID
+        are not allowed to block a current generation.
+        """
+        selected_world = str(world_id) if world_id is not None else self.current_world_id(server_key, save_key)
+        if not selected_world:
+            return None
+        scope = self._scope(server_key, save_key, selected_world)
+        farm_query = {
+            **scope,
+            "farm_type": MEMBER_FARM_TYPE,
+            "owner_discord_id": str(discord_id),
+            "state": {"$in": sorted(PERSONAL_FARM_STATES)},
+        }
+        farms = list(self.db.sin_farms.find(farm_query, **({"session": session} if session is not None else {})))
+        if farms:
+            if len(farms) > 1:
+                raise ValueError("Multiple personal farms are recorded in this current FS25 world; staff reconciliation is required")
+            name = str(farms[0].get("canonical_name") or "your personal farm")
+            raise ValueError(f"You already have a personal farm ({name}) in this current FS25 world")
+
+        request_query = {
+            **scope,
+            "discord_id": str(discord_id),
+            "state": {"$in": sorted(PERSONAL_FARM_REQUEST_STATES)},
+        }
+        requests = list(self.db.farm_requests.find(
+            request_query, **({"session": session} if session is not None else {})))
+        if requests:
+            if len(requests) > 1:
+                raise ValueError("Multiple farm requests are recorded in this current FS25 world; staff reconciliation is required")
+            raise ValueError("You already have a pending farm request in this current FS25 world")
+        return None
+
     def request_farm(self, discord_id, server_key, save_key, starting_field, *, world_id=None, field_id=None):
         application = self.db.community_applications.find_one({"_id": str(discord_id), "state": "approved"})
         if not application or not application.get("farm_name"):
@@ -562,6 +607,8 @@ class FarmLifecycle:
             selected_world = str(world_id) if world_id is not None else active_world
             if world_id is not None and active_world != str(world_id):
                 raise ValueError("This field picker belongs to an older FS25 world generation; start again")
+            self.assert_personal_farm_request_allowed(
+                discord_id, server_key, save_key, world_id=selected_world, session=session)
             available = self.available_fields(server_key, save_key, world_id=selected_world, session=session)
             owner = available.get(farmland_id)
             if owner is None:

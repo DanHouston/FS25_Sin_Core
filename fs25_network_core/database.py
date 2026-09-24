@@ -86,8 +86,12 @@ class Database:
         self.db.sin_farms.create_index([("server_key", 1), ("save_key", 1), ("farm_type", 1), ("canonical_name", 1)])
         self.db.sin_farms.create_index("source_request_id", unique=True,
             partialFilterExpression={"source_request_id": {"$type": "string"}})
-        self.db.sin_farms.create_index([("server_key", 1), ("save_key", 1), ("owner_discord_id", 1)],
-            unique=True, partialFilterExpression={"owner_discord_id": {"$type": "string"}})
+        self._replace_legacy_unique_index(
+            self.db.sin_farms,
+            [("server_key", 1), ("save_key", 1), ("owner_discord_id", 1)],
+            [("server_key", 1), ("save_key", 1), ("world_id", 1), ("owner_discord_id", 1)],
+            name="one_personal_farm_per_world", unique=True,
+            partialFilterExpression={"owner_discord_id": {"$type": "string"}}, allow_partial=True)
         self._replace_legacy_unique_index(
             self.db.server_snapshots,
             [("server_key", 1), ("save_key", 1)],
