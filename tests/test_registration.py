@@ -183,30 +183,69 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("self.worldIdentityRetryable = false", identity)
         self.assertIn('local path = tostring(saveDirectory) .. "FS25_SiN_Server_world.xml"', identity)
         self.assertNotIn('self.directory .. "FS25_SiN_Server_world.xml"', identity)
-        self.assertIn("FSCareerMissionInfo.saveToXMLFile is unavailable; refusing unpersisted world identity", identity)
+        self.assertIn("FS25 save lifecycle hook is unavailable; refusing unpersisted world identity", identity)
         update = source[source.index("function FS25SiNServer:update(dt)"):]
         self.assertIn("self.worldIdentitySaveHookInstalled ~= true", update)
         self.assertIn("self.worldIdentityRetryable == true", update)
         self.assertIn("self:initializeWorldIdentity()", update)
 
-    def test_world_identity_uses_career_save_persistence_and_migrates_legacy_sidecar(self):
+    def test_world_identity_uses_actual_fs25_save_lifecycle_and_observable_marker_write(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
             encoding="utf-8"
         )
         identity = source[source.index("function FS25SiNServer:installWorldIdentityPersistenceHook()"):]
         identity = identity[:identity.index("function FS25SiNServer:shortIdentity")]
-        self.assertIn("FSCareerMissionInfo.saveToXMLFile", identity)
+        self.assertIn("FSBaseMission.saveSavegame", identity)
+        self.assertIn("Mission00.saveSavegame", identity)
+        self.assertNotIn("FSCareerMissionInfo.saveToXMLFile =", identity)
+        self.assertIn("Mission00", identity)
+        self.assertIn("FSBaseMission", identity)
         self.assertIn("Utils.appendedFunction", identity)
+        self.assertIn("saveWorldIdentityDuringSave", identity)
+        self.assertIn("save hook invoked target=", identity)
+        self.assertIn("save hook marker write failed", identity)
+        self.assertIn("persisted save-backed marker world=", identity)
+        self.assertIn("FS25_SiN_Server_world.xml", identity)
+        self.assertIn("missionInfo.savegameDirectory", identity)
+        self.assertIn("function(mission)", identity)
+        self.assertIn("resolveSaveMissionInfo(mission)", identity)
+        self.assertIn("XMLFile.create(\"networkLocalWorldIdentity\"", identity)
+        self.assertIn("XMLFile.save returned false", identity)
+        self.assertIn("fileExists(path)", identity)
         self.assertIn("careerSavegame.xml", identity)
         self.assertIn('careerSavegame.sinWorldIdentity#worldId', identity)
         self.assertIn('sinWorldIdentity#worldId', identity)
-        self.assertIn("waiting for the next FS25 career save", identity)
-        self.assertIn("physical slot", identity)
+        self.assertIn("waiting for the next FS25 save", source)
         self.assertIn("self.worldIdentityPersisted = false", identity)
         self.assertIn("self.worldIdentityReady = false", identity)
         self.assertIn("self.worldIdentityReady = true", identity)
         self.assertIn("save-backed marker source=", identity)
-        self.assertNotIn('XMLFile.create("networkLocalWorldIdentity"', identity)
+
+    def test_world_identity_save_hook_writes_only_after_runtime_identity_exists(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8"
+        )
+        hook = source[source.index("function FS25SiNServer:saveWorldIdentityDuringSave") :]
+        hook = hook[:hook.index("function FS25SiNServer:readSaveWorldIdentity")]
+        self.assertLess(hook.index('if self.worldId == nil'), hook.index('XMLFile.create("networkLocalWorldIdentity"'))
+        self.assertLess(hook.index('xml:save()'), hook.index('self.worldIdentityReady = true'))
+        self.assertIn('self.worldIdentityPersisted = true', hook)
+        self.assertIn('self.worldIdentityRetryable = false', hook)
+
+    def test_world_identity_reload_reads_same_marker_and_missing_marker_is_new(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8"
+        )
+        reader = source[source.index("function FS25SiNServer:readSaveWorldIdentity") :]
+        reader = reader[:reader.index("function FS25SiNServer:initializeWorldIdentity")]
+        self.assertIn('fileExists(sidecarPath)', reader)
+        self.assertIn('return worldId, false, sidecarPath', reader)
+        identity = source[source.index("function FS25SiNServer:initializeWorldIdentity") :]
+        identity = identity[:identity.index("function FS25SiNServer:shortIdentity")]
+        self.assertIn('self.worldIdentityReady = true', identity)
+        self.assertIn('initialized new marker=', identity)
+        self.assertIn('waiting for the next FS25 save', identity)
+        self.assertIn('self.worldIdentityRetryable = false', identity)
 
     def test_updater_migration_is_complete_and_conflict_safe(self):
         source = (Path(__file__).parents[1] / "scripts" / "Update-SiN.ps1").read_text(encoding="utf-8")

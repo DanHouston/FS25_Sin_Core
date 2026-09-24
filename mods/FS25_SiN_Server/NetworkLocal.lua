@@ -43,61 +43,124 @@ function FS25SiNServer:initializeRuntimeGeneration()
 end
 
 -- The profile-level mailbox survives a replacement save, so it is explicitly
--- not a world identity.  Persist the opaque SiN marker through GIANTS'
--- FSCareerMissionInfo.saveToXMLFile hook in careerSavegame.xml.  A standalone
--- file beside the save is only retained as a one-time migration fallback:
--- FS25 owns the save directory and may rewrite/remove arbitrary sidecars.
+-- not a world identity.  FS25 saves through FSBaseMission.saveSavegame (and
+-- some versions resolve that method through Mission00) into a temporary
+-- savegame directory which is promoted only after the save completes.  The
+-- old FSCareerMissionInfo.saveToXMLFile hook was not on that dedicated-server
+-- save path, so its in-memory XML mutation never became durable.  Write a
+-- small mod-owned marker from the actual save lifecycle instead.
 function FS25SiNServer:installWorldIdentityPersistenceHook()
     if self.worldIdentitySaveHookInstalled == true then return true end
-    if FSCareerMissionInfo == nil or type(FSCareerMissionInfo.saveToXMLFile) ~= "function"
-        or Utils == nil or type(Utils.appendedFunction) ~= "function" then
-        return false
+    if Utils == nil or type(Utils.appendedFunction) ~= "function" then return false end
+    local target = nil
+    local targetName = nil
+    -- Mission00 may shadow FSBaseMission.saveSavegame.  Hook the method the
+    -- runtime will actually resolve, otherwise another mod's Mission00 hook
+    -- can permanently bypass a later FSBaseMission hook.
+    if Mission00 ~= nil and type(Mission00.saveSavegame) == "function" then
+        target = Mission00
+        targetName = "Mission00"
+    elseif FSBaseMission ~= nil and type(FSBaseMission.saveSavegame) == "function" then
+        target = FSBaseMission
+        targetName = "FSBaseMission"
     end
-    FSCareerMissionInfo.saveToXMLFile = Utils.appendedFunction(FSCareerMissionInfo.saveToXMLFile,
-        function(missionInfo, xmlFile)
-            FS25SiNServer:saveWorldIdentityToCareerSavegame(missionInfo, xmlFile)
+    if target == nil then return false end
+    target.saveSavegame = Utils.appendedFunction(target.saveSavegame,
+        function(mission)
+            FS25SiNServer:saveWorldIdentityDuringSave(mission, targetName)
         end)
     self.worldIdentitySaveHookInstalled = true
+    self.worldIdentitySaveHookTarget = targetName
+    Logging.info("[SiN World] installed save-backed identity hook target=%s", targetName)
     return true
 end
 
-function FS25SiNServer:saveWorldIdentityToCareerSavegame(missionInfo, xmlFile)
+function FS25SiNServer:resolveSaveMissionInfo(mission)
+    if mission ~= nil then
+        if mission.missionInfo ~= nil then return mission.missionInfo end
+        if mission.savegameDirectory ~= nil then return mission end
+    end
+    if g_currentMission ~= nil and g_currentMission.missionInfo ~= nil then
+        return g_currentMission.missionInfo
+    end
+    return nil
+end
+
+function FS25SiNServer:saveWorldIdentityDuringSave(mission, hookTarget)
     if self.worldId == nil or tostring(self.worldId) == "" then return false end
     if g_currentMission ~= nil and g_currentMission.getIsServer ~= nil
         and not g_currentMission:getIsServer() then
         return false
     end
-    local document = xmlFile
-    if document == nil and missionInfo ~= nil then document = missionInfo.xmlFile end
-    if document == nil or type(document.setString) ~= "function" then
-        Logging.error("[SiN World] careerSavegame XML document unavailable; world marker remains pending")
+    local missionInfo = self:resolveSaveMissionInfo(mission)
+    local saveDirectory = missionInfo ~= nil and missionInfo.savegameDirectory or nil
+    if saveDirectory == nil or tostring(saveDirectory) == "" then
+        Logging.error("[SiN World] save hook invoked target=%s but savegameDirectory is unavailable; marker remains pending",
+            tostring(hookTarget or self.worldIdentitySaveHookTarget or "unknown"))
         return false
     end
-    local rootKey = missionInfo ~= nil and missionInfo.xmlKey or "careerSavegame"
-    if rootKey == nil or tostring(rootKey) == "" then rootKey = "careerSavegame" end
-    local identityKey = tostring(rootKey) .. ".sinWorldIdentity"
-    document:setString(identityKey .. "#worldId", tostring(self.worldId))
-    if type(document.setInt) == "function" then document:setInt(identityKey .. "#schemaVersion", 1) end
+    local directory = tostring(saveDirectory)
+    local separator = string.sub(directory, -1)
+    if separator ~= "/" and separator ~= "\\" then directory = directory .. "/" end
+    local path = directory .. "FS25_SiN_Server_world.xml"
+    Logging.info("[SiN World] save hook invoked target=%s world=%s path=%s",
+        tostring(hookTarget or self.worldIdentitySaveHookTarget or "unknown"),
+        self:shortIdentity(self.worldId), path)
+    if XMLFile == nil or type(XMLFile.create) ~= "function" then
+        Logging.error("[SiN World] save hook attempted marker write but XMLFile.create is unavailable path=%s", path)
+        return false
+    end
+    local xml = nil
+    local saveOk, saveError = pcall(function()
+        xml = XMLFile.create("networkLocalWorldIdentity", path, "sinWorldIdentity")
+        if xml == nil then error("XMLFile.create returned nil") end
+        xml:setString("sinWorldIdentity#worldId", tostring(self.worldId))
+        if type(xml.setInt) == "function" then xml:setInt("sinWorldIdentity#schemaVersion", 1) end
+        if xml:save() ~= true then error("XMLFile.save returned false") end
+    end)
+    if xml ~= nil and type(xml.delete) == "function" then xml:delete() end
+    if not saveOk then
+        Logging.error("[SiN World] save hook marker write failed world=%s path=%s error=%s",
+            self:shortIdentity(self.worldId), path, tostring(saveError))
+        return false
+    end
+    if fileExists == nil or not fileExists(path) then
+        Logging.error("[SiN World] save hook reported marker write but file is absent world=%s path=%s",
+            self:shortIdentity(self.worldId), path)
+        return false
+    end
     self.worldIdentityPersisted = true
     self.worldIdentityReady = true
     self.worldIdentityRetryable = false
-    Logging.info("[SiN World] persisted save-backed marker=%s in careerSavegame.xml",
-        self:shortIdentity(self.worldId))
+    Logging.info("[SiN World] persisted save-backed marker world=%s path=%s",
+        self:shortIdentity(self.worldId), path)
     return true
 end
 
-function FS25SiNServer:readCareerSaveWorldIdentity(saveDirectory)
-    local path = tostring(saveDirectory) .. "careerSavegame.xml"
-    if not fileExists(path) then return nil, false end
-    if XMLFile == nil or XMLFile.load == nil then return nil, true end
-    local loaded = XMLFile.load("networkLocalCareerSavegame", path)
-    if loaded == nil then return nil, true end
+function FS25SiNServer:readSaveWorldIdentity(saveDirectory)
+    local sidecarPath = tostring(saveDirectory) .. "FS25_SiN_Server_world.xml"
+    if fileExists(sidecarPath) then
+        if XMLFile == nil or XMLFile.load == nil then return nil, true, sidecarPath end
+        local loaded = XMLFile.load("networkLocalWorldIdentity", sidecarPath)
+        if loaded == nil then return nil, true, sidecarPath end
+        local worldId = loaded:getString("sinWorldIdentity#worldId")
+        loaded:delete()
+        return worldId, false, sidecarPath
+    end
+    -- Read the short-lived careerSavegame form written by the previous
+    -- release as a compatibility path; new writes always use the save hook
+    -- sidecar so they survive FS25's temp-save promotion deterministically.
+    local careerPath = tostring(saveDirectory) .. "careerSavegame.xml"
+    if not fileExists(careerPath) then return nil, false, nil end
+    if XMLFile == nil or XMLFile.load == nil then return nil, true, careerPath end
+    local loaded = XMLFile.load("networkLocalCareerSavegame", careerPath)
+    if loaded == nil then return nil, true, careerPath end
     local worldId = loaded:getString("careerSavegame.sinWorldIdentity#worldId")
     if worldId == nil or tostring(worldId) == "" then
         worldId = loaded:getString("sinWorldIdentity#worldId")
     end
     loaded:delete()
-    return worldId, false
+    return worldId, false, careerPath
 end
 
 function FS25SiNServer:initializeWorldIdentity()
@@ -116,20 +179,15 @@ function FS25SiNServer:initializeWorldIdentity()
     end
     local separator = string.sub(tostring(saveDirectory), -1)
     if separator ~= "/" and separator ~= "\\" then saveDirectory = tostring(saveDirectory) .. "/" end
-    local hookInstalled = self:installWorldIdentityPersistenceHook()
-    if not hookInstalled then
-        self.worldIdentityReady = false
-        self.worldIdentityRetryable = true
-        Logging.error("[SiN World] FSCareerMissionInfo.saveToXMLFile is unavailable; refusing unpersisted world identity")
-        return false
-    end
     self.worldIdentityPersisted = false
-    Logging.info("[SiN World] save-backed marker source=%scareerSavegame.xml", tostring(saveDirectory))
-    local careerWorldId, careerReadFailed = self:readCareerSaveWorldIdentity(saveDirectory)
+    local hookInstalled = self:installWorldIdentityPersistenceHook()
+    Logging.info("[SiN World] save-backed marker source=%sFS25_SiN_Server_world.xml", tostring(saveDirectory))
+    local careerWorldId, careerReadFailed, markerPath = self:readSaveWorldIdentity(saveDirectory)
     if careerReadFailed then
         self.worldIdentityReady = false
         self.worldIdentityRetryable = true
-        Logging.error("[SiN World] careerSavegame.xml could not be read; refusing world-scoped operations")
+        Logging.error("[SiN World] save-backed marker could not be read path=%s; refusing world-scoped operations",
+            tostring(markerPath or "unknown"))
         return false
     end
     if careerWorldId ~= nil and tostring(careerWorldId) ~= "" then
@@ -137,8 +195,16 @@ function FS25SiNServer:initializeWorldIdentity()
         self.worldIdentityReady = true
         self.worldIdentityRetryable = false
         self.worldIdentityPersisted = true
-        Logging.info("[SiN World] loaded careerSavegame marker=%s", self:shortIdentity(self.worldId))
+        Logging.info("[SiN World] loaded save-backed marker=%s path=%s",
+            self:shortIdentity(self.worldId), tostring(markerPath or "unknown"))
         return true
+    end
+
+    if not hookInstalled then
+        self.worldIdentityReady = false
+        self.worldIdentityRetryable = true
+        Logging.error("[SiN World] FS25 save lifecycle hook is unavailable; refusing unpersisted world identity")
+        return false
     end
 
     -- Read the pre-6a836fd sidecar once so an existing save can migrate
@@ -181,7 +247,7 @@ function FS25SiNServer:initializeWorldIdentity()
         self.worldIdentityPersisted = false
         self.worldIdentityReady = false
         self.worldIdentityRetryable = false
-        Logging.info("[SiN World] initialized new marker=%s; waiting for the next FS25 career save",
+        Logging.info("[SiN World] initialized new marker=%s; waiting for the next FS25 save",
             self:shortIdentity(worldId))
     end
     self.worldId = tostring(worldId)
