@@ -379,14 +379,23 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
         except EventAuthenticationError:
             _json_response(self, 401, {"error": "invalid_server_authentication"})
             return
-        except EventScopeError:
-            _json_response(self, 404, {"error": "unknown_or_unconfigured_save"})
+        except EventScopeError as error:
+            reason = str(error)[:240]
+            LOG.warning("event rejected scope server=%s reason=%s",
+                        self.headers.get("X-SiN-Server-Key", "<missing>"), reason)
+            _json_response(self, 404, {"error": "unknown_or_unconfigured_save", "reason": reason})
             return
-        except EventRetryableError:
-            _json_response(self, 409, {"error": "event_waiting_for_prior_activity"})
+        except EventRetryableError as error:
+            reason = str(error)[:240]
+            LOG.info("event deferred for retry server=%s reason=%s",
+                     self.headers.get("X-SiN-Server-Key", "<missing>"), reason)
+            _json_response(self, 409, {"error": "event_waiting_for_prior_activity", "reason": reason})
             return
-        except EventValidationError:
-            _json_response(self, 400, {"error": "invalid_event"})
+        except EventValidationError as error:
+            reason = str(error)[:240]
+            LOG.warning("event rejected validation server=%s reason=%s",
+                        self.headers.get("X-SiN-Server-Key", "<missing>"), reason)
+            _json_response(self, 400, {"error": "invalid_event", "reason": reason})
             return
         except Exception:
             LOG.exception("central API event processing failure")

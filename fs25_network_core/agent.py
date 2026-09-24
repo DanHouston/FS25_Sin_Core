@@ -119,8 +119,14 @@ class PairingAgent:
                           data=body, headers=headers, method="POST")
         with self.opener(request, timeout=10) as response:
             if response.status != 200:
-                raise HTTPError(request.full_url, response.status, "event API rejected request",
-                                response.headers, None)
+                try:
+                    raw_body = response.read(4096)
+                except (AttributeError, OSError, TypeError):
+                    raw_body = b""
+                error = HTTPError(request.full_url, response.status, "event API rejected request",
+                                  response.headers, None)
+                error.sin_detail = self._safe_http_error_detail(raw_body)
+                raise error
             return json.loads(response.read().decode("utf-8"))
 
     def _post_registration(self, server_key, credential, request):
@@ -697,13 +703,22 @@ class PairingAgent:
                 processed.append(path.name)
             except (HTTPError, URLError, TimeoutError, RuntimeError, json.JSONDecodeError, OSError) as error:
                 status = getattr(error, "code", None)
+                detail = getattr(error, "sin_detail", None)
+                if detail is None and isinstance(error, HTTPError):
+                    try:
+                        raw_body = error.read(4096)
+                    except (AttributeError, OSError, TypeError):
+                        raw_body = b""
+                    detail = self._safe_http_error_detail(raw_body)
                 if status in {400, 401, 403, 404, 422}:
                     self._quarantine(path)
-                    LOG.warning("event permanently rejected and quarantined type=%s id=%s",
-                                event.get("event_type"), self._short_event_id(event.get("event_id")))
+                    LOG.warning("event permanently rejected status=%s detail=%s and quarantined type=%s id=%s",
+                                status, detail or {"body": ""}, event.get("event_type"),
+                                self._short_event_id(event.get("event_id")))
                 else:
-                    LOG.warning("event API unavailable; event retained for retry type=%s id=%s",
-                                event.get("event_type"), self._short_event_id(event.get("event_id")))
+                    LOG.warning("event API unavailable status=%s detail=%s; event retained for retry type=%s id=%s",
+                                status, detail or {"body": ""}, event.get("event_type"),
+                                self._short_event_id(event.get("event_id")))
                     # Preserve per-session ordering without starving other
                     # sessions whose events are eligible in this pass.
                     blocked_sessions.add(ordering_key)

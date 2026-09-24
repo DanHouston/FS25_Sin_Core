@@ -214,6 +214,53 @@ class EventProcessingTests(unittest.TestCase):
         update = self.database.db.sin_maps.update_one.call_args.args[1]
         self.assertEqual(update["$setOnInsert"]["world_id"], "new-world")
 
+    def test_newer_map_geometry_waits_for_snapshot_activation(self):
+        event = self.event("map_geometry")
+        event["world_id"] = "new-world"
+        event["payload"] = {
+            "source_generation": "19",
+            "map": {
+                "schema_version": 1, "map_id": "new-map", "map_title": "New Map",
+                "world_width": 100, "world_depth": 100, "image_width": 32, "image_height": 32,
+                "overview_asset_identity": "runtime-generated:new", "version": 1,
+                "fields": {"1": {"field_id": 1, "farmland_id": 22,
+                                  "rings": [[[-10, -10], [10, -10], [0, 10]]]}},
+                "farmlands": {},
+            },
+        }
+        self.processor.farm_lifecycle.current_world_id = MagicMock(return_value="old-world")
+        self.processor.farm_lifecycle.require_current_world = MagicMock(side_effect=ValueError(
+            "FS25 world generation is not current for this server/save")
+        )
+        self.processor.registry.active_runtime.return_value = {
+            "runtime_generation": 18, "save_key": "main-save", "world_id": "old-world"}
+        with self.assertRaises(EventRetryableError):
+            self.processor.process(event)
+        self.database.db.sin_maps.update_one.assert_not_called()
+
+    def test_old_map_geometry_remains_a_permanent_scope_error(self):
+        event = self.event("map_geometry")
+        event["world_id"] = "old-world"
+        event["payload"] = {
+            "source_generation": "18",
+            "map": {
+                "schema_version": 1, "map_id": "old-map", "map_title": "Old Map",
+                "world_width": 100, "world_depth": 100, "image_width": 32, "image_height": 32,
+                "overview_asset_identity": "runtime-generated:old", "version": 1,
+                "fields": {"1": {"field_id": 1, "farmland_id": 22,
+                                  "rings": [[[-10, -10], [10, -10], [0, 10]]]}},
+                "farmlands": {},
+            },
+        }
+        self.processor.farm_lifecycle.current_world_id = MagicMock(return_value="new-world")
+        self.processor.farm_lifecycle.require_current_world = MagicMock(side_effect=ValueError(
+            "FS25 world generation is not current for this server/save")
+        )
+        self.processor.registry.active_runtime.return_value = {
+            "runtime_generation": 19, "save_key": "main-save", "world_id": "new-world"}
+        with self.assertRaises(EventScopeError):
+            self.processor.process(event)
+
     def test_map_geometry_without_world_id_is_rejected(self):
         event = self.event("map_geometry")
         event["payload"] = {"map": {}}

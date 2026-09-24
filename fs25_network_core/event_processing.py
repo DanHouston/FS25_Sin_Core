@@ -57,6 +57,34 @@ class CentralEventProcessor:
         self.transfers = TransferService(database, self.authorization)
         self.banking = BankingEngine(database)
 
+    def _map_event_is_ahead_of_active_runtime(self, server_key, payload):
+        """Return true when geometry belongs to a runtime not active yet.
+
+        Map geometry is emitted very early during a new FS25 load. The
+        snapshot that activates its world can arrive a few polling passes
+        later. A newer runtime-generation marker is therefore retryable,
+        while an older/mismatched marker remains a permanent scope error.
+        """
+        if not isinstance(payload, dict):
+            return False
+        try:
+            incoming = int(payload.get("source_generation"))
+        except (TypeError, ValueError):
+            return False
+        if incoming < 1:
+            return False
+        try:
+            active = self.registry.active_runtime(server_key)
+        except (AttributeError, TypeError, ValueError):
+            return False
+        if not isinstance(active, dict):
+            return False
+        try:
+            current = int(active.get("runtime_generation") or 0)
+        except (TypeError, ValueError):
+            return False
+        return current > 0 and incoming > current
+
     def process(self, event):
         if not isinstance(event, dict):
             raise EventValidationError("event must be an object")
@@ -90,6 +118,10 @@ class CentralEventProcessor:
             try:
                 self.farm_lifecycle.require_current_world(record["server_key"], save_key, raw_world_id)
             except ValueError as error:
+                if event_type == MAP_EVENT_TYPE and self._map_event_is_ahead_of_active_runtime(
+                        record["server_key"], payload):
+                    raise EventRetryableError(
+                        "map geometry is waiting for the newer runtime snapshot") from None
                 raise EventScopeError(str(error)) from None
         processed_world_id = active_world_id or raw_world_id
         processed_id = scoped_event_id(record["server_key"], save_key, event_id, processed_world_id)

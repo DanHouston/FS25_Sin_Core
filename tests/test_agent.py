@@ -234,6 +234,52 @@ class AgentTests(unittest.TestCase):
             PairingAgent(folder, "http://central", opener).process_events_once(max_events=2)
             self.assertEqual(opener.call_count, 2)
 
+    def test_event_rejection_logs_safe_detail_and_quarantines(self):
+        rejected = HTTPError(
+            "https://central/api/server/events", 404, "scope", {},
+            io.BytesIO(json.dumps({"error": "unknown_or_unconfigured_save",
+                                   "reason": "FS25 world generation is not current",
+                                   "credential": "must-not-be-logged"}).encode()))
+        with tempfile.TemporaryDirectory() as folder:
+            events = Path(folder) / "events"
+            events.mkdir()
+            event = events / "map.xml"
+            event.write_text(
+                '<serverEvent event_id="map-1" event_type="map_geometry" server_key="server" '
+                'server_credential="secret" save_id="1" world_id="new-world" '
+                'source_generation="19" map_id="map" map_title="Map" world_width="100" '
+                'world_depth="100" image_width="32" image_height="32" overview_asset_identity="asset" '
+                'version="1" coordinate_system="giants-centered-xz"/>', encoding="utf-8")
+            agent = PairingAgent(folder, "https://central", MagicMock(side_effect=rejected))
+            with self.assertLogs(agent_module.__name__, level="WARNING") as logs:
+                self.assertEqual(agent.process_events_once(), [])
+            output = "\n".join(logs.output)
+            self.assertIn("status=404", output)
+            self.assertIn("FS25 world generation is not current", output)
+            self.assertNotIn("must-not-be-logged", output)
+            self.assertTrue((events / "map.xml.failed").exists())
+
+    def test_retryable_event_rejection_retains_event_and_logs_detail(self):
+        rejected = HTTPError(
+            "https://central/api/server/events", 409, "retry", {},
+            io.BytesIO(json.dumps({"error": "event_waiting_for_prior_activity",
+                                   "reason": "map geometry is waiting for the newer runtime snapshot"}).encode()))
+        with tempfile.TemporaryDirectory() as folder:
+            events = Path(folder) / "events"
+            events.mkdir()
+            event = events / "map.xml"
+            event.write_text(
+                '<serverEvent event_id="map-2" event_type="map_geometry" server_key="server" '
+                'server_credential="secret" save_id="1" world_id="new-world" '
+                'source_generation="19" map_id="map" map_title="Map" world_width="100" '
+                'world_depth="100" image_width="32" image_height="32" overview_asset_identity="asset" '
+                'version="1" coordinate_system="giants-centered-xz"/>', encoding="utf-8")
+            agent = PairingAgent(folder, "https://central", MagicMock(side_effect=rejected))
+            with self.assertLogs(agent_module.__name__, level="WARNING") as logs:
+                self.assertEqual(agent.process_events_once(), [])
+            self.assertTrue(event.exists())
+            self.assertIn("status=409", "\n".join(logs.output))
+
     def test_watch_polls_receipts_before_operations(self):
         agent = PairingAgent("C:/mailbox", "http://central")
         calls = []
