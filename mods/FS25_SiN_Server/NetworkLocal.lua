@@ -43,10 +43,63 @@ function FS25SiNServer:initializeRuntimeGeneration()
 end
 
 -- The profile-level mailbox survives a replacement save, so it is explicitly
--- not a world identity.  Store an opaque SiN marker beside FS25's own save
--- files.  It survives an ordinary restart of that save, while a replacement
--- save has no marker and receives a different value before Central accepts
--- any game-scoped command or authority material.
+-- not a world identity.  Persist the opaque SiN marker through GIANTS'
+-- FSCareerMissionInfo.saveToXMLFile hook in careerSavegame.xml.  A standalone
+-- file beside the save is only retained as a one-time migration fallback:
+-- FS25 owns the save directory and may rewrite/remove arbitrary sidecars.
+function FS25SiNServer:installWorldIdentityPersistenceHook()
+    if self.worldIdentitySaveHookInstalled == true then return true end
+    if FSCareerMissionInfo == nil or type(FSCareerMissionInfo.saveToXMLFile) ~= "function"
+        or Utils == nil or type(Utils.appendedFunction) ~= "function" then
+        return false
+    end
+    FSCareerMissionInfo.saveToXMLFile = Utils.appendedFunction(FSCareerMissionInfo.saveToXMLFile,
+        function(missionInfo, xmlFile)
+            FS25SiNServer:saveWorldIdentityToCareerSavegame(missionInfo, xmlFile)
+        end)
+    self.worldIdentitySaveHookInstalled = true
+    return true
+end
+
+function FS25SiNServer:saveWorldIdentityToCareerSavegame(missionInfo, xmlFile)
+    if self.worldId == nil or tostring(self.worldId) == "" then return false end
+    if g_currentMission ~= nil and g_currentMission.getIsServer ~= nil
+        and not g_currentMission:getIsServer() then
+        return false
+    end
+    local document = xmlFile
+    if document == nil and missionInfo ~= nil then document = missionInfo.xmlFile end
+    if document == nil or type(document.setString) ~= "function" then
+        Logging.error("[SiN World] careerSavegame XML document unavailable; world marker remains pending")
+        return false
+    end
+    local rootKey = missionInfo ~= nil and missionInfo.xmlKey or "careerSavegame"
+    if rootKey == nil or tostring(rootKey) == "" then rootKey = "careerSavegame" end
+    local identityKey = tostring(rootKey) .. ".sinWorldIdentity"
+    document:setString(identityKey .. "#worldId", tostring(self.worldId))
+    if type(document.setInt) == "function" then document:setInt(identityKey .. "#schemaVersion", 1) end
+    self.worldIdentityPersisted = true
+    self.worldIdentityReady = true
+    self.worldIdentityRetryable = false
+    Logging.info("[SiN World] persisted save-backed marker=%s in careerSavegame.xml",
+        self:shortIdentity(self.worldId))
+    return true
+end
+
+function FS25SiNServer:readCareerSaveWorldIdentity(saveDirectory)
+    local path = tostring(saveDirectory) .. "careerSavegame.xml"
+    if not fileExists(path) then return nil, false end
+    if XMLFile == nil or XMLFile.load == nil then return nil, true end
+    local loaded = XMLFile.load("networkLocalCareerSavegame", path)
+    if loaded == nil then return nil, true end
+    local worldId = loaded:getString("careerSavegame.sinWorldIdentity#worldId")
+    if worldId == nil or tostring(worldId) == "" then
+        worldId = loaded:getString("sinWorldIdentity#worldId")
+    end
+    loaded:delete()
+    return worldId, false
+end
+
 function FS25SiNServer:initializeWorldIdentity()
     -- A new FS25 save can expose its savegameDirectory only after the first
     -- successful save.  Keep the runtime fail-closed while allowing that
@@ -63,6 +116,34 @@ function FS25SiNServer:initializeWorldIdentity()
     end
     local separator = string.sub(tostring(saveDirectory), -1)
     if separator ~= "/" and separator ~= "\\" then saveDirectory = tostring(saveDirectory) .. "/" end
+    local hookInstalled = self:installWorldIdentityPersistenceHook()
+    if not hookInstalled then
+        self.worldIdentityReady = false
+        self.worldIdentityRetryable = true
+        Logging.error("[SiN World] FSCareerMissionInfo.saveToXMLFile is unavailable; refusing unpersisted world identity")
+        return false
+    end
+    self.worldIdentityPersisted = false
+    Logging.info("[SiN World] save-backed marker source=%scareerSavegame.xml", tostring(saveDirectory))
+    local careerWorldId, careerReadFailed = self:readCareerSaveWorldIdentity(saveDirectory)
+    if careerReadFailed then
+        self.worldIdentityReady = false
+        self.worldIdentityRetryable = true
+        Logging.error("[SiN World] careerSavegame.xml could not be read; refusing world-scoped operations")
+        return false
+    end
+    if careerWorldId ~= nil and tostring(careerWorldId) ~= "" then
+        self.worldId = tostring(careerWorldId)
+        self.worldIdentityReady = true
+        self.worldIdentityRetryable = false
+        self.worldIdentityPersisted = true
+        Logging.info("[SiN World] loaded careerSavegame marker=%s", self:shortIdentity(self.worldId))
+        return true
+    end
+
+    -- Read the pre-6a836fd sidecar once so an existing save can migrate
+    -- without changing its identity.  New worlds are never inferred from the
+    -- physical slot or from Central history.
     local path = tostring(saveDirectory) .. "FS25_SiN_Server_world.xml"
     local worldId = nil
     local markerExists = fileExists(path)
@@ -92,38 +173,23 @@ function FS25SiNServer:initializeWorldIdentity()
             return false
         end
     else
-        if XMLFile == nil or XMLFile.create == nil then
-            self.worldIdentityReady = false
-            self.worldIdentityRetryable = true
-            Logging.error("[SiN World] XMLFile.create is unavailable for a new save marker; refusing world-scoped operations")
-            return false
-        end
         -- This is an opaque creation nonce, not a timestamp-derived identity:
-        -- after first creation the persisted value is always read verbatim.
+        -- it becomes durable through the next GIANTS career-save callback.
         local tick = getTime ~= nil and tostring(getTime()) or "0"
         worldId = "sin-world-" .. tostring(getDate("%Y%m%d%H%M%S")) .. "-" .. tick
             .. "-" .. tostring(math.random(100000, 999999))
-        local xml = XMLFile.create("networkLocalWorldIdentity", path, "sinWorldIdentity")
-        if xml == nil then
-            self.worldIdentityReady = false
-            self.worldIdentityRetryable = true
-            Logging.error("[SiN World] could not create a new save marker; refusing world-scoped operations")
-            return false
-        end
-        xml:setString("sinWorldIdentity#worldId", worldId)
-        xml:setInt("sinWorldIdentity#schemaVersion", 1)
-        local saved = xml:save(); xml:delete()
-        if saved ~= true then
-            self.worldIdentityReady = false
-            self.worldIdentityRetryable = true
-            Logging.error("[SiN World] could not save new world marker; refusing world-scoped operations")
-            return false
-        end
-        Logging.info("[SiN World] initialized FS25-save marker=%s", self:shortIdentity(worldId))
+        self.worldIdentityPersisted = false
+        self.worldIdentityReady = false
+        self.worldIdentityRetryable = false
+        Logging.info("[SiN World] initialized new marker=%s; waiting for the next FS25 career save",
+            self:shortIdentity(worldId))
     end
     self.worldId = tostring(worldId)
-    self.worldIdentityReady = true
-    self.worldIdentityRetryable = false
+    if self.worldIdentityPersisted == true then
+        self.worldIdentityReady = true
+        self.worldIdentityRetryable = false
+    end
+    self:installWorldIdentityPersistenceHook()
     return true
 end
 
@@ -1291,6 +1357,9 @@ end
 function FS25SiNServer:update(dt)
     if g_currentMission ~= nil and g_currentMission:getIsClient() then
         self:updateClientRegistrationWarning(dt)
+    end
+    if not self.failed and g_currentMission ~= nil and self.worldIdentitySaveHookInstalled ~= true then
+        self:installWorldIdentityPersistenceHook()
     end
     if not self.failed and g_currentMission ~= nil and self.worldIdentityReady ~= true
         and self.worldIdentityRetryable == true then

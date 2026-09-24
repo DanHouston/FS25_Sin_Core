@@ -56,13 +56,16 @@ executor or a successful Lua `pcall` is not sufficient proof.
 
 ## World-marker failure boundary
 
-`FS25_SiN_Server_world.xml` is created in the FS25 mission's reported
-`savegameDirectory`, rather than the profile-level mailbox. A readable marker
-is re-used verbatim. If an existing marker is missing its opaque value or
-cannot be parsed, the mod now refuses all world-scoped operations; it does not
-silently generate a replacement identity. This is deterministically reviewed
-from the mod path, but GIANTS XML write atomicity and the save-directory
-contract remain **LIVE VALIDATION REQUIRED**. No claimed FS25 save UUID exists.
+The authoritative world marker is written into the save-backed
+`careerSavegame.xml` by the `FSCareerMissionInfo.saveToXMLFile` hook, rather
+than relying on a standalone file beside the save. A readable marker is
+re-used verbatim. A legacy `FS25_SiN_Server_world.xml` sidecar is accepted only
+for migration into the career save. If an existing marker is malformed, the
+mod refuses all world-scoped operations; it does not silently generate a
+replacement identity. This is deterministically reviewed from the mod path,
+but the GIANTS save-hook write and restart behavior remain **LIVE VALIDATION
+REQUIRED**. New identities remain fail-closed until the first successful career
+save has written the marker. No claimed FS25 save UUID exists.
 
 ## Farm 14 roster evidence
 

@@ -183,9 +183,30 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("self.worldIdentityRetryable = false", identity)
         self.assertIn('local path = tostring(saveDirectory) .. "FS25_SiN_Server_world.xml"', identity)
         self.assertNotIn('self.directory .. "FS25_SiN_Server_world.xml"', identity)
+        self.assertIn("FSCareerMissionInfo.saveToXMLFile is unavailable; refusing unpersisted world identity", identity)
         update = source[source.index("function FS25SiNServer:update(dt)"):]
+        self.assertIn("self.worldIdentitySaveHookInstalled ~= true", update)
         self.assertIn("self.worldIdentityRetryable == true", update)
         self.assertIn("self:initializeWorldIdentity()", update)
+
+    def test_world_identity_uses_career_save_persistence_and_migrates_legacy_sidecar(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8"
+        )
+        identity = source[source.index("function FS25SiNServer:installWorldIdentityPersistenceHook()"):]
+        identity = identity[:identity.index("function FS25SiNServer:shortIdentity")]
+        self.assertIn("FSCareerMissionInfo.saveToXMLFile", identity)
+        self.assertIn("Utils.appendedFunction", identity)
+        self.assertIn("careerSavegame.xml", identity)
+        self.assertIn('careerSavegame.sinWorldIdentity#worldId', identity)
+        self.assertIn('sinWorldIdentity#worldId', identity)
+        self.assertIn("waiting for the next FS25 career save", identity)
+        self.assertIn("physical slot", identity)
+        self.assertIn("self.worldIdentityPersisted = false", identity)
+        self.assertIn("self.worldIdentityReady = false", identity)
+        self.assertIn("self.worldIdentityReady = true", identity)
+        self.assertIn("save-backed marker source=", identity)
+        self.assertNotIn('XMLFile.create("networkLocalWorldIdentity"', identity)
 
     def test_updater_migration_is_complete_and_conflict_safe(self):
         source = (Path(__file__).parents[1] / "scripts" / "Update-SiN.ps1").read_text(encoding="utf-8")

@@ -76,17 +76,22 @@ ordering guarantees are required.
 ## FS25 world-generation boundary — Hobo's Hollow live gate
 
 `server_key` and `save_key` are endpoint selectors, not an FS25 world
-identity. The server mod now creates `FS25_SiN_Server_world.xml` beside the
-actual `missionInfo.savegameDirectory` files, with one opaque marker. It reads
-the marker unchanged on normal restart; a replacement/fresh save has no marker
-and receives a new marker. Restoring a copied save restores that save's marker.
-This is a SiN-managed marker, not a claimed GIANTS save UUID. Its location and
-`missionInfo.savegameDirectory` persistence are **LIVE VALIDATION REQUIRED**.
+identity. The server mod persists one opaque marker through GIANTS'
+`FSCareerMissionInfo.saveToXMLFile` hook in that save's
+`careerSavegame.xml`. It reads the marker unchanged on normal restart; a
+replacement/fresh save without the marker receives a new marker. A legacy
+`FS25_SiN_Server_world.xml` sidecar is read once for migration, but is not the
+authoritative persistence location because FS25 may rewrite the save directory.
+This is a SiN-managed marker, not a claimed GIANTS save UUID. The career-save
+hook and restart behavior remain **LIVE VALIDATION REQUIRED**.
 
 Fresh saves can expose their save directory only after FS25 completes its first
-successful save. The server mod therefore keeps world-scoped traffic fail-closed
-and retries marker initialization during the same runtime when the directory or
-file-creation API was only temporarily unavailable. A readable marker with no
+successful save. A new or legacy-migrated marker also remains unavailable for
+world-scoped traffic until that career-save hook has written it, so a crash
+before the first save cannot publish an identity that would be regenerated on
+restart. The server mod therefore keeps world-scoped traffic fail-closed and
+retries marker initialization during the same runtime when the save directory
+or save-hook API was only temporarily unavailable. A readable marker with no
 world ID remains a hard failure and is never silently replaced.
 
 Until a snapshot bearing that marker reaches Central, every world-bound action
