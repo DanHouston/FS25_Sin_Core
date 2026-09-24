@@ -77,6 +77,10 @@ class Database:
         # from inside a transaction on all supported deployments).
         self.db.world_generations.create_index(
             [("server_key", 1), ("save_key", 1), ("state", 1)])
+        self.db.world_continuity_migrations.create_index(
+            [("server_key", 1), ("save_key", 1), ("source_world_id", 1), ("target_world_id", 1)],
+            unique=True)
+        self.db.world_continuity_migrations.create_index([("status", 1), ("created_at", -1)])
         self.db.fs25_money_operations.create_index(
             [("server_key", 1), ("save_key", 1), ("world_id", 1), ("state", 1)])
         self.db.bank_bridge_operations.create_index(

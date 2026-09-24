@@ -51,6 +51,353 @@ class FarmLifecycle:
     def current_world_id(self, server_key, save_key):
         return self.worlds.active_id(server_key, save_key)
 
+    @staticmethod
+    def _continuity_migration_id(server_key, save_key, source_world_id, target_world_id,
+                                 farm_id, farmland_id, discord_id, unique_user_id):
+        return _operation_id("same-physical-world-continuity", server_key, save_key,
+                             source_world_id, target_world_id, farm_id, farmland_id,
+                             discord_id, unique_user_id)
+
+    @staticmethod
+    def _optional_session(session):
+        return {"session": session} if session is not None else {}
+
+    @staticmethod
+    def _parse_positive_int(value, label):
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{label} must be a positive integer") from None
+        if parsed <= 0:
+            raise ValueError(f"{label} must be a positive integer")
+        return parsed
+
+    def _continuity_plan(self, server_key, save_key, source_world_id, target_world_id,
+                         farm_id, farm_name, farmland_id, discord_id, unique_user_id,
+                         *, session=None):
+        """Validate the bounded same-physical-save migration without writing.
+
+        This is deliberately evidence-heavy.  It is not a general farm adoption
+        path: the source request and successful receipts must identify the old
+        farm, while the target snapshot and a target-world player observation
+        must independently prove the same physical farm and land still exist.
+        """
+        server_key, save_key = str(server_key).strip(), str(save_key).strip()
+        source_world_id, target_world_id = str(source_world_id).strip(), str(target_world_id).strip()
+        farm_name, discord_id, unique_user_id = (str(value).strip()
+                                                  for value in (farm_name, discord_id, unique_user_id))
+        if not server_key or not save_key or not source_world_id or not target_world_id:
+            raise ValueError("server, save, source world, and target world are required")
+        if source_world_id == target_world_id:
+            raise ValueError("source and target worlds must differ")
+        farm_id = self._parse_positive_int(farm_id, "farm_id")
+        farmland_id = self._parse_positive_int(farmland_id, "farmland_id")
+        if not farm_name or not discord_id or not unique_user_id:
+            raise ValueError("farm name, Discord identity, and stable FS25 identity are required")
+        options = self._optional_session(session)
+        scope = {"server_key": server_key, "save_key": save_key}
+
+        source_generation = self.db.world_generations.find_one(
+            {**scope, "world_id": source_world_id}, **options)
+        if not isinstance(source_generation, dict) or source_generation.get("state") != "historical":
+            raise ValueError("source world must be an existing historical generation")
+        target_generation = self.db.world_generations.find_one(
+            {**scope, "world_id": target_world_id, "state": "active"}, **options)
+        if not isinstance(target_generation, dict):
+            raise ValueError("target world must be the active generation")
+        source_evidence = source_generation.get("evidence") or {}
+        target_evidence = target_generation.get("evidence") or {}
+        source_slot = source_evidence.get("savegame_index")
+        target_slot = target_evidence.get("savegame_index")
+        if source_slot is None or target_slot is None or str(source_slot) != str(target_slot):
+            raise ValueError("source and target physical save-slot evidence does not match")
+        source_map = str(source_evidence.get("map_id") or "")
+        target_map = str(target_evidence.get("map_id") or "")
+        if not source_map or source_map != target_map:
+            raise ValueError("source and target map evidence does not match")
+
+        target_snapshot = self.latest_snapshot(server_key, save_key, target_world_id, session=session)
+        if not isinstance(target_snapshot, dict) or target_snapshot.get("source") != "game":
+            raise ValueError("current target-world game snapshot is required")
+        if (target_snapshot.get("savegame_index") is not None
+                and str(target_snapshot.get("savegame_index")) != str(target_slot)):
+            raise ValueError("target snapshot physical save-slot evidence does not match")
+        target_farms = target_snapshot.get("farms") or {}
+        matching_farms = []
+        for raw_id, name in target_farms.items():
+            try:
+                parsed_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if str(name or "") == farm_name:
+                matching_farms.append(parsed_id)
+        if matching_farms != [farm_id]:
+            raise ValueError("target snapshot does not contain exactly the expected farm")
+        try:
+            target_owner = int((target_snapshot.get("farmlands") or {}).get(str(farmland_id), 0))
+        except (TypeError, ValueError):
+            raise ValueError("target snapshot has an invalid farmland owner") from None
+        if target_owner != farm_id:
+            raise ValueError("target snapshot does not prove the expected farmland owner")
+
+        source_mapping = self.db.sin_farms.find_one({
+            **scope, "world_id": source_world_id, "farm_type": MEMBER_FARM_TYPE,
+            "canonical_name": farm_name, "fs25_farm_id": farm_id,
+            "starting_farmland_id": farmland_id,
+        }, **options)
+        if not isinstance(source_mapping, dict):
+            raise ValueError("historical source farm mapping does not match the migration evidence")
+        old_owner = source_mapping.get("owner_discord_id")
+        if old_owner not in (None, "", discord_id):
+            raise ValueError("historical farm mapping belongs to a different Discord identity")
+
+        source_request = self.db.farm_requests.find_one({
+            **scope, "world_id": source_world_id, "discord_id": discord_id,
+            "farm_name": farm_name, "farm_id": farm_id, "starting_field": farmland_id,
+        }, **options)
+        if not isinstance(source_request, dict):
+            raise ValueError("historical source farm request does not match the migration evidence")
+        provision_id = source_request.get("operation_id")
+        provision = self.db.farm_operations.find_one({
+            **scope, "world_id": source_world_id, "_id": provision_id,
+            "operation_type": "provision_farm", "state": "succeeded",
+        }, **options) if provision_id else None
+        if not isinstance(provision, dict):
+            raise ValueError("historical farm provisioning receipt is not successful")
+        provision_receipt = provision.get("receipt") or {}
+        if provision_receipt.get("status") not in {"applied", "already_applied"} \
+                or str(provision_receipt.get("world_id") or "") != source_world_id \
+                or str(provision.get("fs25_farm_id")) != str(farm_id):
+            raise ValueError("historical farm provisioning receipt does not match the source world")
+        land_id = source_request.get("land_operation_id")
+        land = self.db.farm_operations.find_one({
+            **scope, "world_id": source_world_id, "_id": land_id,
+            "operation_type": "assign_farmland", "state": "succeeded",
+        }, **options) if land_id else None
+        if not isinstance(land, dict):
+            raise ValueError("historical farmland receipt is not successful")
+        land_receipt = land.get("receipt") or {}
+        if land_receipt.get("status") not in {"applied", "already_satisfied"} \
+                or str(land_receipt.get("world_id") or "") != source_world_id \
+                or str(land_receipt.get("farmland_id")) != str(farmland_id) \
+                or str(land_receipt.get("owner_farm_id")) != str(farm_id):
+            raise ValueError("historical farmland receipt does not match the source world")
+
+        identity_rows = list(self.db.game_identities.find({
+            "server_id": server_key, "save_id": save_key, "discord_id": discord_id,
+        }, **options).limit(2))
+        if len(identity_rows) != 1:
+            raise ValueError("target save identity link is missing or ambiguous")
+        identity = identity_rows[0]
+        identity_ids = {str(identity.get("fs25_unique_user_id") or ""),
+                        str(identity.get("game_player_id") or "")}
+        if unique_user_id not in identity_ids:
+            raise ValueError("target save identity link does not match the stable FS25 identity")
+        application = self.db.community_applications.find_one(
+            {"_id": discord_id, "state": "approved"}, **options)
+        if not isinstance(application, dict):
+            raise ValueError("the Discord identity is not currently approved")
+
+        observation_query = {"server_key": server_key, "save_key": save_key,
+                             "world_id": target_world_id,
+                             "fs25_unique_user_id": unique_user_id}
+        observations = list(self.db.observed_fs25_identities.find(
+            observation_query, **options).sort("last_seen_at", -1).limit(2))
+        observation_source = "observed_fs25_identities"
+        if not observations:
+            observations = list(self.db.player_activity_sessions.find(
+                observation_query, **options).sort("observed_farm_at", -1).limit(2))
+            observation_source = "player_activity_sessions"
+        if not observations:
+            raise ValueError("target world has no current observation for the stable FS25 identity")
+        observation = observations[0]
+        try:
+            observed_farm_id = int(observation.get("current_farm_id", observation.get("observed_farm_id", 0)) or 0)
+        except (TypeError, ValueError):
+            observed_farm_id = 0
+        if observed_farm_id != farm_id:
+            raise ValueError("target-world identity observation is not in the expected farm")
+
+        migration_id = self._continuity_migration_id(
+            server_key, save_key, source_world_id, target_world_id,
+            farm_id, farmland_id, discord_id, unique_user_id)
+        return {
+            "migration_id": migration_id,
+            "server_key": server_key, "save_key": save_key,
+            "source_world_id": source_world_id, "target_world_id": target_world_id,
+            "farm_id": farm_id, "farm_name": farm_name, "farmland_id": farmland_id,
+            "discord_id": discord_id, "fs25_unique_user_id": unique_user_id,
+            "source_mapping_id": source_mapping.get("_id"),
+            "source_request_id": source_request.get("_id"),
+            "source_provision_operation_id": provision_id,
+            "source_land_operation_id": land_id,
+            "physical_savegame_index": str(target_slot),
+            "physical_map_id": target_map,
+            "target_observed_farm_id": farm_id,
+            "target_snapshot_received_at": target_snapshot.get("received_at"),
+            "target_observation_source": observation_source,
+            "target_observation_at": observation.get("last_seen_at") or observation.get("observed_farm_at"),
+            "target_observation_session_id": observation.get("session_id"),
+        }
+
+    def plan_same_physical_world_migration(self, server_key, save_key, source_world_id,
+                                           target_world_id, farm_id, farm_name, farmland_id,
+                                           discord_id, unique_user_id):
+        """Return a read-only, evidence-backed continuity migration plan."""
+        plan = self._continuity_plan(server_key, save_key, source_world_id, target_world_id,
+                                     farm_id, farm_name, farmland_id, discord_id, unique_user_id)
+        existing = self.db.world_continuity_migrations.find_one({"_id": plan["migration_id"]})
+        if isinstance(existing, dict) and existing.get("status") == "applied":
+            plan["existing_status"] = "applied"
+        return plan
+
+    def migrate_same_physical_world(self, server_key, save_key, source_world_id,
+                                    target_world_id, farm_id, farm_name, farmland_id,
+                                    discord_id, unique_user_id, operator_id):
+        """Apply one explicit, idempotent continuity migration.
+
+        Only a new current-world projection is written.  Historical farms,
+        requests, operations, receipts, sessions, and generation rows are
+        never rewritten or copied.
+        """
+        if not str(operator_id or "").strip():
+            raise ValueError("an operator identity is required for continuity migration")
+
+        def apply(session=None):
+            options = self._optional_session(session)
+            plan = self._continuity_plan(server_key, save_key, source_world_id, target_world_id,
+                                         farm_id, farm_name, farmland_id, discord_id,
+                                         unique_user_id, session=session)
+            migration_id = plan["migration_id"]
+            existing = self.db.world_continuity_migrations.find_one({"_id": migration_id}, **options)
+            if isinstance(existing, dict) and existing.get("status") == "applied":
+                return {"status": "already_applied", "migration": existing, "plan": plan}
+            scope = {"server_key": plan["server_key"], "save_key": plan["save_key"],
+                     "world_id": plan["target_world_id"]}
+            # Keep the query Mongo-compatible with the in-process deterministic
+            # adapter as well: inspect the small current-world member set and
+            # match either stable identity in Python.  This is fail-closed for
+            # every unrelated current-world farm.
+            current_mappings = [
+                row for row in self.db.sin_farms.find({
+                    **scope, "farm_type": MEMBER_FARM_TYPE,
+                }, **options)
+                if (row.get("fs25_farm_id") in (plan["farm_id"], str(plan["farm_id"]))
+                    or row.get("canonical_name") == plan["farm_name"])
+            ]
+            for mapping in current_mappings:
+                if (mapping.get("fs25_farm_id") not in (None, plan["farm_id"], str(plan["farm_id"]))
+                        or mapping.get("canonical_name") not in (None, plan["farm_name"])
+                        or mapping.get("owner_discord_id") not in (None, "", plan["discord_id"])):
+                    raise ValueError("target world already contains a conflicting member farm mapping")
+            mapping_id = next((row.get("_id") for row in current_mappings if row.get("_id")), None) \
+                or _operation_id("continuity-farm", migration_id)
+            request_id = _operation_id("continuity-request", migration_id)
+            conflicting_requests = list(self.db.farm_requests.find({
+                **scope, "discord_id": plan["discord_id"],
+                "_id": {"$ne": request_id},
+            }, **options).limit(2))
+            if conflicting_requests:
+                raise ValueError("target world already contains a farm request for this identity")
+            now = self._now()
+            mapping_values = {
+                "_id": mapping_id, **scope, "canonical_name": plan["farm_name"],
+                "farm_type": MEMBER_FARM_TYPE, "owner_discord_id": None,
+                "source_request_id": None, "starting_farmland_id": plan["farmland_id"],
+                "fs25_farm_id": plan["farm_id"], "state": "provisioned",
+                "migration_id": migration_id, "migration_source_world_id": plan["source_world_id"],
+                "migration_source_request_id": plan["source_request_id"],
+                "created_at": now, "updated_at": now,
+            }
+            mapping_insert = dict(mapping_values)
+            mapping_insert.pop("updated_at", None)
+            self.db.sin_farms.update_one({"_id": mapping_id}, {
+                "$setOnInsert": mapping_insert,
+                # Do not repeat insert-only paths in another update operator;
+                # Mongo rejects overlapping $setOnInsert/$set paths.  Existing
+                # rows have already been checked above for exact compatibility.
+                "$set": {"updated_at": now, "migration_last_verified_at": now}},
+                upsert=True, **options)
+
+            observation_query = {"server_key": plan["server_key"], "save_key": plan["save_key"],
+                                 "world_id": plan["target_world_id"],
+                                 "fs25_unique_user_id": plan["fs25_unique_user_id"]}
+            observation = self.db.observed_fs25_identities.find_one(observation_query, **options)
+            if not isinstance(observation, dict):
+                session_query = dict(observation_query)
+                session_observation = self.db.player_activity_sessions.find_one(session_query, **options)
+                if isinstance(session_observation, dict):
+                    observation = session_observation
+            if not isinstance(observation, dict):
+                raise ValueError("target-world observation disappeared before migration commit")
+            try:
+                observed_farm_id = int(observation.get("current_farm_id", observation.get("observed_farm_id", 0)) or 0)
+            except (TypeError, ValueError):
+                observed_farm_id = 0
+            if observed_farm_id != plan["farm_id"]:
+                raise ValueError("target-world identity observation changed before migration commit")
+            self.db.observed_fs25_identities.update_one(observation_query, {
+                "$set": {"latest_display_name": observation.get("latest_display_name")
+                         or observation.get("observed_display_name") or plan["farm_name"],
+                         "current_farm_id": plan["farm_id"],
+                         "currently_connected": observation.get("currently_connected", False),
+                         "last_seen_at": observation.get("last_seen_at") or now,
+                         "migration_id": migration_id,
+                         "observation_source": "same_physical_world_migration"},
+                "$setOnInsert": {"first_seen_at": observation.get("first_seen_at") or now}},
+                upsert=True, **options)
+
+            request_values = {
+                "_id": request_id, "discord_id": plan["discord_id"],
+                "server_key": plan["server_key"], "save_key": plan["save_key"],
+                "world_id": plan["target_world_id"], "farm_name": plan["farm_name"],
+                "starting_field": plan["farmland_id"], "starting_field_id": plan["farmland_id"],
+                "state": "awaiting_manager", "farm_id": plan["farm_id"],
+                "mapping_id": mapping_id, "assigned_farmland_id": plan["farmland_id"],
+                # This is a current snapshot observation, not a new land
+                # mutation.  Do not invent an operation-style before-owner.
+                "land_confirmed": True, "owner_before_farm_id": None,
+                "owner_farm_id": plan["farm_id"], "approved_by": str(operator_id),
+                "migration_id": migration_id, "migration_source_world_id": plan["source_world_id"],
+                "migration_source_request_id": plan["source_request_id"],
+                "created_at": now, "updated_at": now,
+            }
+            request_insert = dict(request_values)
+            request_insert.pop("updated_at", None)
+            self.db.farm_requests.update_one({"_id": request_id}, {
+                "$setOnInsert": request_insert,
+                "$set": {"updated_at": now, "migration_last_verified_at": now}},
+                upsert=True, **options)
+            migration = {
+                "_id": migration_id, "server_key": plan["server_key"],
+                "save_key": plan["save_key"], "source_world_id": plan["source_world_id"],
+                "target_world_id": plan["target_world_id"], "farm_id": plan["farm_id"],
+                "farm_name": plan["farm_name"], "farmland_id": plan["farmland_id"],
+                "discord_id": plan["discord_id"], "fs25_unique_user_id": plan["fs25_unique_user_id"],
+                "source_mapping_id": plan["source_mapping_id"],
+                "source_request_id": plan["source_request_id"],
+                "target_mapping_id": mapping_id, "target_request_id": request_id,
+                "evidence": {"physical_savegame_index": plan["physical_savegame_index"],
+                              "physical_map_id": plan["physical_map_id"],
+                              "target_snapshot_received_at": plan["target_snapshot_received_at"],
+                              "target_observation_source": plan["target_observation_source"],
+                              "target_observation_at": plan["target_observation_at"],
+                              "target_observation_session_id": plan["target_observation_session_id"]},
+                "operator_id": str(operator_id), "status": "applied",
+                "created_at": existing.get("created_at", now) if isinstance(existing, dict) else now,
+                "updated_at": now,
+            }
+            migration_insert = dict(migration)
+            migration_insert.pop("updated_at", None)
+            self.db.world_continuity_migrations.update_one({"_id": migration_id}, {
+                "$setOnInsert": migration_insert,
+                "$set": {"updated_at": now, "last_verified_at": now}}, upsert=True, **options)
+            return {"status": "applied", "migration": migration, "plan": plan}
+
+        if isinstance(self.database, Database):
+            return self.database.atomic(apply)
+        return apply(None)
+
     def require_current_world(self, server_key, save_key, world_id):
         return self.worlds.require_active(server_key, save_key, world_id)
 
