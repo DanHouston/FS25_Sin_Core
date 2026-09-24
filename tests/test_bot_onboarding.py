@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from pathlib import Path
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -85,6 +86,8 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         interaction = MagicMock()
         interaction.user.id = "member"
         interaction.response.edit_message = AsyncMock()
+        interaction.response.defer = AsyncMock()
+        interaction.edit_original_response = AsyncMock()
         view.field_select._values = ["22"]
         await view._select_field(interaction)
         self.assertEqual(view.selected_field_id, 22)
@@ -94,7 +97,86 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         await view._submit_request(interaction)
         self.bot.submit_farm_request_from_picker.assert_called_once_with(
             "member", "server", "save", "world-a", 22)
-        self.assertIn("pending staff review", interaction.response.edit_message.await_args.kwargs["content"])
+        interaction.response.defer.assert_awaited_once_with()
+        self.assertIn("pending staff review", interaction.edit_original_response.await_args.kwargs["content"])
+
+    async def test_farm_request_submit_defers_before_slow_authoritative_reservation(self):
+        view = FarmRequestView(self.bot, "member", "server", "save", "world-a", "Hobo's Hollow", [
+            {"field_id": 44, "farmland_id": 44}])
+        interaction = MagicMock()
+        interaction.user.id = "member"
+        interaction.response.edit_message = AsyncMock()
+        interaction.response.defer = AsyncMock()
+        interaction.edit_original_response = AsyncMock()
+        view.field_select._values = ["44"]
+        await view._select_field(interaction)
+
+        sequence = []
+        async def defer():
+            sequence.append("defer")
+        interaction.response.defer.side_effect = defer
+
+        def slow_reservation(*args):
+            sequence.append("reservation")
+            time.sleep(0.02)
+            return {"farm_name": "Farm", "starting_field_id": 44, "starting_field": 44}
+
+        self.bot.submit_farm_request_from_picker = slow_reservation
+        await view._submit_request(interaction)
+
+        self.assertEqual(sequence, ["defer", "reservation"])
+        interaction.edit_original_response.assert_awaited_once()
+        self.assertIn("pending staff review", interaction.edit_original_response.await_args.kwargs["content"])
+
+    async def test_farm_request_submit_updates_after_deferred_stale_reservation_failure(self):
+        view = FarmRequestView(self.bot, "member", "server", "save", "world-a", "Hobo's Hollow", [
+            {"field_id": 44, "farmland_id": 44}])
+        interaction = MagicMock()
+        interaction.user.id = "member"
+        interaction.response.edit_message = AsyncMock()
+        interaction.response.defer = AsyncMock()
+        interaction.edit_original_response = AsyncMock()
+        view.field_select._values = ["44"]
+        await view._select_field(interaction)
+
+        sequence = []
+        async def defer():
+            sequence.append("defer")
+        interaction.response.defer.side_effect = defer
+
+        def slow_failure(*args):
+            sequence.append("reservation")
+            time.sleep(0.02)
+            raise ValueError("That starting field was just reserved by another pending request")
+
+        self.bot.submit_farm_request_from_picker = slow_failure
+        await view._submit_request(interaction)
+
+        self.assertEqual(sequence, ["defer", "reservation"])
+        content = interaction.edit_original_response.await_args.kwargs["content"]
+        self.assertIn("no longer current", content)
+        self.assertTrue(all(item.disabled for item in view.children))
+
+    async def test_farm_request_submit_reports_unexpected_backend_failure_after_defer(self):
+        view = FarmRequestView(self.bot, "member", "server", "save", "world-a", "Hobo's Hollow", [
+            {"field_id": 44, "farmland_id": 44}])
+        interaction = MagicMock()
+        interaction.user.id = "member"
+        interaction.response.edit_message = AsyncMock()
+        interaction.response.defer = AsyncMock()
+        interaction.edit_original_response = AsyncMock()
+        view.field_select._values = ["44"]
+        await view._select_field(interaction)
+
+        def backend_failure(*args):
+            raise RuntimeError("database unavailable")
+
+        self.bot.submit_farm_request_from_picker = backend_failure
+        await view._submit_request(interaction)
+
+        interaction.response.defer.assert_awaited_once_with()
+        content = interaction.edit_original_response.await_args.kwargs["content"]
+        self.assertIn("failed before it was committed", content)
 
     async def test_farm_request_view_pages_more_than_discord_option_limit(self):
         fields = [{"field_id": field_id, "farmland_id": field_id}

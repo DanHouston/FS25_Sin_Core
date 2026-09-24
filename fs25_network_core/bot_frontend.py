@@ -301,20 +301,42 @@ class FarmRequestView(discord.ui.View):
         if self.selected_field_id is None:
             await interaction.response.send_message("Select a starting field first.", ephemeral=True)
             return
+        # Discord requires component interactions to be acknowledged within a
+        # few seconds.  Reservation/revalidation may involve MongoDB and the
+        # authoritative current-world map, so acknowledge before doing any
+        # blocking work.  For a component, the default deferred response is a
+        # deferred message update; edit_original_response updates the picker
+        # once the atomic reservation finishes.
+        await interaction.response.defer()
+        logging.info("farm request field submission started server=%s save=%s world=%s field=%s",
+                     self.server_key, self.save_key, self.world_id, self.selected_field_id)
         try:
             record = await asyncio.to_thread(
                 self.bot.submit_farm_request_from_picker, str(interaction.user.id),
                 self.server_key, self.save_key, self.world_id, self.selected_field_id)
         except (MapUnavailable, MapValidationError, ValueError) as error:
+            logging.warning("farm request field submission rejected server=%s save=%s world=%s field=%s reason=%s",
+                            self.server_key, self.save_key, self.world_id, self.selected_field_id,
+                            str(error)[:240])
             self.clear_items()
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content=f"This field selection is no longer current: {error}\nRun `/farm_request` again to refresh the map.",
+                view=self)
+            return
+        except Exception as error:
+            logging.exception("farm request field submission failed server=%s save=%s world=%s field=%s",
+                              self.server_key, self.save_key, self.world_id, self.selected_field_id)
+            self.clear_items()
+            await interaction.edit_original_response(
+                content="Farm request submission failed before it was committed. Run `/farm_request` again and retry.",
                 view=self)
             return
         self.clear_items()
         field_id = record.get("starting_field_id") or self.selected_field_id
         farmland_id = record.get("starting_field")
-        await interaction.response.edit_message(
+        logging.info("farm request field submission committed server=%s save=%s world=%s field=%s farmland=%s",
+                     self.server_key, self.save_key, self.world_id, field_id, farmland_id)
+        await interaction.edit_original_response(
             content=(f"Farm request submitted for **{record['farm_name']}**.\n"
                      f"Selected Field **{field_id}** (Farmland **{farmland_id}**) is pending staff review."),
             view=self)

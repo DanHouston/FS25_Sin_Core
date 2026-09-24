@@ -357,6 +357,9 @@ class FarmRequestReservationTests(unittest.TestCase):
             "farms": {"1": "SiN Harvest"}, "players": {}})
         with self.assertRaisesRegex(ValueError, "older FS25 world generation"):
             self.lifecycle.request_farm("member-a", "server", "save", 22, world_id="world-a", field_id=1)
+        self.assertIsNone(self.db.farm_requests.find_one({"discord_id": "member-a"}))
+        self.assertIsNone(self.db.farm_field_reservations.find_one({
+            "server_key": "server", "save_key": "save", "farmland_id": 22}))
 
     def test_rejection_releases_the_current_world_reservation(self):
         request = self.lifecycle.request_farm("member-a", "server", "save", 22, world_id="world-a", field_id=1)
