@@ -378,6 +378,8 @@ class FarmLifecycle:
                 "discord_id": plan["discord_id"], "fs25_unique_user_id": plan["fs25_unique_user_id"],
                 "source_mapping_id": plan["source_mapping_id"],
                 "source_request_id": plan["source_request_id"],
+                "source_provision_operation_id": plan["source_provision_operation_id"],
+                "source_land_operation_id": plan["source_land_operation_id"],
                 "target_mapping_id": mapping_id, "target_request_id": request_id,
                 "evidence": {"physical_savegame_index": plan["physical_savegame_index"],
                               "physical_map_id": plan["physical_map_id"],
