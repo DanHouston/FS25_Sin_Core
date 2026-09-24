@@ -124,6 +124,27 @@ class AuthorizationTests(unittest.TestCase):
         self.assertEqual(self.auth.acknowledge("job", "server", "save", 1, receipt), "applied")
         self.db.memberships.update_one.assert_not_called()
 
+    def test_manager_receipt_queues_one_durable_staff_completion_notification(self):
+        job = {"_id": "job", "state": "pending", "membership_id": "member",
+               "role": "farm_manager", "farm_id": 3, "revision": 1,
+               "server_id": "server", "save_id": "save", "world_id": "world"}
+        request = {"_id": "request", "permission_operation_id": "job",
+                   "discord_id": "discord", "farm_name": "Matt's Farm", "farm_id": 3,
+                   "server_key": "server", "save_key": "save", "world_id": "world"}
+        self.db.permission_jobs.find_one.return_value = job
+        self.db.farm_requests.find_one.return_value = request
+        self.db.memberships.update_one.return_value.modified_count = 1
+        receipt = {"operation_id": "job", "status": "applied", "receipt": "manager verified",
+                   "farm_id": 3, "current_farm_id": 3, "manager": True,
+                   "authoritative_readback": True}
+
+        self.assertEqual(self.auth.acknowledge("job", "server", "save", 1, receipt), "applied")
+
+        notification = self.db.activity_outbox.insert_one.call_args.args[0]
+        self.assertEqual(notification["destination"], "staff")
+        self.assertIn("Matt's Farm", notification["message"])
+        self.assertIn("financial provisioning remains pending", notification["message"].lower())
+
     def test_revocation_acknowledgment_marks_membership_revoked(self):
         self.db.permission_jobs.find_one.return_value = dict(_id="job", state="pending", membership_id="member",
                                                              role="revoked", farm_id=99, source_farm_id=2)

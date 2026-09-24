@@ -707,6 +707,33 @@ class AuthorizationManager:
                     or not self._receipt_bool(receipt, "authoritative_readback"):
                 raise ValueError("Permission receipt lacks role-specific authoritative success evidence")
 
+    def _notify_manager_applied(self, operation_id):
+        """Create one durable staff notification after manager read-back."""
+        job = self.db.permission_jobs.find_one({"_id": operation_id})
+        if not isinstance(job, dict) or job.get("role") != "farm_manager":
+            return
+        request = self.db.farm_requests.find_one({"permission_operation_id": operation_id})
+        if not isinstance(request, dict):
+            return
+        server_key = str(job.get("server_id") or request.get("server_key") or "")
+        save_key = str(job.get("save_id") or request.get("save_key") or "")
+        world_id = str(job.get("world_id") or request.get("world_id") or "") or None
+        farm_id = job.get("farm_id") or request.get("farm_id")
+        farm_name = request.get("farm_name") or "Unnamed farm"
+        message = (f"✅ Farm setup completed: {farm_name} (FS25 Farm {farm_id}) "
+                   f"now has manager authority for member {request.get('discord_id')}. "
+                   f"Server {server_key}, save {save_key}. "
+                   "Financial provisioning remains pending until the FS25 money/loan capability is live-verified.")
+        try:
+            from .activity import ActivityOutbox
+            ActivityOutbox(self.database).enqueue_staff(
+                f"farm-manager-applied:{operation_id}", server_key, message,
+                save_key=save_key, world_id=world_id)
+        except Exception:
+            # Notification failure must never roll back an authoritative
+            # permission receipt. The durable farm/request state is primary.
+            logging.exception("staff farm completion notification could not be queued operation=%s", operation_id)
+
     def acknowledge(self, operation_id, authenticated_server_id, save_id, revision, receipt, world_id=None):
         """Only after the mod confirms the exact job was applied and persisted."""
 
@@ -754,7 +781,10 @@ class AuthorizationManager:
                         "state": "active", "owner_discord_id": request.get("discord_id"),
                         "activated_at": now, "updated_at": now}}, session=session)
             return "applied"
-        return self.database.atomic(acknowledge)
+        result = self.database.atomic(acknowledge)
+        if result == "applied":
+            self._notify_manager_applied(operation_id)
+        return result
 
     def status(self, discord_id, server_id, save_id, world_id=None):
         active = self.worlds.active_id(server_id, save_id)

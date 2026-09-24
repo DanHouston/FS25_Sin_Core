@@ -15,10 +15,12 @@ class ActivityOutbox:
         return hashlib.sha256("|".join((str(server_key), str(save_key or ""),
                                          str(world_id or "legacy"), str(source_event_id))).encode("utf-8")).hexdigest()
 
-    def enqueue(self, source_event_id, server_key, activity_type, message, save_key=None, world_id=None):
+    def enqueue(self, source_event_id, server_key, activity_type, message, save_key=None,
+                world_id=None, destination="activity"):
         scoped_id = self._scoped_id(source_event_id, server_key, save_key, world_id)
         doc = {"_id": scoped_id, "activity_id": scoped_id, "source_event_id": source_event_id,
                "server_key": server_key, "save_key": save_key, "activity_type": activity_type, "message": message,
+               "destination": str(destination or "activity"),
                "created_at": datetime.now(timezone.utc), "status": "pending", "attempts": 0}
         if world_id:
             doc["world_id"] = str(world_id)
@@ -26,6 +28,11 @@ class ActivityOutbox:
         except DuplicateKeyError:
             pass
         return doc
+
+    def enqueue_staff(self, source_event_id, server_key, message, save_key=None, world_id=None):
+        """Queue one idempotent operational notification for configured staff."""
+        return self.enqueue(source_event_id, server_key, "staff_notification", message,
+                            save_key=save_key, world_id=world_id, destination="staff")
 
 class ActivityPublisher:
     def __init__(self, bot, database, interval=2.0, max_attempts=5):
@@ -71,13 +78,20 @@ class ActivityPublisher:
     async def publish(self, record):
         permanent = False
         try:
-            server = self.outbox.db.sin_servers.find_one({"server_key": record["server_key"]})
-            if not server: raise ValueError("server_not_found")
-            try:
-                channel_id = int(server["discord_activity_channel_id"])
-            except (KeyError, TypeError, ValueError):
-                permanent = True
-                raise ValueError("invalid activity channel ID")
+            if record.get("destination") == "staff":
+                try:
+                    channel_id = int(self.bot.channels.get("staff"))
+                except (AttributeError, TypeError, ValueError):
+                    permanent = True
+                    raise ValueError("invalid staff channel ID")
+            else:
+                server = self.outbox.db.sin_servers.find_one({"server_key": record["server_key"]})
+                if not server: raise ValueError("server_not_found")
+                try:
+                    channel_id = int(server["discord_activity_channel_id"])
+                except (KeyError, TypeError, ValueError):
+                    permanent = True
+                    raise ValueError("invalid activity channel ID")
             channel = self.bot.get_channel(channel_id)
             if channel is None:
                 try:

@@ -216,10 +216,18 @@ See [Discord application commands](https://docs.discord.com/developers/interacti
    approved farm name, discovers the actual FS25 farm ID, checks the requested
    field is still unowned, and returns a receipt. A field conflict becomes a
    recoverable reconciliation state and never steals land.
-7. The central service then queues the separate manager permission operation.
-   Manager authority is not active until FS25_SiN_Server confirms that operation.
+7. The central service then queues the separate manager permission operation
+   after authoritative farmland ownership read-back. Financial provisioning is
+   tracked separately and remains visibly pending until FS25 money/loan
+   mutation and read-back are live-verified; it does not block manager
+   authority.
 8. `/farm_status` takes no server argument and reports provisioning,
-   awaiting-manager, active, rejected, or reconciliation-required state.
+   awaiting-manager, active, rejected, or reconciliation-required state. A
+   financial-capability notice may accompany an awaiting-manager/active farm.
+   Once FS25 confirms manager authority, JiN queues one durable completion
+   notification to the configured `#staff` channel.
+   Staff can inspect another member's bounded current-world lifecycle with
+   `/farm_status_staff server:<server> member:<Discord ID>` from `#staff`.
 
 To decline a request, staff uses `/farm_reject server member reason`. The
 requester can read its state and rejection reason using /farm_status.

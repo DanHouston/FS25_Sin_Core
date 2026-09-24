@@ -178,6 +178,67 @@ class FarmLifecycleTests(unittest.TestCase):
         update = self.db.farm_requests.update_one.call_args.args[1]["$set"]
         self.assertEqual(update["permission_operation_id"], "manager-op")
 
+    def test_operations_poll_migrates_legacy_financial_gate_to_manager_queue(self):
+        request = {"_id": "request", "discord_id": "discord", "state": "financial_capability_required",
+                   "farm_id": 3, "mapping_id": "mapping", "operation_id": "op",
+                   "approved_by": "staff", "farm_name": "Matt's Farm"}
+        self.db.farm_requests.find.return_value.sort.return_value.limit.return_value = [request]
+        self.db.farm_operations.find_one.side_effect = None
+        self.db.farm_operations.find_one.return_value = {"_id": "op", "state": "succeeded"}
+        self.lifecycle.authorization.assign.return_value = "manager-op"
+
+        self.lifecycle.operations_for("server", "save")
+
+        self.lifecycle.authorization.assign.assert_called_once()
+        update = self.db.farm_requests.update_one.call_args.args[1]["$set"]
+        self.assertEqual(update["state"], "awaiting_manager")
+        self.assertEqual(update["permission_operation_id"], "manager-op")
+
+    def test_contractor_reconciliation_uses_latest_current_world_session_farm(self):
+        self.lifecycle.current_world_id = MagicMock(return_value="world")
+        self.db.observed_fs25_identities.find_one.return_value = None
+        self.db.player_activity_sessions.find_one.return_value = {
+            "server_key": "server", "save_key": "save", "world_id": "world",
+            "fs25_unique_user_id": "stable", "observed_farm_id": 3,
+        }
+        farm = {"_id": "member", "discord_id": "discord", "server_id": "server",
+                "save_id": "save", "game_player_id": "stable", "fs25_unique_user_id": "stable"}
+        self.db.sin_farms.find.return_value = [{"_id": "shared", "farm_type": "system",
+            "canonical_name": SYSTEM_FARM_NAME, "state": "active", "fs25_farm_id": 1}]
+        self.db.server_snapshots.find_one.return_value = {
+            "farms": {"1": SYSTEM_FARM_NAME, "3": "Matt's Farm"}}
+        self.db.game_identities.find.return_value = [farm]
+        self.db.community_applications.find_one.return_value = {"state": "approved"}
+        self.lifecycle.authorization.assign.return_value = "contractor-op"
+
+        result = self.lifecycle._reconcile_shared_contractor_authorizations("server", "save")
+
+        self.assertEqual(result["discord"], "contractor-op")
+        call = self.lifecycle.authorization.assign.call_args
+        self.assertEqual(call.kwargs["source_farm_id"], 3)
+        self.assertEqual(call.args[4], "contractor")
+
+    def test_contractor_reconciliation_keeps_farm_zero_ineligible(self):
+        self.lifecycle.current_world_id = MagicMock(return_value="world")
+        self.db.observed_fs25_identities.find_one.return_value = None
+        self.db.player_activity_sessions.find_one.return_value = {
+            "server_key": "server", "save_key": "save", "world_id": "world",
+            "fs25_unique_user_id": "stable", "observed_farm_id": 0,
+        }
+        identity = {"discord_id": "discord", "server_id": "server", "save_id": "save",
+                    "game_player_id": "stable", "fs25_unique_user_id": "stable"}
+        self.db.sin_farms.find.return_value = [{"_id": "shared", "farm_type": "system",
+            "canonical_name": SYSTEM_FARM_NAME, "state": "active", "fs25_farm_id": 1}]
+        self.db.server_snapshots.find_one.return_value = {
+            "farms": {"1": SYSTEM_FARM_NAME, "3": "Matt's Farm"}}
+        self.db.game_identities.find.return_value = [identity]
+        self.db.community_applications.find_one.return_value = {"state": "approved"}
+
+        result = self.lifecycle._reconcile_shared_contractor_authorizations("server", "save")
+
+        self.assertEqual(result, {})
+        self.lifecycle.authorization.assign.assert_not_called()
+
     def test_duplicate_successful_receipt_is_idempotent(self):
         operation = {"_id": "op", "operation_id": "op", "operation_type": "ensure_farm",
                      "state": "dispatched", "payload": {"farm_type": "system",

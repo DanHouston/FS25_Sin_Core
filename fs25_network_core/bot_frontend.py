@@ -735,7 +735,9 @@ class NetworkBot(discord.Client):
                                                 save_key, str(interaction.user.id))
             await interaction.followup.send(
                 f"Approved requester `{member}` for **{request['farm_name']}**. "
-                f"Provisioning and the requested farmland ownership are pending (operation `{operation}`). Manager authority remains withheld until FS25 reads back the requested farmland owner.",
+                f"Provisioning and the requested farmland ownership are pending (operation `{operation}`). "
+                "After FS25 reads back the requested farmland owner, manager authority will be queued. "
+                "Financial provisioning remains a separate pending capability until FS25 money/loan read-back is live-verified.",
                 ephemeral=True)
 
         @farm_approve.autocomplete("member")
@@ -807,7 +809,54 @@ class NetworkBot(discord.Client):
                            f"Starting field: {request.get('starting_field')}\nStatus: {request.get('state')}")
                 if request.get("farm_id"):
                     message += f"\nFS25 Farm ID: {request['farm_id']}"
+                if request.get("financial_capability_state") == "capability_required":
+                    message += ("\nFinancial provisioning: pending — FS25 money/loan capability is not "
+                                "live-verified; this does not block manager authority after land read-back.")
             await interaction.followup.send(message, ephemeral=True)
+
+        @self.tree.command(name="farm_status_staff", description="Staff: inspect one player's current farm lifecycle")
+        @app_commands.check(channel_check)
+        @app_commands.default_permissions(administrator=True)
+        async def farm_status_staff(interaction: discord.Interaction, server: str, member: str):
+            staff_check(interaction)
+            config = server_config(interaction, server)
+            save_key = selected_save(config)
+            await interaction.response.defer(ephemeral=True)
+            status = await asyncio.to_thread(self.farm_lifecycle.staff_status, server, save_key, str(member).strip())
+            request = status.get("request") or {}
+            identity = status.get("identity") or {}
+            session = status.get("session") or {}
+            lines = [f"Staff farm status for `{member}`", f"Server: {server}",
+                     f"Save: {save_key}", f"World: {status.get('world_id') or 'unavailable'}"]
+            if request:
+                lines.extend([f"Farm: {request.get('farm_name') or 'Unnamed'}",
+                              f"FS25 Farm ID: {request.get('farm_id') or 'pending'}",
+                              f"Lifecycle: {request.get('state') or 'unknown'}"])
+                if request.get("financial_capability_state") == "capability_required":
+                    lines.append("Financial provisioning: pending (FS25 money/loan capability not live-verified)")
+            else:
+                lines.append("Farm request: none in the current world")
+            if identity:
+                lines.append(f"FS25 identity: {identity.get('fs25_unique_user_id') or identity.get('game_player_id') or 'unavailable'}")
+            if session:
+                lines.append(f"Latest native farm observation: {session.get('observed_farm_id', session.get('current_farm_id', 0))}"
+                             f" at {session.get('observed_farm_at') or session.get('last_seen_at') or 'unknown'}")
+            memberships = status.get("memberships") or []
+            if memberships:
+                lines.append("Authority: " + "; ".join(
+                    f"{row.get('desired_role')}={row.get('state')}" for row in memberships))
+            else:
+                lines.append("Authority: no current-world SiN memberships")
+            operations = status.get("operations") or []
+            if operations:
+                lines.append("Operations: " + "; ".join(
+                    f"{row.get('operation_type')}={row.get('state')}" for row in operations))
+            await interaction.followup.send("\n".join(lines), ephemeral=True,
+                                            allowed_mentions=discord.AllowedMentions.none())
+
+        @farm_status_staff.autocomplete("server")
+        async def farm_status_staff_server_autocomplete(interaction: discord.Interaction, current: str):
+            return await server_choices(interaction, current, "reconcile")
 
         @self.tree.command(name="server_reconcile", description="Staff: reconcile required SiN server resources")
         @app_commands.check(channel_check)

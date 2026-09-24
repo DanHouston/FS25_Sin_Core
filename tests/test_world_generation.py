@@ -130,11 +130,14 @@ class WorldGenerationTests(unittest.TestCase):
         self.assertEqual(result["world_id"], "replacement")
         self.assertEqual(self.lifecycle.current_world_id("server", "save"), "replacement")
 
-    def test_generation_aware_onboarding_waits_for_real_financial_capability(self):
+    def test_generation_aware_onboarding_queues_manager_while_finance_stays_pending(self):
         self.lifecycle.record_snapshot("server", "save", self.snapshot("generation-a",
             farms={"2": "New Farm"}, farmlands={"22": 0}))
         self.db.farm_requests.insert_one({"_id": "request", "server_key": "server", "save_key": "save",
-            "world_id": "generation-a", "state": "land_assigning", "farm_name": "New Farm"})
+            "world_id": "generation-a", "state": "land_assigning", "farm_name": "New Farm",
+            "discord_id": "discord", "mapping_id": "mapping", "approved_by": "staff"})
+        self.db.game_identities.insert_one({"discord_id": "discord", "server_id": "server",
+            "save_id": "save", "game_player_id": "stable", "fs25_unique_user_id": "stable"})
         self.db.farm_operations.insert_one({"_id": "land-op", "operation_id": "land-op",
             "server_key": "server", "save_key": "save", "world_id": "generation-a",
             "operation_type": "assign_farmland", "state": "dispatched",
@@ -147,10 +150,11 @@ class WorldGenerationTests(unittest.TestCase):
 
         request = self.db.farm_requests.find_one({"_id": "request"})
         financial = self.db.farm_financial_provisioning.find_one({"request_id": "request"})
-        self.assertEqual(request["state"], "financial_capability_required")
+        self.assertEqual(request["state"], "awaiting_manager")
+        self.assertEqual(request["financial_capability_state"], "capability_required")
         self.assertEqual(financial["target_operating_cash"], 1_000_000)
         self.assertEqual(financial["state"], "capability_required")
-        self.assertIsNone(self.db.permission_jobs.find_one({"farm_id": 2}))
+        self.assertIsNotNone(self.db.permission_jobs.find_one({"farm_id": 2}))
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ COMMAND_CHANNELS = {
     "apply": "sin_apply",
     "application_pending": "staff", "application_approve": "staff", "application_deny": "staff",
     "server_register": "staff", "server_info": "staff", "farm_requests": "staff",
-    "farm_roster": "staff", "farm_approve": "staff", "farmland_status": "staff",
+    "farm_roster": "staff", "farm_status_staff": "staff", "farm_approve": "staff", "farmland_status": "staff",
     "farm_reject": "staff", "farm_assign": "staff", "event_create": "staff",
     "event_cancel": "staff", "event_complete": "staff", "transfer_request": "staff",
     "transfer_list": "staff", "transfer_accept": "staff", "transfer_dispatch": "staff",

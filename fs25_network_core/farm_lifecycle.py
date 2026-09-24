@@ -670,9 +670,21 @@ class FarmLifecycle:
         except TypeError:
             observed = self.db.observed_fs25_identities.find_one(query)
         if not isinstance(observed, dict):
+            # Normal runtime activity is durably recorded in sessions.  The
+            # trusted identity projection is populated by explicit roster/
+            # registration flows, so contractor reconciliation must also use
+            # the latest current-world session observation.  Never fall back
+            # to an older world or an older farm=0/farm>0 observation: the
+            # newest observation is authoritative for eligibility.
+            try:
+                observed = self.db.player_activity_sessions.find_one(
+                    query, sort=[("observed_farm_at", -1), ("last_seen_at", -1)])
+            except TypeError:
+                observed = self.db.player_activity_sessions.find_one(query)
+        if not isinstance(observed, dict):
             return None
         try:
-            farm_id = int(observed.get("current_farm_id", 0) or 0)
+            farm_id = int(observed.get("current_farm_id", observed.get("observed_farm_id", 0)) or 0)
         except (TypeError, ValueError):
             return None
         return farm_id if farm_id > 0 else None
@@ -880,7 +892,8 @@ class FarmLifecycle:
         """Retry missing owner assignments during the existing Agent poll."""
         requests = self.db.farm_requests.find({
             **self._scope(server_key, save_key),
-            "state": {"$in": ["awaiting_manager", "manager_authorization_required"]},
+            "state": {"$in": ["awaiting_manager", "manager_authorization_required",
+                                "financial_capability_required"]},
             "farm_id": {"$exists": True}}).sort("updated_at", 1).limit(50)
         for request in list(requests):
             operation_id = request.get("operation_id")
@@ -1023,6 +1036,44 @@ class FarmLifecycle:
 
     def request_status(self, discord_id):
         return self.db.farm_requests.find_one({"discord_id": str(discord_id)}, sort=[("updated_at", -1), ("created_at", -1)])
+
+    def staff_status(self, server_key, save_key, discord_id):
+        """Return one bounded, current-world farm lifecycle view for staff."""
+        scope = self._scope(server_key, save_key)
+        request_rows = list(self.db.farm_requests.find({**scope, "discord_id": str(discord_id)}))
+        requests = sorted(request_rows,
+                          key=lambda row: (str(row.get("updated_at") or ""),
+                                           str(row.get("created_at") or "")), reverse=True)[:1]
+        request = requests[0] if requests else None
+        identity = self.db.game_identities.find_one({
+            "server_id": str(server_key), "save_id": str(save_key), "discord_id": str(discord_id)})
+        memberships = list(self.db.memberships.find({**scope, "discord_id": str(discord_id)}).limit(20))
+        operations = []
+        operation_ids = []
+        if isinstance(request, dict):
+            operation_ids.extend(value for value in (
+                request.get("operation_id"), request.get("land_operation_id"),
+                request.get("permission_operation_id"), request.get("contractor_permission_operation_id")) if value)
+            if request.get("financial_provisioning_id"):
+                financial = self.db.farm_financial_provisioning.find_one({"_id": request["financial_provisioning_id"]})
+            else:
+                financial = None
+        else:
+            financial = None
+        for operation_id in dict.fromkeys(operation_ids):
+            operation = self.db.farm_operations.find_one({"_id": operation_id, **scope})
+            if isinstance(operation, dict):
+                operations.append(operation)
+        session = None
+        if isinstance(identity, dict):
+            stable_id = identity.get("fs25_unique_user_id") or identity.get("game_player_id")
+            if stable_id:
+                session = self.db.player_activity_sessions.find_one({**scope,
+                    "fs25_unique_user_id": str(stable_id)}, sort=[("last_seen_at", -1)])
+        return {"server_key": str(server_key), "save_key": str(save_key),
+                "world_id": scope.get("world_id"), "request": request,
+                "identity": identity, "memberships": memberships,
+                "operations": operations, "financial": financial, "session": session}
 
     def requests(self, server_key, save_key):
         return list(self.db.farm_requests.find({**self._scope(server_key, save_key),
@@ -1271,11 +1322,13 @@ class FarmLifecycle:
                       "farm_id": farm_id, "owner_before_farm_id": owner_before,
                       "owner_farm_id": owner_after, "mutation_performed": receipt.get("mutation_performed"),
                       "updated_at": now}})
-        # A generation-aware onboarding must not present a financially
-        # provisioned farm until the real FS25 money and loan mutations are
-        # implemented with read-back receipts.  The legacy no-marker path is
-        # retained solely for old migration records; it is never served to a
-        # marker-aware game runtime.
+        # Financial provisioning is a separate capability from farm-manager
+        # authority.  We must not claim that cash/loan mutations happened
+        # before a live-verified adapter exists, but a successful authoritative
+        # land read-back is sufficient to queue the owner's native manager
+        # relationship.  Keeping these states separate avoids leaving a real
+        # FS25 farm owner unable to manage the farm merely because financial
+        # provisioning is still unavailable.
         if operation.get("world_id"):
             financial_id = _operation_id("financial-provisioning", server_key, save_key,
                                          operation["world_id"], request["_id"])
@@ -1288,10 +1341,19 @@ class FarmLifecycle:
                 "state": "capability_required",
                 "blocked_reason": "FS25 money and loan mutation/read-back adapter is not live-verified",
                 "created_at": now}}, upsert=True)
-            self.db.farm_requests.update_one({"_id": request["_id"], "state": "land_assigning"}, {"$set": {
-                "state": "financial_capability_required", "land_confirmed": True,
+            permission_operation = self._ensure_manager_authorization(
+                request, server_key, save_key, farm_id, request.get("mapping_id"), request.get("farm_name"))
+            request_state = "awaiting_manager" if permission_operation else "manager_authorization_required"
+            current_request = self.db.farm_requests.find_one({"_id": request["_id"]})
+            if isinstance(current_request, dict) and current_request.get("state") == "active":
+                request_state = "active"
+            self.db.farm_requests.update_one({"_id": request["_id"], "state": {"$in": ["land_assigning", "awaiting_manager", "manager_authorization_required"]}}, {"$set": {
+                "state": request_state, "land_confirmed": True,
                 "land_acknowledged_at": now, "owner_before_farm_id": owner_before,
                 "owner_farm_id": owner_after, "financial_provisioning_id": financial_id,
+                "financial_capability_state": "capability_required",
+                "financial_capability_reason": "FS25 money and loan mutation/read-back adapter is not live-verified",
+                "permission_operation_id": permission_operation,
                 "updated_at": now}})
             return self._operation(operation["_id"])
         permission_operation = self._ensure_manager_authorization(

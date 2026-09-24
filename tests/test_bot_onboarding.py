@@ -354,6 +354,7 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         commands = [
             ("farm_requests", ("local-dev",)),
             ("farm_roster", ("local-dev",)),
+            ("farm_status_staff", ("local-dev", "123")),
             ("farm_approve", ("local-dev", "request")),
             ("farm_reject", ("local-dev", "request", "reason")),
             ("farm_assign", (MagicMock(), "local-dev", 1, app_commands.Choice(name="worker", value="worker"))),
