@@ -107,6 +107,8 @@ class FarmLifecycle:
             raise ValueError("target world must be the active generation")
         source_evidence = source_generation.get("evidence") or {}
         target_evidence = target_generation.get("evidence") or {}
+        if not isinstance(source_evidence, dict) or not isinstance(target_evidence, dict):
+            raise ValueError("source and target physical evidence is missing")
         source_slot = source_evidence.get("savegame_index")
         target_slot = target_evidence.get("savegame_index")
         if source_slot is None or target_slot is None or str(source_slot) != str(target_slot):
