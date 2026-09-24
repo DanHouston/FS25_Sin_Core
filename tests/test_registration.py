@@ -510,8 +510,20 @@ class RegistrationTests(unittest.TestCase):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
             encoding="utf-8")
         self.assertIn('operationType == "chat_message"', source)
-        self.assertIn('permissionReceipt#status", "pending_validation"', source)
-        self.assertIn("FS25 chat display API requires live runtime verification", source)
+        self.assertIn('permissionReceipt#status", applied and "applied" or "pending_validation"', source)
+        self.assertIn("Mission00.addChatMessage", source)
+        self.assertIn('sender = "[Discord] "', source)
+        self.assertIn("self.chatInjectionDepth", source)
+
+    def test_position_restore_is_world_scoped_and_on_foot_only(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8")
+        self.assertIn("FS25_SiN_Server_positions.xml", source)
+        self.assertIn("function FS25SiNServer:sampleOnFootPosition", source)
+        self.assertIn("function FS25SiNServer:isSafePlayerPosition", source)
+        self.assertIn("function FS25SiNServer:restorePendingPlayerPositions", source)
+        self.assertIn("mover.setPosition", source)
+        self.assertIn("sinPlayerPositions#worldId", source)
 
     def test_every_normal_lua_receipt_carries_current_world_generation(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(

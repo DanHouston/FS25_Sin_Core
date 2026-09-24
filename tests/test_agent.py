@@ -425,6 +425,30 @@ class AgentTests(unittest.TestCase):
             self.assertIn('canonical_name="SiN Harvest"', command.read_text(encoding="utf-8"))
             self.assertNotIn("pymongo", "".join(path.read_text(encoding="utf-8") for path in [Path(agent_module.__file__)]))
 
+    def test_agent_materializes_discord_chat_sender_and_message_for_lua(self):
+        class OperationResponse:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self):
+                return json.dumps({"operations": [{
+                    "operation_id": "discord-chat-1", "operation_type": "chat_message",
+                    "save_key": "hobo", "payload": {"message_id": "123", "message": "hello",
+                    "source": "discord", "display_name": "Repton", "actor_discord_id": "42"}
+                }]}).encode()
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "serverBinding.xml").write_text(
+                '<serverBinding serverKey="server" credential="secret"/>', encoding="utf-8")
+            (root / "snapshot.xml").write_text(
+                '<networkLocal source="game" savegameIndex="1" worldId="hobo-world"/>', encoding="utf-8")
+            agent = PairingAgent(root, "https://central", MagicMock(return_value=OperationResponse()))
+            self.assertEqual(agent.process_operations_once(), ["discord-chat-1"])
+            command = (root / "permission-commands/discord-chat-1.xml").read_text(encoding="utf-8")
+            self.assertIn('operation_type="chat_message"', command)
+            self.assertIn('source="discord"', command)
+            self.assertIn('display_name="Repton"', command)
+
     def test_durable_local_receipt_suppresses_operation_recreation(self):
         class OperationResponse:
             status = 200

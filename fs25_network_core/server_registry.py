@@ -196,6 +196,9 @@ class ServerRegistry:
                 "paired": paired,
                 "saves": saves,
             }
+            for channel_field in ("discord_activity_channel_id", "discord_chat_channel_id"):
+                if server.get(channel_field) is not None:
+                    result[channel_field] = str(server[channel_field])
             if active_save_key:
                 result["active_save_key"] = active_save_key
                 result["active_world_id"] = active_runtime.get("world_id")

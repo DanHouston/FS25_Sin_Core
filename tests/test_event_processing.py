@@ -121,6 +121,25 @@ class EventProcessingTests(unittest.TestCase):
         self.processor.chat.ingest_fs25.assert_called_once_with(
             "sin-fs25-01", "main-save", "event-1", event["payload"])
 
+    def test_chat_capture_publishes_activity_and_discord_source_cannot_echo(self):
+        self.processor.chat = MagicMock()
+        self.processor.chat.ingest_fs25.return_value = {
+            "message_id": "message-1", "message": "hello", "unique_user_id": "u1"}
+        self.processor.authorization.resolve_player_identity.return_value = {
+            "fully_registered": True, "canonical_name": "Repton"}
+        event = self.event("chat_message")
+        event["payload"] = {"message_id": "message-1", "message": "hello",
+                             "display_name": "Observed", "unique_user_id": "u1", "source": "fs25"}
+        self.processor.process(event)
+        outbox = self.database.db.activity_outbox.insert_one.call_args.args[0]
+        self.assertIn("Repton", outbox["message"])
+        self.processor.chat.ingest_fs25.side_effect = ValueError("Discord-originated messages cannot be mirrored back")
+        echoed = self.event("chat_message")
+        echoed["payload"] = {"message_id": "discord-chat-1", "message": "hello",
+                              "source": "discord"}
+        with self.assertRaises(Exception):
+            self.processor.process(echoed)
+
     def test_lifecycle_event_without_session_id_remains_compatible(self):
         self.processor.telemetry_sessions = MagicMock()
         self.processor.telemetry_sessions.connected.return_value = {"status": "accepted"}

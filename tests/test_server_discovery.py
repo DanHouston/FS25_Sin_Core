@@ -12,7 +12,8 @@ class ServerDiscoveryTests(unittest.TestCase):
             {"server_key": "local-dev", "display_name": "Local Development Server",
              "enabled": True, "credential_hash": None},
             {"server_key": "sin-fs25-01", "display_name": "SiN Test Server 01",
-             "enabled": True, "credential_hash": "paired-hash"},
+              "enabled": True, "credential_hash": "paired-hash",
+              "discord_activity_channel_id": 777},
             {"server_key": "sin-fs25-02", "display_name": "Second SiN Server",
              "enabled": True, "credential_hash": "paired-hash-2"},
             {"server_key": "no-snapshot", "display_name": "No Snapshot Server",
@@ -42,6 +43,7 @@ class ServerDiscoveryTests(unittest.TestCase):
         production = next(record for record in records if record["server_key"] == "sin-fs25-01")
         self.assertEqual(production["display_name"], "SiN Test Server 01")
         self.assertEqual(production["saves"][0]["save_key"], "sin-fs25-main")
+        self.assertEqual(production["discord_activity_channel_id"], "777")
 
     def test_farm_choices_require_current_snapshot_and_available_numeric_field(self):
         records = self.registry.eligible_servers("farm_request")

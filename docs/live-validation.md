@@ -218,11 +218,36 @@ validated and explicitly registered by an operator.
 ### Chat boundary
 
 The central chat message/event schema and authenticated transport are locally
-tested. The current generic mod deliberately does not call an undocumented
-GIANTS chat-injection method. If a verified runtime adapter is added, test one
-FS25-to-Discord message and one Discord-to-FS25 message, then confirm the same
-message is not mirrored back. Until then, mark game-chat display as deferred;
-do not treat a `pending_validation` receipt as successful delivery.
+tested. The server mod hooks the native `Mission00.addChatMessage` lifecycle on
+the authoritative server and emits `chat_message` mailbox events. JiN's
+ActivityOutbox publishes these to the registered server's configured Activity
+channel. The reverse path is ordinary member text in that same configured
+channel; JiN queues a world-scoped, Discord-message-ID-idempotent operation and
+the Agent delivers it through the existing mailbox. FS25 displays the sender as
+`[Discord] <display name>`.
+
+Live proof must send one normal FS25 chat message and confirm one Activity
+message with the sender, then send one ordinary member message in the matching
+Activity channel and confirm one `[Discord]` FS25 message plus an `applied`
+receipt. Repeat after JiN/Agent restart and verify no duplicate appears; send a
+message in another channel and verify it is not bridged. A runtime that lacks
+`Mission00.addChatMessage` returns `pending_validation`, never a false
+delivered receipt. Do not claim either direction LIVE PASS until those checks
+are observed on the deployed build.
+
+### Reconnect location boundary
+
+The mod does not replace vanilla first-entry spawning. On the authoritative
+server it records only a valid on-foot `(x, y, z)` sample in
+`FS25_SiN_Server_positions.xml`, tagged with the save-backed `worldId` and
+stable FS25 `uniqueUserId`. A reconnect restore is delayed until the player and
+world are ready and uses the native `PlayerMover:setPosition` API when that API
+is present. Invalid coordinates, missing APIs, and a world-ID mismatch fail
+closed; no position is restored for a first-time player. Live proof is one
+movement/save/disconnect/reconnect cycle in Hobo v1, followed by a restart and
+the same check, then a different logical save to confirm no cross-world
+position transfer. This remains LIVE REQUIRED because the repository cannot
+prove the target GIANTS runtime's save and player-mover behavior offline.
 
 ### Value-transfer boundary
 
@@ -248,10 +273,9 @@ MongoDB connection strings in the evidence.
 
 ## Community workflow notes
 
-The two chat directions are tested independently. The current build reports
-Discord-to-FS25 injection as unavailable because no verified GIANTS adapter is
-enabled; a queued operation must never be described as displayed. FS25-to-
-Discord capture is also deferred until a source-backed runtime hook is proven.
+The two chat directions are tested independently at the mailbox and workflow
+layers. Runtime API presence, Discord Message Content intent, and actual
+dedicated-server display remain live-only evidence.
 
 `/balance` reports the central SiN wallet and pending operation amounts. The
 game balance is explicitly unavailable until the snapshot contains a verified

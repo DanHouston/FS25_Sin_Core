@@ -132,6 +132,7 @@ function FS25SiNServer:saveWorldIdentityDuringSave(mission, hookTarget)
     self.worldIdentityPersisted = true
     self.worldIdentityReady = true
     self.worldIdentityRetryable = false
+    self:savePlayerPositionsDuringSave(mission, hookTarget)
     Logging.info("[SiN World] persisted save-backed marker world=%s path=%s",
         self:shortIdentity(self.worldId), path)
     return true
@@ -289,6 +290,9 @@ function FS25SiNServer:loadMap()
     self.worldIdentityRetryElapsed = 0
     self.worldIdentityRetryInterval = 5000
     self:initializeWorldIdentity()
+    self.savedPlayerPositions = {}
+    self.pendingPositionRestores = {}
+    self:loadPlayerPositions()
     self.bindingPath = self.directory .. "serverBinding.xml"
     self:loadServerBinding()
     self.systemFarmName = nil
@@ -361,6 +365,17 @@ function FS25SiNServer:installLifecycleHooks()
                     FS25SiNServer:onPlayerDisconnected(userId)
                 end
             end)
+    end
+    if Mission00 ~= nil and type(Mission00.addChatMessage) == "function" and Utils ~= nil
+        and self.chatHookInstalled ~= true then
+        Mission00.addChatMessage = Utils.appendedFunction(Mission00.addChatMessage,
+            function(mission, senderName, message)
+                if mission == g_currentMission and mission:getIsServer() then
+                    FS25SiNServer:onChatMessage(senderName, message)
+                end
+            end)
+        self.chatHookInstalled = true
+        Logging.info("[SiN Chat] installed Mission00.addChatMessage capture hook")
     end
 end
 
@@ -835,6 +850,149 @@ function FS25SiNServer:samplePlayerPosition(userId, user)
     return nil
 end
 
+-- Position restoration is deliberately a small SiN-owned convenience layer,
+-- not a replacement for the FS25 spawn lifecycle.  Activity telemetry may
+-- observe vehicles, but only an on-foot position is persisted/restored.
+function FS25SiNServer:sampleOnFootPosition(userId, user)
+    local player = self:findPlayerObject(userId, user)
+    if player == nil then return nil end
+    if player.getPosition ~= nil then
+        local ok, x, y, z = pcall(player.getPosition, player)
+        if ok and x ~= nil and y ~= nil and z ~= nil then
+            return {x=tonumber(x), y=tonumber(y), z=tonumber(z)}, "player"
+        end
+    end
+    if player.capsuleController ~= nil and player.capsuleController.getPosition ~= nil then
+        local ok, x, y, z = pcall(player.capsuleController.getPosition, player.capsuleController)
+        if ok and x ~= nil and y ~= nil and z ~= nil then
+            return {x=tonumber(x), y=tonumber(y), z=tonumber(z)}, "capsule"
+        end
+    end
+    if getWorldTranslation ~= nil and player.rootNode ~= nil and player.rootNode ~= 0 then
+        local ok, x, y, z = pcall(getWorldTranslation, player.rootNode)
+        if ok and x ~= nil and y ~= nil and z ~= nil then
+            return {x=tonumber(x), y=tonumber(y), z=tonumber(z)}, "root"
+        end
+    end
+    return nil
+end
+
+function FS25SiNServer:isSafePlayerPosition(position)
+    if position == nil then return false end
+    local x, y, z = tonumber(position.x), tonumber(position.y), tonumber(position.z)
+    if x == nil or y == nil or z == nil or x ~= x or y ~= y or z ~= z then return false end
+    if math.abs(x) == math.huge or math.abs(y) == math.huge or math.abs(z) == math.huge then return false end
+    local terrainSize = g_currentMission ~= nil and tonumber(g_currentMission.terrainSize) or nil
+    local horizontalLimit = terrainSize ~= nil and math.max(1, terrainSize * 0.55) or 100000
+    return math.abs(x) <= horizontalLimit and math.abs(z) <= horizontalLimit and y >= -100 and y <= 10000
+end
+
+function FS25SiNServer:playerPositionPath(mission)
+    local info = self:resolveSaveMissionInfo(mission)
+    local directory = info ~= nil and info.savegameDirectory or nil
+    if directory == nil or tostring(directory) == "" then return nil end
+    directory = tostring(directory)
+    local separator = string.sub(directory, -1)
+    if separator ~= "/" and separator ~= "\\" then directory = directory .. "/" end
+    return directory .. "FS25_SiN_Server_positions.xml"
+end
+
+function FS25SiNServer:loadPlayerPositions()
+    self.savedPlayerPositions = {}
+    local path = self:playerPositionPath(g_currentMission)
+    if path == nil or not fileExists(path) or XMLFile == nil or XMLFile.load == nil then return false end
+    local xml = XMLFile.load("networkLocalPlayerPositions", path)
+    if xml == nil then return false end
+    local savedWorld = xml:getString("sinPlayerPositions#worldId")
+    if savedWorld ~= nil and tostring(savedWorld) == tostring(self.worldId) then
+        for index = 0, 1000 do
+            local key = string.format("sinPlayerPositions.players.player(%d)", index)
+            local uniqueId = xml:getString(key .. "#uniqueUserId")
+            if uniqueId == nil or tostring(uniqueId) == "" then break end
+            local position = {x=xml:getFloat(key .. "#x"), y=xml:getFloat(key .. "#y"), z=xml:getFloat(key .. "#z")}
+            if self:isSafePlayerPosition(position) then self.savedPlayerPositions[tostring(uniqueId)] = position end
+        end
+    end
+    xml:delete()
+    return true
+end
+
+function FS25SiNServer:savePlayerPositionsDuringSave(mission, hookTarget)
+    if self.worldId == nil or self.worldIdentityPersisted ~= true then return false end
+    local path = self:playerPositionPath(mission)
+    if path == nil or XMLFile == nil or XMLFile.create == nil then return false end
+    local entries = {}
+    for uniqueId, record in pairs(self.connectedPlayers or {}) do
+        local position = self:sampleOnFootPosition(record.user_id, record.user)
+        if self:isSafePlayerPosition(position) then
+            table.insert(entries, {uniqueId=tostring(uniqueId), position=position})
+        end
+    end
+    for uniqueId, position in pairs(self.savedPlayerPositions or {}) do
+        local present = false
+        for _, entry in ipairs(entries) do if entry.uniqueId == tostring(uniqueId) then present = true; break end end
+        if not present and self:isSafePlayerPosition(position) then table.insert(entries, {uniqueId=tostring(uniqueId), position=position}) end
+    end
+    table.sort(entries, function(left, right) return left.uniqueId < right.uniqueId end)
+    local xml = nil
+    local ok, errorMessage = pcall(function()
+        xml = XMLFile.create("networkLocalPlayerPositions", path, "sinPlayerPositions")
+        if xml == nil then error("XMLFile.create returned nil") end
+        xml:setString("sinPlayerPositions#worldId", tostring(self.worldId))
+        xml:setInt("sinPlayerPositions#schemaVersion", 1)
+        for index, entry in ipairs(entries) do
+            local key = string.format("sinPlayerPositions.players.player(%d)", index - 1)
+            xml:setString(key .. "#uniqueUserId", entry.uniqueId)
+            xml:setFloat(key .. "#x", entry.position.x)
+            xml:setFloat(key .. "#y", entry.position.y)
+            xml:setFloat(key .. "#z", entry.position.z)
+        end
+        if xml:save() ~= true then error("XMLFile.save returned false") end
+    end)
+    if xml ~= nil and type(xml.delete) == "function" then xml:delete() end
+    if not ok then
+        Logging.warning("[SiN Position] persistence failed target=%s world=%s path=%s error=%s",
+            tostring(hookTarget or "save"), self:shortIdentity(self.worldId), tostring(path), tostring(errorMessage))
+        return false
+    end
+    self.savedPlayerPositions = {}
+    for _, entry in ipairs(entries) do self.savedPlayerPositions[entry.uniqueId] = entry.position end
+    Logging.info("[SiN Position] persisted count=%s world=%s path=%s", tostring(#entries),
+        self:shortIdentity(self.worldId), tostring(path))
+    return true
+end
+
+function FS25SiNServer:queuePlayerPositionRestore(uniqueId)
+    local position = self.savedPlayerPositions ~= nil and self.savedPlayerPositions[tostring(uniqueId)] or nil
+    if self:isSafePlayerPosition(position) then
+        self.pendingPositionRestores[tostring(uniqueId)] = {position=position, elapsed=0}
+    end
+end
+
+function FS25SiNServer:restorePendingPlayerPositions(dt)
+    if self.worldIdentityReady ~= true or g_currentMission == nil or not g_currentMission:getIsServer() then return end
+    for uniqueId, pending in pairs(self.pendingPositionRestores or {}) do
+        local position = pending.position or pending
+        pending.elapsed = (pending.elapsed or 0) + (tonumber(dt) or 0)
+        -- Let the native reconnect/spawn flow finish before applying an
+        -- optional SiN restore.  A missing saved row never enters this map.
+        if pending.elapsed >= 3000 then
+            local record = self.connectedPlayers[uniqueId]
+            local player = record ~= nil and self:findPlayerObject(record.user_id, record.user) or nil
+            local mover = player ~= nil and (player.mover or player.playerMover) or nil
+            if player ~= nil and mover ~= nil and type(mover.setPosition) == "function" and self:isSafePlayerPosition(position) then
+                local ok, errorMessage = pcall(mover.setPosition, mover, position.x, position.y, position.z, true)
+                if ok then
+                    self.pendingPositionRestores[uniqueId] = nil
+                    Logging.info("[SiN Position] restored uniqueUserId=%s world=%s", self:shortIdentity(uniqueId), self:shortIdentity(self.worldId))
+                else
+                    Logging.warning("[SiN Position] restore failed uniqueUserId=%s error=%s", self:shortIdentity(uniqueId), tostring(errorMessage))
+                end
+            end
+        end
+    end
+end
+
 function FS25SiNServer:startActivityTracking(uniqueId, record)
     local existing = self.activityStates[uniqueId]
     if existing ~= nil then
@@ -992,6 +1150,7 @@ function FS25SiNServer:onPlayerConnected(user, connection, farmId)
     self.previousPlayers[uniqueId] = {name=record.name, user_id=record.user_id, farm_id=record.farm_id}
     if not wasTracked then
         self:startActivityTracking(uniqueId, record)
+        self:queuePlayerPositionRestore(uniqueId)
         Logging.info("[SiN Player] connected uniqueUserId=%s userId=%s", self:shortIdentity(uniqueId), tostring(record.user_id))
         local activityState = self.activityStates[uniqueId]
         self:emitServerEvent("player_connected", {unique_user_id=uniqueId, user_id=record.user_id,
@@ -1024,6 +1183,11 @@ function FS25SiNServer:onPlayerDisconnected(userId)
         end
     end
     if uniqueId == nil or record == nil then return end
+    local position = self:sampleOnFootPosition(record.user_id, record.user)
+    if self:isSafePlayerPosition(position) then
+        self.savedPlayerPositions[uniqueId] = position
+        self:savePlayerPositionsDuringSave(g_currentMission, "disconnect")
+    end
     self.connectedPlayers[uniqueId] = nil
     self.previousPlayers[uniqueId] = nil
     local activityState = self.activityStates[uniqueId]
@@ -1035,6 +1199,32 @@ function FS25SiNServer:onPlayerDisconnected(userId)
         farm_id=record.farm_id, display_name=record.name,
         session_id=activityState ~= nil and activityState.sessionId or "",
         final_minute_sequence=activityState ~= nil and activityState.minuteSequence or 0})
+end
+
+function FS25SiNServer:onChatMessage(senderName, message)
+    if self.chatInjectionDepth ~= nil and self.chatInjectionDepth > 0 then return false end
+    local text = tostring(message or "")
+    local sender = tostring(senderName or "")
+    if text == "" or string.len(text) > 500 or string.find(text, "[%c]") ~= nil
+        or string.find(text, "[Discord]", 1, true) == 1 then return false end
+    if sender == "" or sender == "Server" or sender == "System" then return false end
+    local uniqueId, farmId, matchedPlayer = "", 0, false
+    if g_currentMission ~= nil and g_currentMission.userManager ~= nil then
+        for _, user in ipairs(g_currentMission.userManager:getUsers() or {}) do
+            if tostring(user:getNickname() or "") == sender then
+                matchedPlayer = true
+                uniqueId = tostring(user:getUniqueUserId() or "")
+                local farm = g_farmManager ~= nil and g_farmManager:getFarmByUserId(user:getId()) or nil
+                farmId = farm ~= nil and farm.farmId or 0
+                break
+            end
+        end
+    end
+    if not matchedPlayer then return false end
+    self.chatSequence = (self.chatSequence or 0) + 1
+    local eventId = tostring(self.runtimeNonce or "runtime") .. "-chat-" .. tostring(self.chatSequence)
+    return self:emitServerEvent("chat_message", {message_id=eventId, message=text,
+        display_name=sender, unique_user_id=uniqueId, farm_id=farmId, source="fs25"}, eventId)
 end
 
 function FS25SiNServer:setClientRegistrationWarning(required, code)
@@ -1438,6 +1628,7 @@ function FS25SiNServer:update(dt)
     if self.failed or g_currentMission == nil or not g_currentMission:getIsServer() then
         return
     end
+    self:restorePendingPlayerPositions(dt)
     self.elapsed = self.elapsed + dt
     self.heartbeatElapsed = self.heartbeatElapsed + dt
     self.managerSyncClock = self.managerSyncClock + dt
@@ -2204,19 +2395,41 @@ function FS25SiNServer:consumeCommandFile(operationId)
     end
 end
 
--- The central chat mailbox contract is in place, but this build deliberately
--- does not call an undocumented GIANTS chat-injection method.  Returning a
--- durable non-success receipt prevents the operation from being reported as
--- delivered while keeping the queued message auditable for the next verified
--- runtime adapter.
+-- Discord-originated chat is injected only through the native mission chat
+-- method when the running FS25 build exposes it.  The receipt is successful
+-- only after the call completes; unavailable/failed runtime adapters remain
+-- pending-validation and can never be reported as delivered.
 function FS25SiNServer:processChatCommand(command, operationId)
+    local message = command:getString("networkLocalCommand#message") or ""
+    local displayName = command:getString("networkLocalCommand#display_name") or "Discord"
+    local source = command:getString("networkLocalCommand#source") or "discord"
+    local applied, reason = false, "FS25 chat API unavailable"
+    if source ~= "discord" then
+        reason = "unsupported chat source"
+    elseif message == "" or string.len(message) > 500 or string.find(message, "[%c]") ~= nil then
+        reason = "invalid chat message"
+    elseif g_currentMission == nil or not g_currentMission:getIsServer()
+        or type(g_currentMission.addChatMessage) ~= "function" then
+        reason = "FS25 mission chat API unavailable"
+    else
+        local sender = tostring(displayName)
+        if sender == "" then sender = "Discord" end
+        sender = "[Discord] " .. string.sub(sender, 1, 80)
+        self.chatInjectionDepth = (self.chatInjectionDepth or 0) + 1
+        local ok, errorMessage = pcall(g_currentMission.addChatMessage, g_currentMission, sender, message)
+        self.chatInjectionDepth = math.max(0, (self.chatInjectionDepth or 1) - 1)
+        applied = ok
+        reason = applied and "FS25 chat message submitted" or ("FS25 chat API failed: " .. tostring(errorMessage))
+    end
     local receipt = XMLFile.create("networkLocalReceipt", self.receiptDirectory .. operationId .. ".xml", "permissionReceipt")
     receipt:setString("permissionReceipt#operation_id", operationId)
     receipt:setString("permissionReceipt#operation_type", "chat_message")
     receipt:setString("permissionReceipt#server_id", command:getString("networkLocalCommand#server_id"))
     receipt:setString("permissionReceipt#save_id", command:getString("networkLocalCommand#save_id"))
-    receipt:setString("permissionReceipt#status", "pending_validation")
-    receipt:setString("permissionReceipt#receipt", "FS25 chat display API requires live runtime verification; no chat mutation was attempted")
+    receipt:setString("permissionReceipt#status", applied and "applied" or "pending_validation")
+    receipt:setBool("permissionReceipt#authoritative_readback", applied)
+    receipt:setString("permissionReceipt#source", source)
+    receipt:setString("permissionReceipt#receipt", reason)
     self:setReceiptWorldId(receipt, "permissionReceipt")
     self:saveReceiptAndConsume(receipt, command, operationId)
 end

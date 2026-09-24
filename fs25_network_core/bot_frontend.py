@@ -348,6 +348,8 @@ class NetworkBot(discord.Client):
         intents = discord.Intents.none()
         intents.guilds = True
         intents.members = True
+        intents.messages = True
+        intents.message_content = True
         super().__init__(intents=intents)
         self.bank, self.servers = bank, servers
         self.guild = discord.Object(id=guild_id)
@@ -920,6 +922,7 @@ class NetworkBot(discord.Client):
             world_id = self.farm_lifecycle.current_world_id(server, save_key)
             operation_id = await asyncio.to_thread(self.chat.queue_to_fs25, server, save_key,
                                                    str(interaction.user.id), message,
+                                                   display_name=getattr(interaction.user, "display_name", None),
                                                    **({"world_id": world_id} if world_id else {}))
             await interaction.response.send_message(
                 f"Game chat operation `{operation_id}` queued for the selected server.", ephemeral=True)
@@ -1474,6 +1477,55 @@ class NetworkBot(discord.Client):
             message_id = record.get("board_message_id")
             if channel_id and message_id:
                 self.add_view(CommunityEventView(self, record["event_id"]), message_id=int(message_id))
+
+    async def on_message(self, message):
+        """Bridge only ordinary member text from a configured Activity channel.
+
+        The Discord message ID is the durable operation id, so gateway retries
+        and bot restarts cannot create duplicate FS25 deliveries.  No channel
+        name, server key guess, or Discord-originated echo is accepted.
+        """
+        author = getattr(message, "author", None)
+        if author is None or getattr(author, "bot", False) or getattr(author, "system", False):
+            return
+        guild = getattr(message, "guild", None)
+        if guild is None or int(getattr(guild, "id", 0)) != int(self.guild.id):
+            return
+        channel_id = str(getattr(getattr(message, "channel", None), "id", ""))
+        if not channel_id:
+            return
+        try:
+            records = await asyncio.to_thread(self.server_registry.eligible_servers, "reconcile")
+        except Exception as error:
+            logging.warning("Activity chat routing unavailable channel=%s error=%s", channel_id, error)
+            return
+        matches = [record for record in records
+                   if str(record.get("discord_activity_channel_id") or "") == channel_id]
+        if len(matches) != 1:
+            if len(matches) > 1:
+                logging.error("Activity chat channel is ambiguously configured channel=%s", channel_id)
+            return
+        record = matches[0]
+        content = getattr(message, "clean_content", None) or getattr(message, "content", "")
+        try:
+            content = self.chat.sanitize(content)
+            save_key = str(record.get("active_save_key") or "")
+            if not save_key:
+                raise ValueError("server has no active logical save")
+            world_id = self.farm_lifecycle.current_world_id(str(record["server_key"]), save_key)
+            if not world_id:
+                raise ValueError("server has no active world generation")
+            message_id = str(getattr(message, "id", ""))
+            if not message_id:
+                raise ValueError("Discord message has no stable ID")
+            display_name = str(getattr(author, "display_name", None) or getattr(author, "name", "Discord"))
+            operation_id = await asyncio.to_thread(
+                self.chat.queue_to_fs25, str(record["server_key"]), save_key, str(author.id), content,
+                operation_id="discord-chat-" + message_id, world_id=world_id,
+                display_name=display_name, discord_message_id=message_id)
+            logging.info("Queued Discord Activity chat server=%s operation=%s", record["server_key"], operation_id)
+        except (ValueError, TypeError) as error:
+            logging.warning("Activity chat message rejected channel=%s reason=%s", channel_id, error)
 
     async def setup_hook(self):
         self.tree.copy_global_to(guild=self.guild)

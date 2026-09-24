@@ -16,11 +16,15 @@ class BusinessWorkflowTests(unittest.TestCase):
 
     def test_chat_is_sanitized_and_queued_as_idempotent_game_operation(self):
         service = ChatService(self.database)
-        self.assertFalse(service.fs25_injection_supported())
-        operation_id = service.queue_to_fs25("server", "save", "discord", "Hello")
+        self.assertTrue(service.fs25_injection_supported())
+        operation_id = service.queue_to_fs25("server", "save", "discord", "Hello",
+                                             operation_id="discord-chat-123", display_name="Repton",
+                                             discord_message_id="123")
         self.assertTrue(operation_id)
         operation = self.db.farm_operations.update_one.call_args.args[1]
         self.assertEqual(operation["$setOnInsert"]["operation_type"], "chat_message")
+        self.assertEqual(operation["$setOnInsert"]["payload"]["display_name"], "Repton")
+        self.assertEqual(operation["$setOnInsert"]["payload"]["message_id"], "123")
         with self.assertRaises(ValueError):
             service.sanitize("bad\ncontrol")
 

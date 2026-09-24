@@ -3,6 +3,7 @@ import os
 import time
 from pathlib import Path
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from discord import app_commands
@@ -45,6 +46,39 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
     async def test_nested_server_chat_configuration_fails_with_registry_guidance(self):
         with self.assertRaisesRegex(ValueError, "discord_chat_channel_id"):
             NetworkBot(MagicMock(), {}, 1, channels={"server_chat": {"sin-fs25-01": 123}})
+
+    async def test_activity_message_queues_world_scoped_idempotent_chat_operation(self):
+        self.bot.server_registry.eligible_servers = MagicMock(return_value=[{
+            "server_key": "sin-fs25-01", "active_save_key": "sin-fs25-hobo",
+            "discord_activity_channel_id": "777", "enabled": True,
+        }])
+        self.bot.farm_lifecycle.current_world_id = MagicMock(return_value="hobo-world")
+        self.bot.chat.queue_to_fs25 = MagicMock(return_value="discord-chat-9001")
+        message = SimpleNamespace(
+            id=9001, content="hello Hobo", clean_content="hello Hobo",
+            guild=SimpleNamespace(id=1), channel=SimpleNamespace(id=777),
+            author=SimpleNamespace(id=42, display_name="Repton", name="Repton", bot=False, system=False),
+        )
+        await self.bot.on_message(message)
+        self.bot.chat.queue_to_fs25.assert_called_once_with(
+            "sin-fs25-01", "sin-fs25-hobo", "42", "hello Hobo",
+            operation_id="discord-chat-9001", world_id="hobo-world",
+            display_name="Repton", discord_message_id="9001")
+
+    async def test_activity_message_other_channel_and_bot_are_ignored(self):
+        self.bot.server_registry.eligible_servers = MagicMock(return_value=[{
+            "server_key": "sin-fs25-01", "active_save_key": "sin-fs25-hobo",
+            "discord_activity_channel_id": "777", "enabled": True,
+        }])
+        self.bot.chat.queue_to_fs25 = MagicMock()
+        for channel_id, bot in ((778, False), (777, True)):
+            message = SimpleNamespace(
+                id=9002, content="ignored", clean_content="ignored",
+                guild=SimpleNamespace(id=1), channel=SimpleNamespace(id=channel_id),
+                author=SimpleNamespace(id=42, display_name="Repton", name="Repton", bot=bot, system=False),
+            )
+            await self.bot.on_message(message)
+        self.bot.chat.queue_to_fs25.assert_not_called()
 
     async def test_farm_request_picker_uses_current_map_and_available_farmland_set(self):
         model = synthetic_model(64, 64)

@@ -85,8 +85,14 @@ class ChatService:
 
     @staticmethod
     def fs25_injection_supported():
-        """The target GIANTS runtime adapter is not source-verified yet."""
-        return False
+        """The bundled adapter uses the native mission chat API when present.
+
+        The Lua side still returns ``pending_validation`` if a particular
+        dedicated-server build does not expose that API, so enabling the
+        durable route here cannot turn an unverified runtime into a false
+        success.
+        """
+        return True
 
     @staticmethod
     def sanitize(message):
@@ -104,19 +110,29 @@ class ChatService:
                   "save_key": save_key, "source": "fs25", "message": message,
                    "unique_user_id": str(payload.get("unique_user_id", "")),
                    "created_at": _now(), "state": "received"}
+        if payload.get("display_name"):
+            record["display_name"] = _text(payload.get("display_name"), "Display name", 80)
+        if payload.get("farm_id") is not None:
+            record["farm_id"] = payload.get("farm_id")
         if world_id:
             record["world_id"] = world_id
         self.db.chat_messages.update_one({"_id": storage_id}, {"$setOnInsert": record}, upsert=True)
         return self.db.chat_messages.find_one({"_id": storage_id})
 
-    def queue_to_fs25(self, server_key, save_key, actor_id, message, operation_id=None, world_id=None):
+    def queue_to_fs25(self, server_key, save_key, actor_id, message, operation_id=None,
+                      world_id=None, display_name=None, discord_message_id=None):
         world_id = self._world(server_key, save_key, world_id)
         message = self.sanitize(message)
         actor_id = str(actor_id)
         operation_id = operation_id or _id("discord-chat", server_key, save_key, world_id or "legacy", actor_id, message, uuid.uuid4())
-        record = {"_id": operation_id, "message_id": operation_id, "server_key": server_key,
+        record = {"_id": operation_id, "message_id": discord_message_id or operation_id,
+                  "server_key": server_key,
                   "save_key": save_key, "source": "discord", "message": message,
                   "actor_discord_id": actor_id, "created_at": _now(), "state": "pending"}
+        if display_name:
+            record["display_name"] = _text(display_name, "Display name", 80)
+        if discord_message_id:
+            record["discord_message_id"] = str(discord_message_id)
         if world_id:
             record["world_id"] = world_id
         self.db.chat_messages.update_one({"_id": operation_id}, {"$setOnInsert": record}, upsert=True)
@@ -124,8 +140,10 @@ class ChatService:
             {"_id": operation_id},
             {"$setOnInsert": {"_id": operation_id, "operation_id": operation_id,
                                "operation_type": "chat_message", "server_key": server_key,
-                                "save_key": save_key, **({"world_id": world_id} if world_id else {}), "payload": {"message_id": operation_id,
-                               "message": message, "source": "discord"}, "state": "pending",
+                                 "save_key": save_key, **({"world_id": world_id} if world_id else {}), "payload": {"message_id": discord_message_id or operation_id,
+                                "message": message, "source": "discord",
+                                **({"display_name": _text(display_name, "Display name", 80)} if display_name else {}),
+                                **({"actor_discord_id": str(actor_id)} if actor_id else {})}, "state": "pending",
                                "attempts": 0, "created_at": _now()},
              "$set": {"updated_at": _now()}}, upsert=True)
         return operation_id

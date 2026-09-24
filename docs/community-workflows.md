@@ -14,17 +14,22 @@ ambiguous server/save context fails closed before persistence.
 
 `chat_messages` stores sanitized, source-tagged messages with an idempotent
 message ID. FS25-originated messages enter through the existing authenticated
-`POST /api/server/events` route with `event_type=chat_message`. Discord-originated
-messages become durable `farm_operations` entries with
-`operation_type=chat_message`.
+`POST /api/server/events` route with `event_type=chat_message`; Central's
+`ActivityOutbox` then publishes them to that server's configured Activity
+channel. Ordinary member messages in that Activity channel become durable
+`farm_operations` entries with `operation_type=chat_message`; the Discord
+message ID is the idempotency key and the Lua adapter displays them with a
+`[Discord]` sender prefix.
 
-The current generic mod has no verified GIANTS chat-capture hook, so ordinary
-FS25 chat is not yet emitted to Discord. Discord-to-FS25 injection is also
-capability-gated: no message is queued from the normal command while the
-server-side adapter is unverified. Existing durable `pending_validation`
-operations remain auditable for controlled adapter work, but are never treated
-as delivery. Do not claim either direction is live until its runtime adapter is
-proven independently.
+Only the configured Activity channel is bridged. Bot/system messages, malformed
+messages, ambiguous channel mappings, stale worlds, and messages from another
+server are ignored. The Lua capture hook ignores the Discord prefix and uses an
+injection-depth guard, preventing echo loops. A runtime without the native
+mission chat method returns `pending_validation`, never a false delivered
+receipt. The native hook and injection still require the live FS25 proof below.
+The Discord application must have the Message Content intent enabled because
+the reverse direction consumes ordinary Activity-channel message content;
+slash-command operation remains available independently of that intent.
 
 The source audit did confirm the documented `ChatDisplay` client HUD class,
 including its message-history/display state, but that is not a server-side
