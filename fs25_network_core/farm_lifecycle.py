@@ -595,7 +595,7 @@ class FarmLifecycle:
                 raise ValueError("That starting field was just reserved by another pending request")
             now = self._now()
             reservation_values = dict(**reservation_query, request_id=request_id,
-                                      discord_id=str(discord_id), state="pending", created_at=now, updated_at=now)
+                                      discord_id=str(discord_id), state="pending", created_at=now)
             try:
                 self.db.farm_field_reservations.update_one(
                     reservation_query, {"$setOnInsert": reservation_values, "$set": {"updated_at": now}},

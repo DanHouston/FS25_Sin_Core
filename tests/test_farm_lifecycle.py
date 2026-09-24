@@ -1,6 +1,6 @@
 import unittest
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from fs25_network_core.authorization import AuthorizationManager
 from fs25_network_core.farm_lifecycle import FarmLifecycle, SYSTEM_FARM_NAME
@@ -344,7 +344,15 @@ class FarmRequestReservationTests(unittest.TestCase):
         MapStore(self.database).persist("server", "save", model, world_id="world-a")
 
     def test_two_pending_requests_cannot_reserve_the_same_current_farmland(self):
-        first = self.lifecycle.request_farm("member-a", "server", "save", 22, world_id="world-a", field_id=1)
+        with patch.object(self.db.farm_field_reservations, "update_one",
+                          wraps=self.db.farm_field_reservations.update_one) as update_one:
+            first = self.lifecycle.request_farm("member-a", "server", "save", 22,
+                                                world_id="world-a", field_id=1)
+        update_document = update_one.call_args.args[1]
+        self.assertTrue(set(update_document["$setOnInsert"]).isdisjoint(update_document["$set"]))
+        self.assertIn("created_at", update_document["$setOnInsert"])
+        self.assertNotIn("updated_at", update_document["$setOnInsert"])
+        self.assertIn("updated_at", update_document["$set"])
         self.assertEqual(first["starting_field"], 22)
         with self.assertRaisesRegex(ValueError, "reserved"):
             self.lifecycle.request_farm("member-b", "server", "save", 22, world_id="world-a", field_id=2)
