@@ -287,6 +287,21 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("streamWriteBool", event)
         self.assertIn("streamWriteString", event)
 
+    def test_chat_uses_originating_client_capture_and_native_chat_event_broadcast(self):
+        root = Path(__file__).parents[1] / "mods" / "FS25_SiN_Server"
+        source = (root / "NetworkLocal.lua").read_text(encoding="utf-8")
+        event = (root / "events" / "SiNChatCaptureEvent.lua").read_text(encoding="utf-8")
+        descriptor = (root / "modDesc.xml").read_text(encoding="utf-8")
+        self.assertIn("ChatDialog.onSendClick", source)
+        self.assertIn("SiNChatCaptureEvent.sendEvent", source)
+        self.assertIn("onClientChatCapture", source)
+        self.assertIn("ChatEvent.new(message, sender, farmId, 0)", source)
+        self.assertIn("g_server:broadcastEvent", source)
+        self.assertIn("SiNChatCaptureEvent.lua", descriptor)
+        self.assertIn("InitEventClass(SiNChatCaptureEvent", event)
+        self.assertIn("streamReadString", event)
+        self.assertIn("streamWriteString", event)
+
     def test_server_runtime_handles_shared_contractor_grant_and_receipt_gated_revocation(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
             encoding="utf-8"
@@ -511,9 +526,12 @@ class RegistrationTests(unittest.TestCase):
             encoding="utf-8")
         self.assertIn('operationType == "chat_message"', source)
         self.assertIn('permissionReceipt#status", applied and "applied" or "pending_validation"', source)
-        self.assertIn("Mission00.addChatMessage", source)
+        self.assertIn("ChatDialog.onSendClick", source)
+        self.assertIn("ChatEvent.new(message, sender, farmId, 0)", source)
+        self.assertIn("server-bound capture received", source)
         self.assertIn('sender = "[Discord] "', source)
-        self.assertIn("self.chatInjectionDepth", source)
+        self.assertIn("client chat capture disabled", source)
+        self.assertNotIn("Mission00.addChatMessage", source)
 
     def test_position_restore_is_world_scoped_and_on_foot_only(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(

@@ -7,6 +7,7 @@ record from AuthorizationManager.
 """
 from datetime import datetime, timezone
 import hashlib
+import logging
 import re
 import uuid
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -16,6 +17,7 @@ from .world_generation import WorldGenerationRegistry
 MAX_TEXT = 1000
 MAX_CHAT = 500
 CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+LOG = logging.getLogger(__name__)
 
 
 def _now():
@@ -85,12 +87,12 @@ class ChatService:
 
     @staticmethod
     def fs25_injection_supported():
-        """The bundled adapter uses the native mission chat API when present.
+        """The bundled adapter uses the native multiplayer ``ChatEvent``.
 
         The Lua side still returns ``pending_validation`` if a particular
-        dedicated-server build does not expose that API, so enabling the
-        durable route here cannot turn an unverified runtime into a false
-        success.
+        dedicated-server build does not expose the native broadcast API, so
+        enabling the durable route here cannot turn an unverified runtime
+        into a false success.
         """
         return True
 
@@ -117,7 +119,10 @@ class ChatService:
         if world_id:
             record["world_id"] = world_id
         self.db.chat_messages.update_one({"_id": storage_id}, {"$setOnInsert": record}, upsert=True)
-        return self.db.chat_messages.find_one({"_id": storage_id})
+        stored = self.db.chat_messages.find_one({"_id": storage_id})
+        LOG.info("[SiN Chat] FS25 message accepted server=%s save=%s world=%s messageId=%s",
+                 server_key, save_key, world_id or "legacy", message_id)
+        return stored
 
     def queue_to_fs25(self, server_key, save_key, actor_id, message, operation_id=None,
                       world_id=None, display_name=None, discord_message_id=None):

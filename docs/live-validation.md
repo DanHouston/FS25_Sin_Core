@@ -218,22 +218,30 @@ validated and explicitly registered by an operator.
 ### Chat boundary
 
 The central chat message/event schema and authenticated transport are locally
-tested. The server mod hooks the native `Mission00.addChatMessage` lifecycle on
-the authoritative server and emits `chat_message` mailbox events. JiN's
-ActivityOutbox publishes these to the registered server's configured Activity
-channel. The reverse path is ordinary member text in that same configured
-channel; JiN queues a world-scoped, Discord-message-ID-idempotent operation and
-the Agent delivers it through the existing mailbox. FS25 displays the sender as
-`[Discord] <display name>`.
+tested. The client mod hooks `ChatDialog.onSendClick` before the native
+`ChatEvent` is submitted, sends a separate `SiNChatCaptureEvent` to the
+authoritative server, and the server resolves the sender from the authenticated
+connection before writing the `chat_message` mailbox event. JiN's ActivityOutbox
+publishes these to the registered server's configured Activity channel. A
+dedicated server without the client hook does not install a second capture
+hook, because that would duplicate the native client event; clients without
+the current mod remain unbridged. The reverse path is
+ordinary member text in that same configured channel; JiN queues a world-scoped,
+Discord-message-ID-idempotent operation and the Agent delivers it through the
+existing mailbox. FS25 displays the sender as `[Discord] <display name>` via a
+native `ChatEvent` broadcast.
 
-Live proof must send one normal FS25 chat message and confirm one Activity
-message with the sender, then send one ordinary member message in the matching
-Activity channel and confirm one `[Discord]` FS25 message plus an `applied`
-receipt. Repeat after JiN/Agent restart and verify no duplicate appears; send a
-message in another channel and verify it is not bridged. A runtime that lacks
-`Mission00.addChatMessage` returns `pending_validation`, never a false
-delivered receipt. Do not claim either direction LIVE PASS until those checks
-are observed on the deployed build.
+Live proof must retain logs for: `client send captured`, `server-bound capture
+received`, `mailbox chat event written`, Central `FS25 message accepted`, JiN
+`Activity message accepted`/publisher success, Agent `FS25 command received`,
+`native ChatEvent broadcast executed`, and the `receipt emitted` line. Send one
+normal FS25 chat message and confirm one Activity message with the sender, then
+send one ordinary member message in the matching Activity channel and confirm
+one `[Discord]` FS25 message plus an `applied` receipt. Repeat after JiN/Agent
+restart and verify no duplicate appears; send a message in another channel and
+verify it is not bridged. A runtime lacking `ChatEvent` returns
+`pending_validation`, never a false delivered receipt. Do not claim either
+direction LIVE PASS until these checks are observed on the deployed build.
 
 ### Reconnect location boundary
 

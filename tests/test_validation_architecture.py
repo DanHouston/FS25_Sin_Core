@@ -9,7 +9,7 @@ class ValidationArchitectureTests(unittest.TestCase):
         result = validate_repository(import_modules=True)
         self.assertGreaterEqual(result["python_files"], 60)
         self.assertGreaterEqual(result["imported_modules"], 25)
-        self.assertEqual(result["lua_files"], 2)
+        self.assertEqual(result["lua_files"], 3)
 
     def test_ci_campaign_report_stays_in_ignored_ephemeral_output(self):
         workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")

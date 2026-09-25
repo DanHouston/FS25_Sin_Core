@@ -8,6 +8,7 @@
     <multiplayer supported="true"/>
     <extraSourceFiles>
         <sourceFile filename="events/SiNRegistrationWarningEvent.lua"/>
+        <sourceFile filename="events/SiNChatCaptureEvent.lua"/>
         <sourceFile filename="NetworkLocal.lua"/>
     </extraSourceFiles>
 </modDesc>

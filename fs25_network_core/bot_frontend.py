@@ -1637,6 +1637,8 @@ class NetworkBot(discord.Client):
                 operation_id="discord-chat-" + message_id, world_id=world_id,
                 display_name=display_name, discord_message_id=message_id)
             logging.info("Queued Discord Activity chat server=%s operation=%s", record["server_key"], operation_id)
+            logging.info("[SiN Chat] Discord Activity message accepted server=%s save=%s world=%s operation=%s",
+                         record["server_key"], save_key, world_id, operation_id)
         except (ValueError, TypeError) as error:
             logging.warning("Activity chat message rejected channel=%s reason=%s", channel_id, error)
 

@@ -303,6 +303,9 @@ class PairingAgent:
                 temporary = destination.with_suffix(".tmp")
                 ElementTree.ElementTree(root).write(temporary, encoding="utf-8", xml_declaration=True)
                 _atomic_replace(temporary, destination)
+                if operation.get("operation_type") == "chat_message":
+                    LOG.info("[SiN Chat] FS25 command received operation=%s world=%s",
+                             operation_id, world_id)
             delivered.append(operation_id)
         manifest = ElementTree.Element("permissionCommands", schemaVersion="1")
         for operation_id in delivered:
@@ -341,6 +344,9 @@ class PairingAgent:
                 self._post_receipt(server_key, credential, fs25_save_id, world_id, receipt)
                 path.unlink()
                 receipts.append(path.name)
+                if receipt.get("operation_type") == "chat_message":
+                    LOG.info("[SiN Chat] receipt emitted operation=%s status=%s world=%s",
+                             receipt.get("operation_id"), receipt.get("status"), world_id)
             except (ElementTree.ParseError, ValueError):
                 self._quarantine(path)
             except (HTTPError, URLError, TimeoutError, RuntimeError, OSError, json.JSONDecodeError) as error:

@@ -120,6 +120,9 @@ class ActivityPublisher:
             await channel.send(record["message"], allowed_mentions=discord.AllowedMentions.none())
             self.outbox.db.activity_outbox.update_one({"_id": record["_id"], "status": "pending"}, {"$set": {"status": "published", "published_at": datetime.now(timezone.utc)}, "$inc": {"attempts": 1}})
             LOG.info("[SiN Activity] published type=%s serverKey=%s", record["activity_type"], record["server_key"])
+            if record.get("activity_type") == "chat_message":
+                LOG.info("[SiN Chat] Discord Activity message accepted server=%s save=%s world=%s",
+                         record.get("server_key"), record.get("save_key"), record.get("world_id") or "legacy")
         except discord.Forbidden as error:
             permanent = True
             self._record_failure(record, error, permanent)

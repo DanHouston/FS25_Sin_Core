@@ -176,6 +176,8 @@ class CentralEventProcessor:
                     event_id, record["server_key"], CHAT_EVENT_TYPE,
                     f"💬 {sender}: {chat_record.get('message', raw_payload.get('message', ''))}",
                      save_key=save_key, world_id=processed_world_id)
+                LOG.info("[SiN Chat] Activity message accepted eventId=%s server=%s save=%s world=%s",
+                         event_id, record["server_key"], save_key, processed_world_id or "legacy")
         elif event_type == "player_connected":
             raw_payload = event.get("payload") or {}
             if not isinstance(raw_payload, dict):

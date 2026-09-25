@@ -329,6 +329,7 @@ function FS25SiNServer:loadMap()
     self.clockHardFallbackLogged = false
     self.activityPositionUnavailableLogged = {}
     self.invalidFarmVisualStateLogged = {}
+    self.chatCaptureUnavailableLogged = false
     self:installLifecycleHooks()
     addConsoleCommand("sinPermissions", "Report local FS25 farm permission state", "consoleCommandPermissions", self)
     addConsoleCommand("sinSelfTest", "Report read-only SiN runtime integration checks", "consoleCommandSelfTest", self)
@@ -366,17 +367,40 @@ function FS25SiNServer:installLifecycleHooks()
                 end
             end)
     end
-    if Mission00 ~= nil and type(Mission00.addChatMessage) == "function" and Utils ~= nil
-        and self.chatHookInstalled ~= true then
-        Mission00.addChatMessage = Utils.appendedFunction(Mission00.addChatMessage,
-            function(mission, senderName, message)
-                if mission == g_currentMission and mission:getIsServer() then
-                    FS25SiNServer:onChatMessage(senderName, message)
-                end
+    self:installChatCaptureHook()
+end
+
+-- Player chat is submitted by the originating client through the native
+-- ChatEvent. Capture the same text at ChatDialog.onSendClick and send a
+-- separate authenticated event to the server. The server resolves the user
+-- from the connection, so the external copy cannot be spoofed by client
+-- display-name/identity fields. There is deliberately no server-side
+-- Mission00 fallback: on a dedicated server it would capture the native
+-- ChatEvent in addition to the authenticated client event and duplicate the
+-- external message. Clients without this mod simply remain unbridged.
+function FS25SiNServer:installChatCaptureHook()
+    if Utils == nil or type(Utils.prependedFunction) ~= "function" then return false end
+    if ChatDialog ~= nil and type(ChatDialog.onSendClick) == "function"
+        and self.chatDialogHookInstalled ~= true then
+        ChatDialog.onSendClick = Utils.prependedFunction(ChatDialog.onSendClick,
+            function(dialog)
+                if g_currentMission == nil or g_currentMission:getIsClient() ~= true then return end
+                local textElement = dialog ~= nil and dialog.textElement or nil
+                local text = textElement ~= nil and type(textElement.getText) == "function"
+                    and textElement:getText() or ""
+                FS25SiNServer:captureClientChat(text)
             end)
-        self.chatHookInstalled = true
-        Logging.info("[SiN Chat] installed Mission00.addChatMessage capture hook")
+        self.chatDialogHookInstalled = true
+        self.chatCaptureMode = "client_chat_event"
+        Logging.info("[SiN Chat] installed ChatDialog.onSendClick capture hook")
+        return true
     end
+    if not self.chatCaptureUnavailableLogged then
+        self.chatCaptureUnavailableLogged = true
+        Logging.warning("[SiN Chat] ChatDialog.onSendClick unavailable; client chat capture disabled")
+    end
+    self.chatCaptureMode = "unavailable"
+    return false
 end
 
 function FS25SiNServer:loadServerBinding()
@@ -1201,30 +1225,50 @@ function FS25SiNServer:onPlayerDisconnected(userId)
         final_minute_sequence=activityState ~= nil and activityState.minuteSequence or 0})
 end
 
-function FS25SiNServer:onChatMessage(senderName, message)
-    if self.chatInjectionDepth ~= nil and self.chatInjectionDepth > 0 then return false end
+function FS25SiNServer:captureClientChat(message)
     local text = tostring(message or "")
-    local sender = tostring(senderName or "")
-    if text == "" or string.len(text) > 500 or string.find(text, "[%c]") ~= nil
-        or string.find(text, "[Discord]", 1, true) == 1 then return false end
-    if sender == "" or sender == "Server" or sender == "System" then return false end
-    local uniqueId, farmId, matchedPlayer = "", 0, false
-    if g_currentMission ~= nil and g_currentMission.userManager ~= nil then
-        for _, user in ipairs(g_currentMission.userManager:getUsers() or {}) do
-            if tostring(user:getNickname() or "") == sender then
-                matchedPlayer = true
-                uniqueId = tostring(user:getUniqueUserId() or "")
-                local farm = g_farmManager ~= nil and g_farmManager:getFarmByUserId(user:getId()) or nil
-                farmId = farm ~= nil and farm.farmId or 0
-                break
-            end
-        end
+    if text == "" or string.len(text) > 500 or string.find(text, "[%c]") ~= nil then return false end
+    if SiNChatCaptureEvent == nil or type(SiNChatCaptureEvent.sendEvent) ~= "function" then
+        Logging.warning("[SiN Chat] client send capture unavailable; native ChatEvent continues without external copy")
+        return false
     end
-    if not matchedPlayer then return false end
+    local sent = SiNChatCaptureEvent.sendEvent(text)
+    Logging.info("[SiN Chat] client send captured length=%s serverBound=%s", tostring(string.len(text)), tostring(sent))
+    return sent
+end
+
+function FS25SiNServer:onClientChatCapture(connection, message)
+    if g_currentMission == nil or not g_currentMission:getIsServer() then return false end
+    if connection == nil or (connection.getIsServer ~= nil and connection:getIsServer()) then return false end
+    local user = g_currentMission.userManager ~= nil
+        and g_currentMission.userManager:getUserByConnection(connection) or nil
+    if user == nil or self:isDedicatedServerUser(user, nil) then
+        Logging.warning("[SiN Chat] server-bound capture rejected: authenticated user unavailable")
+        return false
+    end
+    local text = tostring(message or "")
+    if text == "" or string.len(text) > 500 or string.find(text, "[%c]") ~= nil then
+        Logging.warning("[SiN Chat] server-bound capture rejected: malformed message userId=%s", tostring(user:getId()))
+        return false
+    end
+    local farm = g_farmManager ~= nil and g_farmManager:getFarmByUserId(user:getId()) or nil
+    local uniqueId = tostring(user:getUniqueUserId() or "")
+    if uniqueId == "" then
+        Logging.warning("[SiN Chat] server-bound capture rejected: stable uniqueUserId unavailable userId=%s",
+            tostring(user:getId()))
+        return false
+    end
+    local farmId = farm ~= nil and farm.farmId or 0
+    local displayName = tostring(user:getNickname() or "")
     self.chatSequence = (self.chatSequence or 0) + 1
     local eventId = tostring(self.runtimeNonce or "runtime") .. "-chat-" .. tostring(self.chatSequence)
-    return self:emitServerEvent("chat_message", {message_id=eventId, message=text,
-        display_name=sender, unique_user_id=uniqueId, farm_id=farmId, source="fs25"}, eventId)
+    eventId = string.gsub(eventId, "[^%w_-]", "_")
+    Logging.info("[SiN Chat] server-bound capture received uniqueUserId=%s userId=%s farmId=%s",
+        self:shortIdentity(uniqueId), tostring(user:getId()), tostring(farmId))
+    local emitted = self:emitServerEvent("chat_message", {message_id=eventId, message=text,
+        display_name=displayName, unique_user_id=uniqueId, farm_id=farmId, source="fs25"}, eventId)
+    Logging.info("[SiN Chat] mailbox chat event written eventId=%s emitted=%s", eventId, tostring(emitted))
+    return emitted
 end
 
 function FS25SiNServer:setClientRegistrationWarning(required, code)
@@ -1616,6 +1660,9 @@ function FS25SiNServer:update(dt)
     end
     if not self.failed and g_currentMission ~= nil and self.worldIdentitySaveHookInstalled ~= true then
         self:installWorldIdentityPersistenceHook()
+    end
+    if not self.failed and g_currentMission ~= nil then
+        self:installChatCaptureHook()
     end
     if not self.failed and g_currentMission ~= nil and self.worldIdentityReady ~= true
         and self.worldIdentityRetryable == true then
@@ -2395,10 +2442,10 @@ function FS25SiNServer:consumeCommandFile(operationId)
     end
 end
 
--- Discord-originated chat is injected only through the native mission chat
--- method when the running FS25 build exposes it.  The receipt is successful
--- only after the call completes; unavailable/failed runtime adapters remain
--- pending-validation and can never be reported as delivered.
+-- Discord-originated chat is injected through the native ChatEvent broadcast
+-- on the authoritative server. This is the same multiplayer boundary used by
+-- FS25 itself and does not re-enter the client ChatDialog capture hook. The
+-- receipt is successful only after broadcastEvent executes.
 function FS25SiNServer:processChatCommand(command, operationId)
     local message = command:getString("networkLocalCommand#message") or ""
     local displayName = command:getString("networkLocalCommand#display_name") or "Discord"
@@ -2409,17 +2456,20 @@ function FS25SiNServer:processChatCommand(command, operationId)
     elseif message == "" or string.len(message) > 500 or string.find(message, "[%c]") ~= nil then
         reason = "invalid chat message"
     elseif g_currentMission == nil or not g_currentMission:getIsServer()
-        or type(g_currentMission.addChatMessage) ~= "function" then
-        reason = "FS25 mission chat API unavailable"
+        or g_server == nil or type(g_server.broadcastEvent) ~= "function"
+        or ChatEvent == nil or type(ChatEvent.new) ~= "function" then
+        reason = "FS25 native ChatEvent API unavailable"
     else
         local sender = tostring(displayName)
         if sender == "" then sender = "Discord" end
         sender = "[Discord] " .. string.sub(sender, 1, 80)
-        self.chatInjectionDepth = (self.chatInjectionDepth or 0) + 1
-        local ok, errorMessage = pcall(g_currentMission.addChatMessage, g_currentMission, sender, message)
-        self.chatInjectionDepth = math.max(0, (self.chatInjectionDepth or 1) - 1)
+        local farmId = FarmManager ~= nil and FarmManager.SPECTATOR_FARM_ID or 0
+        local ok, errorMessage = pcall(function()
+            g_server:broadcastEvent(ChatEvent.new(message, sender, farmId, 0))
+        end)
         applied = ok
-        reason = applied and "FS25 chat message submitted" or ("FS25 chat API failed: " .. tostring(errorMessage))
+        reason = applied and "FS25 native ChatEvent broadcast executed" or ("FS25 ChatEvent broadcast failed: " .. tostring(errorMessage))
+        Logging.info("[SiN Chat] native ChatEvent broadcast operation=%s executed=%s", operationId, tostring(applied))
     end
     local receipt = XMLFile.create("networkLocalReceipt", self.receiptDirectory .. operationId .. ".xml", "permissionReceipt")
     receipt:setString("permissionReceipt#operation_id", operationId)
