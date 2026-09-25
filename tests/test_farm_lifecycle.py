@@ -591,6 +591,19 @@ class SharedContractorAuthorityTests(unittest.TestCase):
             (2, "farm_manager", "farm_manager", "active"),
             (99, "contractor", "contractor", "active")])
 
+    def test_contractor_repair_reestablishes_current_system_farm_mapping(self):
+        self.approved_identity("repton", "stable-repton")
+        self.db.sin_farms.delete_one({"_id": "sin-harvest"})
+
+        self.lifecycle._repair_contractor_authorizations("server", "save")
+
+        mapping = self.db.sin_farms.find_one({"server_key": "server", "save_key": "save",
+                                              "world_id": "world-a", "farm_type": "system"})
+        self.assertEqual(mapping["fs25_farm_id"], 99)
+        relationship = self.db.memberships.find_one({"discord_id": "repton", "desired_role": "contractor"})
+        self.assertEqual((relationship["source_farm_id"], relationship["farm_id"], relationship["state"]),
+                         (2, 99, "pending"))
+
     def test_multiple_members_and_restart_reconciliation_are_idempotent(self):
         self.approved_identity("repton", "stable-repton")
         self.approved_identity("sam", "stable-sam")

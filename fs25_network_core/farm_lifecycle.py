@@ -939,6 +939,13 @@ class FarmLifecycle:
                 request.get("mapping_id"), request.get("farm_name"))
 
     def _repair_contractor_authorizations(self, server_key, save_key):
+        # Contractor reconciliation depends on a current-world mapping for
+        # the native SiN Harvest farm.  A world transition can leave that
+        # mapping pending even though the authoritative snapshot already
+        # contains Farm 1; adopt/queue that exact snapshot identity before
+        # deriving any contractor edge.  This remains receipt-gated and
+        # fail-closed when the snapshot is absent or ambiguous.
+        self.ensure_system_farm(server_key, save_key)
         self._reconcile_shared_contractor_authorizations(server_key, save_key)
 
     def available_fields(self, server_key, save_key, *, world_id=None, session=None):
