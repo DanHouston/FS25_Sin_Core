@@ -29,6 +29,44 @@ class FarmLifecycleTests(unittest.TestCase):
         self.assertEqual(update["$setOnInsert"]["payload"]["canonical_name"], SYSTEM_FARM_NAME)
         self.assertNotIn("fs25_farm_id", update["$setOnInsert"])
 
+    def test_staff_status_reads_current_world_authority_projection_and_jobs(self):
+        database = _MemoryDatabase()
+        lifecycle = FarmLifecycle(database, AuthorizationManager(database))
+        database.db.world_generations.insert_one({
+            "server_key": "server", "save_key": "save", "world_id": "world-b",
+            "state": "active",
+        })
+        database.db.community_applications.insert_one({
+            "_id": "discord", "state": "approved", "nickname": "Player",
+            "farm_name": "Player Farm",
+        })
+        database.db.game_identities.insert_one({
+            "server_id": "server", "save_id": "save", "discord_id": "discord",
+            "fs25_unique_user_id": "stable", "game_player_id": "stable",
+        })
+        database.db.farm_requests.insert_one({
+            "_id": "request", "server_key": "server", "save_key": "save",
+            "world_id": "world-b", "discord_id": "discord", "farm_name": "Player Farm",
+            "farm_id": 3, "state": "awaiting_manager", "permission_operation_id": "job",
+        })
+        database.db.memberships.insert_one({
+            "_id": "membership", "server_id": "server", "save_id": "save",
+            "world_id": "world-b", "discord_id": "discord", "farm_id": 3,
+            "desired_role": "farm_manager", "state": "pending", "operation_id": "job",
+        })
+        database.db.permission_jobs.insert_one({
+            "_id": "job", "server_id": "server", "save_id": "save",
+            "world_id": "world-b", "game_player_id": "stable", "farm_id": 3,
+            "role": "farm_manager", "state": "pending",
+        })
+
+        status = lifecycle.staff_status("server", "save", "discord")
+
+        self.assertEqual(status["world_id"], "world-b")
+        self.assertEqual([row["desired_role"] for row in status["memberships"]], ["farm_manager"])
+        self.assertEqual([(row["_id"], row["state"]) for row in status["permission_jobs"]],
+                         [("job", "pending")])
+
     def test_member_request_uses_approved_application_and_available_field(self):
         self.db.community_applications.find_one.return_value = {"state": "approved", "farm_name": "Repton Does"}
         self.db.server_snapshots.find_one.return_value = {"farmlands": {"12": 0}}

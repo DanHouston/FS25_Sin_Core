@@ -1048,7 +1048,17 @@ class FarmLifecycle:
         identity = self.db.game_identities.find_one({
             "server_id": str(server_key), "save_id": str(save_key), "discord_id": str(discord_id)})
         application = self.db.community_applications.find_one({"_id": str(discord_id)})
-        memberships = list(self.db.memberships.find({**scope, "discord_id": str(discord_id)}).limit(20))
+        # Farm lifecycle records use the server_key/save_key vocabulary, while
+        # native authority projections deliberately use server_id/save_id.  Do
+        # not query memberships with the lifecycle scope: that silently turns
+        # every real manager/contractor relationship into "none" in the staff
+        # diagnostic.  Authority is also world-scoped, so retain only the
+        # active generation's rows.
+        authority_scope = {"server_id": str(server_key), "save_id": str(save_key)}
+        if scope.get("world_id"):
+            authority_scope["world_id"] = scope["world_id"]
+        memberships = list(self.db.memberships.find(
+            {**authority_scope, "discord_id": str(discord_id)}).limit(20))
         operations = []
         operation_ids = []
         if isinstance(request, dict):
@@ -1065,6 +1075,21 @@ class FarmLifecycle:
             operation = self.db.farm_operations.find_one({"_id": operation_id, **scope})
             if isinstance(operation, dict):
                 operations.append(operation)
+        # Permission jobs are the durable authority handoff records.  They do
+        # not live in farm_operations, so include the jobs referenced by the
+        # request and by current-world memberships.  This makes pending,
+        # applied, failed, and retry states visible without widening the query
+        # to historical generations or unrelated players.
+        permission_operation_ids = list(dict.fromkeys(
+            [row.get("operation_id") for row in memberships if row.get("operation_id")]
+            + [request.get(key) for key in (
+                "permission_operation_id", "contractor_permission_operation_id")
+               if isinstance(request, dict) and request.get(key)]))
+        permission_jobs = []
+        for operation_id in permission_operation_ids:
+            job = self.db.permission_jobs.find_one({"_id": operation_id, **authority_scope})
+            if isinstance(job, dict):
+                permission_jobs.append(job)
         session = None
         if isinstance(identity, dict):
             stable_id = identity.get("fs25_unique_user_id") or identity.get("game_player_id")
@@ -1074,7 +1099,8 @@ class FarmLifecycle:
         return {"server_key": str(server_key), "save_key": str(save_key),
                 "world_id": scope.get("world_id"), "request": request,
                 "identity": identity, "application": application, "memberships": memberships,
-                "operations": operations, "financial": financial, "session": session}
+                "operations": operations, "permission_jobs": permission_jobs,
+                "financial": financial, "session": session}
 
     def requests(self, server_key, save_key):
         return list(self.db.farm_requests.find({**self._scope(server_key, save_key),

@@ -877,6 +877,10 @@ class NetworkBot(discord.Client):
                               f"Lifecycle: {request.get('state') or 'unknown'}"])
                 if request.get("financial_capability_state") == "capability_required":
                     lines.append("Financial provisioning: pending (FS25 money/loan capability not live-verified)")
+                if request.get("manager_authorization_error"):
+                    lines.append(f"Manager authority error: {request['manager_authorization_error']}")
+                if request.get("contractor_authorization_error"):
+                    lines.append(f"Contractor authority error: {request['contractor_authorization_error']}")
             else:
                 lines.append("Farm request: none in the current world")
             if identity:
@@ -896,6 +900,13 @@ class NetworkBot(discord.Client):
                     f"{row.get('desired_role')}={row.get('state')}" for row in memberships))
             else:
                 lines.append("Authority: no current-world SiN memberships")
+            permission_jobs = status.get("permission_jobs") or []
+            if permission_jobs:
+                lines.append("Permission jobs: " + "; ".join(
+                    f"{row.get('role') or 'authority'}={row.get('state')} ({row.get('_id')})"
+                    for row in permission_jobs))
+            elif memberships:
+                lines.append("Permission jobs: none found for current-world authority")
             operations = status.get("operations") or []
             if operations:
                 lines.append("Operations: " + "; ".join(
