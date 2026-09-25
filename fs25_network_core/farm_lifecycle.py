@@ -945,7 +945,14 @@ class FarmLifecycle:
         # contains Farm 1; adopt/queue that exact snapshot identity before
         # deriving any contractor edge.  This remains receipt-gated and
         # fail-closed when the snapshot is absent or ambiguous.
-        self.ensure_system_farm(server_key, save_key)
+        if self._shared_system_farm(server_key, save_key) is None \
+                and self.current_world_id(server_key, save_key):
+            snapshot = self.latest_snapshot(server_key, save_key)
+            farms = snapshot.get("farms") if isinstance(snapshot, dict) else {}
+            exact_system_matches = [farm_id for farm_id, name in (farms or {}).items()
+                                    if str(name) == SYSTEM_FARM_NAME]
+            if len(exact_system_matches) == 1:
+                self.ensure_system_farm(server_key, save_key)
         self._reconcile_shared_contractor_authorizations(server_key, save_key)
 
     def available_fields(self, server_key, save_key, *, world_id=None, session=None):
