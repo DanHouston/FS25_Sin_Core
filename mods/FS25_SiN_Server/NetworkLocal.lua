@@ -306,6 +306,7 @@ function FS25SiNServer:loadMap()
     self.connectedPlayers = {}
     self.identityNames = {}
     self.authorityCanonicalNames = {}
+    self.identityAlignmentLogs = {}
     self.registrationState = {}
     self.registrationQuarantined = {}
     self.registrationPromptAt = {}
@@ -2778,31 +2779,46 @@ function FS25SiNServer:alignConnectedPlayerName(uniqueId, canonical, source)
             self:shortIdentity(uniqueId))
         return false
     end
+    local alignmentKey = tostring(uniqueId) .. "|" .. tostring(canonical)
+    local function logTransition(state, callback)
+        local signature = tostring(state) .. "|" .. tostring(source or "runtime")
+        if self.identityAlignmentLogs[alignmentKey] == signature then return end
+        self.identityAlignmentLogs[alignmentKey] = signature
+        callback()
+    end
     local matched = self:findConnectedUser(uniqueId)
     if matched == nil then
-        Logging.info("[SiN Identity] uniqueUserId=%s canonicalName=%s nameAligned=false reason=not_connected source=%s",
-            self:shortIdentity(uniqueId), tostring(canonical), tostring(source or "runtime"))
+        logTransition("not_connected", function()
+            Logging.info("[SiN Identity] uniqueUserId=%s canonicalName=%s nameAligned=false reason=not_connected source=%s",
+                self:shortIdentity(uniqueId), tostring(canonical), tostring(source or "runtime"))
+        end)
         return false
     end
     local player = self:findPlayerObject(matched:getId(), matched)
     local observed = tostring(matched:getNickname() or "")
     if observed == tostring(canonical) then
-        Logging.info("[SiN Identity] uniqueUserId=%s observedName=%s canonicalName=%s nameAligned=true broadcast=false source=%s",
-            self:shortIdentity(uniqueId), observed, tostring(canonical), tostring(source or "runtime"))
+        logTransition("aligned", function()
+            Logging.info("[SiN Identity] uniqueUserId=%s observedName=%s canonicalName=%s nameAligned=true broadcast=false source=%s",
+                self:shortIdentity(uniqueId), observed, tostring(canonical), tostring(source or "runtime"))
+        end)
         return true
     end
     if player == nil or g_currentMission == nil or g_currentMission.setPlayerNickname == nil
         or g_server == nil or type(g_server.broadcastEvent) ~= "function"
         or PlayerSetNicknameEvent == nil or type(PlayerSetNicknameEvent.new) ~= "function" then
-        Logging.warning("[SiN Identity] uniqueUserId=%s observedName=%s canonicalName=%s nameAligned=false broadcast=false source=%s reason=native_nickname_api_unavailable",
-            self:shortIdentity(uniqueId), observed, tostring(canonical), tostring(source or "runtime"))
+        logTransition("api_unavailable", function()
+            Logging.warning("[SiN Identity] uniqueUserId=%s observedName=%s canonicalName=%s nameAligned=false broadcast=false source=%s reason=native_nickname_api_unavailable",
+                self:shortIdentity(uniqueId), observed, tostring(canonical), tostring(source or "runtime"))
+        end)
         return false
     end
     local setOk, setError = pcall(g_currentMission.setPlayerNickname, g_currentMission,
         player, tostring(canonical), matched:getId())
     if not setOk then
-        Logging.error("[SiN Identity] uniqueUserId=%s nameAligned=false source=%s reason=server_nickname_update_failed error=%s",
-            self:shortIdentity(uniqueId), tostring(source or "runtime"), tostring(setError))
+        logTransition("update_failed", function()
+            Logging.error("[SiN Identity] uniqueUserId=%s nameAligned=false source=%s reason=server_nickname_update_failed error=%s",
+                self:shortIdentity(uniqueId), tostring(source or "runtime"), tostring(setError))
+        end)
         return false
     end
     local broadcastOk, broadcastError = pcall(function()
@@ -2810,9 +2826,11 @@ function FS25SiNServer:alignConnectedPlayerName(uniqueId, canonical, source)
             nil, nil, player)
     end)
     local aligned = tostring(matched:getNickname() or "") == tostring(canonical)
-    Logging.info("[SiN Identity] uniqueUserId=%s observedName=%s canonicalName=%s nameAligned=%s broadcast=%s source=%s%s",
-        self:shortIdentity(uniqueId), observed, tostring(canonical), tostring(aligned), tostring(broadcastOk),
-        tostring(source or "runtime"), broadcastOk and "" or (" error=" .. tostring(broadcastError)))
+    logTransition(aligned and "broadcast_aligned" or "broadcast_failed", function()
+        Logging.info("[SiN Identity] uniqueUserId=%s observedName=%s canonicalName=%s nameAligned=%s broadcast=%s source=%s%s",
+            self:shortIdentity(uniqueId), observed, tostring(canonical), tostring(aligned), tostring(broadcastOk),
+            tostring(source or "runtime"), broadcastOk and "" or (" error=" .. tostring(broadcastError)))
+    end)
     return aligned and broadcastOk
 end
 

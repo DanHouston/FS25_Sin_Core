@@ -337,6 +337,15 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn('canonicalName', source)
         self.assertIn('nameAligned=', source)
 
+    def test_server_runtime_suppresses_repeated_identity_alignment_logs(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8")
+        self.assertIn('self.identityAlignmentLogs = {}', source)
+        self.assertIn('local function logTransition(state, callback)', source)
+        self.assertIn('if self.identityAlignmentLogs[alignmentKey] == signature then return end', source)
+        self.assertIn('logTransition("not_connected"', source)
+        self.assertIn('logTransition("aligned"', source)
+
     def test_server_runtime_exposes_read_only_economy_capability_probe(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
             encoding="utf-8"
