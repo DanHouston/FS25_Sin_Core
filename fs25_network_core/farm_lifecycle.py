@@ -43,6 +43,10 @@ class FarmLifecycle:
             authorization = AuthorizationManager(database)
         self.authorization = authorization
         self.worlds = WorldGenerationRegistry(database)
+        # Contractor reconciliation is called from frequent heartbeat and
+        # authority-poll paths.  Keep diagnostics useful without repeating an
+        # unchanged source-farm observation on every call.
+        self._last_source_observations = {}
 
     @staticmethod
     def _now():
@@ -710,9 +714,13 @@ class FarmLifecycle:
             farm_id = int(observed.get("current_farm_id", observed.get("observed_farm_id", 0)) or 0)
         except (TypeError, ValueError):
             return None
-        LOG.info("[SiN Contractor] current source observation server=%s save=%s unique=%s farm=%s source=%s",
-                 server_key, save_key, unique_id[:12], farm_id,
-                 "session" if observed is observed_session else "projection")
+        source = "session" if observed is observed_session else "projection"
+        observation_key = (str(server_key), str(save_key), unique_id)
+        observation = (farm_id, source)
+        if self._last_source_observations.get(observation_key) != observation:
+            LOG.info("[SiN Contractor] current source observation server=%s save=%s unique=%s farm=%s source=%s",
+                     server_key, save_key, unique_id[:12], farm_id, source)
+            self._last_source_observations[observation_key] = observation
         return farm_id if farm_id > 0 else None
 
     def _current_farm_names(self, server_key, save_key):

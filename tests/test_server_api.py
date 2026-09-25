@@ -279,14 +279,16 @@ class ServerApiTests(unittest.TestCase):
         handler.farm_lifecycle = MagicMock()
         handler.event_processor.registry.authenticate.return_value = {"server_key": "sin-fs25-01"}
         handler.event_processor.registry.resolve_save.return_value = "sin-fs25-main"
-        handler.event_processor.authorization.db.memberships.find.return_value = [{
+        # Use a single-pass cursor, matching PyMongo, so the endpoint must
+        # materialize the shared relationship projection before splitting it.
+        handler.event_processor.authorization.db.memberships.find.return_value = iter([{
             "game_player_id": "stable-player", "farm_id": 2,
             "state": "pending", "desired_role": "farm_manager", "applied_role": None,
         }, {
             "game_player_id": "stable-player", "farm_id": 99,
             "source_farm_id": 2,
             "state": "pending", "desired_role": "contractor", "applied_role": None,
-        }]
+        }])
         handler.farm_lifecycle._repair_contractor_authorizations = MagicMock()
         connection = HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
         connection.request("GET", "/api/server/manager-authority?fs25_save_id=1&world_id=test-world", headers={

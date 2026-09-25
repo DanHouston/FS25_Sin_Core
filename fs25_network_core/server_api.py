@@ -114,7 +114,10 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
                 except Exception as error:  # pragma: no cover - defensive HTTP boundary
                     LOG.warning("contractor authority reconciliation deferred server=%s save=%s reason=%s",
                                 record["server_key"], save_key, str(error)[:240])
-                relationships = self.event_processor.authorization.db.memberships.find({
+                # Mongo cursors are single-pass iterators.  Materialize the
+                # current-world projection once because managers and
+                # contractors are derived from the same result set.
+                relationships = list(self.event_processor.authorization.db.memberships.find({
                     "server_id": record["server_key"], "save_id": save_key,
                     "world_id": str(world_id),
                     # A pending manager assignment is already a persisted SiN
@@ -126,7 +129,7 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
                     # empty authority XML prevents the game from applying the
                     # pending job in the first place.
                     "state": {"$in": ["pending", "active"]},
-                    "desired_role": {"$in": ["farm_manager", "contractor"]}})
+                    "desired_role": {"$in": ["farm_manager", "contractor"]}}))
                 def canonical_name_for(row):
                     # Presentation metadata is resolved from the durable
                     # approved identity, never from the transient FS25 name.

@@ -733,6 +733,29 @@ class AgentTests(unittest.TestCase):
             authority = (root / "manager-authority.xml").read_text(encoding="utf-8")
             self.assertIn('canonicalName="Repton | Repton Does"', authority)
 
+    def test_manager_authority_projection_log_is_change_based(self):
+        response = MagicMock()
+        response.status = 200
+        response.read.return_value = json.dumps({
+            "managers": [{"game_player_id": "stable-player", "farm_id": 2}],
+            "contractors": [{"game_player_id": "stable-player", "farm_id": 99,
+                             "source_farm_id": 2}],
+        }).encode("utf-8")
+        response.__enter__.return_value = response
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "serverBinding.xml").write_text(
+                '<serverBinding serverKey="server" credential="secret"/>', encoding="utf-8")
+            (root / "snapshot.xml").write_text(
+                '<networkLocal savegameIndex="1" worldId="test-world"/>', encoding="utf-8")
+            agent = PairingAgent(root, "https://central", MagicMock(return_value=response))
+            with self.assertLogs("fs25_network_core.agent", level="INFO") as captured:
+                self.assertTrue(agent.process_manager_authority_once())
+                self.assertTrue(agent.process_manager_authority_once())
+            projection_logs = [line for line in captured.output
+                               if "authority projection" in line]
+            self.assertEqual(len(projection_logs), 1)
+
     def test_map_geometry_event_preserves_farmland_identity_and_optional_geometry(self):
         with tempfile.TemporaryDirectory() as folder:
             event = Path(folder) / "map.xml"

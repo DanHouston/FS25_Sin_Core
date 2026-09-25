@@ -277,6 +277,23 @@ class FarmLifecycleTests(unittest.TestCase):
         self.assertEqual(result, {})
         self.lifecycle.authorization.assign.assert_not_called()
 
+    def test_contractor_source_observation_log_is_change_based(self):
+        self.lifecycle.current_world_id = MagicMock(return_value="world")
+        self.db.observed_fs25_identities.find_one.return_value = None
+        self.db.player_activity_sessions.find_one.return_value = {
+            "server_key": "server", "save_key": "save", "world_id": "world",
+            "fs25_unique_user_id": "stable", "observed_farm_id": 3,
+        }
+        identity = {"fs25_unique_user_id": "stable"}
+
+        with self.assertLogs("fs25_network_core.farm_lifecycle", level="INFO") as captured:
+            self.assertEqual(self.lifecycle._current_observed_farm("server", "save", identity), 3)
+            self.assertEqual(self.lifecycle._current_observed_farm("server", "save", identity), 3)
+
+        observation_logs = [line for line in captured.output
+                            if "current source observation" in line]
+        self.assertEqual(len(observation_logs), 1)
+
     def test_duplicate_successful_receipt_is_idempotent(self):
         operation = {"_id": "op", "operation_id": "op", "operation_type": "ensure_farm",
                      "state": "dispatched", "payload": {"farm_type": "system",

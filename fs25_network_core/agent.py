@@ -74,6 +74,7 @@ class PairingAgent:
         self.manager_authority_url = self.backend_root + "/api/server/manager-authority"
         self.opener = opener or urlopen
         self._event_cache = {}
+        self._last_authority_projection = None
         batch_size = self.DEFAULT_EVENT_BATCH_SIZE if event_batch_size is None else int(event_batch_size)
         if batch_size < 1 or batch_size > self.MAX_EVENT_BATCH_SIZE:
             raise ValueError(f"event batch size must be between 1 and {self.MAX_EVENT_BATCH_SIZE}")
@@ -394,8 +395,19 @@ class PairingAgent:
             contractors = payload.get("contractors", []) if isinstance(payload, dict) else []
             if not isinstance(contractors, list):
                 raise ValueError("contractor authority API returned an invalid response")
-            LOG.info("[SiN Authorization] authority projection world=%s managers=%s contractors=%s",
-                     world_id, len(managers), len(contractors))
+            def authority_signature(entries, include_source=False):
+                return tuple(sorted(
+                    (str(entry.get("game_player_id")), str(entry.get("farm_id")),
+                     str(entry.get("source_farm_id", "")) if include_source else "",
+                     str(entry.get("canonical_name", "")))
+                    for entry in entries if isinstance(entry, dict)))
+
+            projection_signature = (str(world_id), authority_signature(managers),
+                                    authority_signature(contractors, include_source=True))
+            if projection_signature != self._last_authority_projection:
+                LOG.info("[SiN Authorization] authority projection world=%s managers=%s contractors=%s",
+                         world_id, len(managers), len(contractors))
+                self._last_authority_projection = projection_signature
             root = ElementTree.Element("managerAuthority", schemaVersion="1", worldId=str(world_id))
             for manager in managers:
                 if isinstance(manager, dict) and manager.get("game_player_id") is not None:
