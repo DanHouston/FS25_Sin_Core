@@ -75,6 +75,18 @@ class AuthorizationTests(unittest.TestCase):
         self.assertEqual(record["farm_id"], 2)
         self.db.permission_jobs.insert_one.assert_called_once()
 
+    def test_identity_resolution_reconstructs_canonical_name_for_legacy_application(self):
+        self.db.game_identities.find.return_value.limit.return_value = [{
+            "discord_id": "123", "server_id": "server", "save_id": "save",
+            "fs25_unique_user_id": "stable"}]
+        self.db.community_applications.find_one.return_value = {
+            "_id": "123", "state": "approved", "nickname": "Matt70", "farm_name": "Matt's Farm"}
+
+        resolved = self.auth.resolve_player_identity("server", "save", "stable")
+
+        self.assertTrue(resolved["fully_registered"])
+        self.assertEqual(resolved["canonical_name"], "Matt70 | Matt's Farm")
+
     def test_personal_manager_and_shared_contractor_relationships_coexist(self):
         self.db.game_identities.find_one.return_value = {
             "discord_id": "123", "game_player_id": "player", "fs25_unique_user_id": "player"}

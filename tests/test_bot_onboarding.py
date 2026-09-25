@@ -370,6 +370,21 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(option["type"], 3)  # Discord string option with autocomplete, not guild-member picker.
         self.assertTrue(option["autocomplete"])
 
+    async def test_staff_farm_status_member_picker_includes_existing_identity_not_only_pending_requests(self):
+        self.bot.bank.database.db.farm_requests.find.return_value = [{
+            "discord_id": "369117853460201474", "farm_name": "fendtfarmer", "state": "awaiting_manager"}]
+        self.bot.bank.database.db.game_identities.find.return_value = []
+        interaction = MagicMock()
+        interaction.namespace.server = "local-dev"
+        interaction.guild_id = 1
+        interaction.guild.fetch_member = AsyncMock(return_value=MagicMock(display_name="jeroen93242", bot=False))
+
+        command = self.bot.tree.get_command("farm_status_staff")
+        choices = await command._params["member"].autocomplete(interaction, "jeroen")
+
+        self.assertEqual([(choice.name, choice.value) for choice in choices],
+                         [("jeroen93242 (369117853460201474) | fendtfarmer", "369117853460201474")])
+
     async def test_requester_picker_searches_display_name(self):
         authorization = MagicMock()
         authorization.requests.return_value = [{"discord_id": "123", "farm_name": "My farm"}]

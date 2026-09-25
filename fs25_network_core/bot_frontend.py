@@ -656,6 +656,48 @@ class NetworkBot(discord.Client):
                     choices.append(app_commands.Choice(name=label[:100], value=record["discord_id"]))
             return choices[:25]
 
+        async def farm_status_members(interaction: discord.Interaction, current: str):
+            """Autocomplete every current-save requester/identity, not only pending requests."""
+            server = getattr(interaction.namespace, "server", None)
+            if not server:
+                return []
+            try:
+                config = await asyncio.to_thread(server_config, interaction, server)
+                save_key = selected_save(config)
+            except ValueError:
+                return []
+            scope = {"server_key": server, "save_key": save_key}
+            try:
+                request_rows = list(await asyncio.to_thread(
+                    lambda: self.bank.database.db.farm_requests.find(scope)))
+                identity_rows = list(await asyncio.to_thread(
+                    lambda: self.bank.database.db.game_identities.find(
+                        {"server_id": server, "save_id": save_key})))
+            except Exception:
+                logging.exception("farm status member autocomplete failed server=%s save=%s", server, save_key)
+                return []
+            candidates = {}
+            for record in request_rows + identity_rows:
+                discord_id = str(record.get("discord_id") or "").strip()
+                if discord_id:
+                    candidates.setdefault(discord_id, record)
+            query = (current or "").lower()
+            choices = []
+            for discord_id, record in sorted(candidates.items()):
+                display_name = discord_id
+                try:
+                    member = await interaction.guild.fetch_member(int(discord_id))
+                    if getattr(member, "bot", False):
+                        continue
+                    display_name = getattr(member, "display_name", None) or display_name
+                except (AttributeError, TypeError, ValueError, discord.HTTPException):
+                    pass
+                farm_name = str(record.get("farm_name") or "no farm request")
+                label = f"{display_name} ({discord_id}) | {farm_name}"
+                if query in label.lower():
+                    choices.append(app_commands.Choice(name=label[:100], value=discord_id))
+            return choices[:25]
+
         @self.tree.command(name="farm_request", description="Choose a current-world field and request a farm")
         @app_commands.check(channel_check)
         async def farm_request(interaction: discord.Interaction, server: str):
@@ -825,6 +867,7 @@ class NetworkBot(discord.Client):
             status = await asyncio.to_thread(self.farm_lifecycle.staff_status, server, save_key, str(member).strip())
             request = status.get("request") or {}
             identity = status.get("identity") or {}
+            application = status.get("application") or {}
             session = status.get("session") or {}
             lines = [f"Staff farm status for `{member}`", f"Server: {server}",
                      f"Save: {save_key}", f"World: {status.get('world_id') or 'unavailable'}"]
@@ -838,9 +881,15 @@ class NetworkBot(discord.Client):
                 lines.append("Farm request: none in the current world")
             if identity:
                 lines.append(f"FS25 identity: {identity.get('fs25_unique_user_id') or identity.get('game_player_id') or 'unavailable'}")
+            if application:
+                canonical_name = application.get("server_nickname") or " | ".join(
+                    value for value in (application.get("nickname"), application.get("farm_name")) if value)
+                lines.append(f"SiN name: {canonical_name or 'unavailable'}")
             if session:
                 lines.append(f"Latest native farm observation: {session.get('observed_farm_id', session.get('current_farm_id', 0))}"
                              f" at {session.get('observed_farm_at') or session.get('last_seen_at') or 'unknown'}")
+                if session.get("observed_display_name"):
+                    lines.append(f"Latest FS25 name: {session['observed_display_name']}")
             memberships = status.get("memberships") or []
             if memberships:
                 lines.append("Authority: " + "; ".join(
@@ -857,6 +906,10 @@ class NetworkBot(discord.Client):
         @farm_status_staff.autocomplete("server")
         async def farm_status_staff_server_autocomplete(interaction: discord.Interaction, current: str):
             return await server_choices(interaction, current, "reconcile")
+
+        @farm_status_staff.autocomplete("member")
+        async def farm_status_staff_member_autocomplete(interaction: discord.Interaction, current: str):
+            return await farm_status_members(interaction, current)
 
         @self.tree.command(name="server_reconcile", description="Staff: reconcile required SiN server resources")
         @app_commands.check(channel_check)

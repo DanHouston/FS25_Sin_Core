@@ -302,8 +302,16 @@ class AuthorizationManager:
         if not application:
             return {"linked": True, "discord_user_id": discord_id, "application_approved": False,
                     "canonical_name": None, "fully_registered": False, "reason": "no_approved_application", "match_count": 1}
+        canonical_name = str(application.get("server_nickname") or "").strip()
+        if not canonical_name:
+            nickname = str(application.get("nickname") or "").strip()
+            farm_name = str(application.get("farm_name") or "").strip()
+            if nickname and farm_name:
+                canonical_name = f"{nickname} | {farm_name}"
+            else:
+                canonical_name = nickname or farm_name or discord_id
         return {"linked": True, "discord_user_id": discord_id, "application_approved": True,
-                "canonical_name": application.get("server_nickname"), "fully_registered": True,
+                "canonical_name": canonical_name, "fully_registered": True,
                 "reason": "approved", "match_count": 1}
 
     def requests(self, server_id, save_id):

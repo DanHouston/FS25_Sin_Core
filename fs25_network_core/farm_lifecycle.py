@@ -1047,6 +1047,7 @@ class FarmLifecycle:
         request = requests[0] if requests else None
         identity = self.db.game_identities.find_one({
             "server_id": str(server_key), "save_id": str(save_key), "discord_id": str(discord_id)})
+        application = self.db.community_applications.find_one({"_id": str(discord_id)})
         memberships = list(self.db.memberships.find({**scope, "discord_id": str(discord_id)}).limit(20))
         operations = []
         operation_ids = []
@@ -1072,7 +1073,7 @@ class FarmLifecycle:
                     "fs25_unique_user_id": str(stable_id)}, sort=[("last_seen_at", -1)])
         return {"server_key": str(server_key), "save_key": str(save_key),
                 "world_id": scope.get("world_id"), "request": request,
-                "identity": identity, "memberships": memberships,
+                "identity": identity, "application": application, "memberships": memberships,
                 "operations": operations, "financial": financial, "session": session}
 
     def requests(self, server_key, save_key):
