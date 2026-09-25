@@ -537,11 +537,32 @@ class RegistrationTests(unittest.TestCase):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
             encoding="utf-8")
         self.assertIn("FS25_SiN_Server_positions.xml", source)
+        self.assertIn("function FS25SiNServer:resolveControlledPlayer", source)
+        self.assertIn("user.getConnection", source)
+        self.assertIn("connectionsToPlayer", source)
+        self.assertIn("player.isControlled ~= true", source)
+        self.assertIn("local resolvedConnection = connection", source)
+        self.assertIn("pcall(user.getConnection, user)", source)
+        self.assertIn("getWorldTranslation", source)
+        self.assertIn("getWorldTranslation, player.rootNode", source)
         self.assertIn("function FS25SiNServer:sampleOnFootPosition", source)
         self.assertIn("function FS25SiNServer:isSafePlayerPosition", source)
         self.assertIn("function FS25SiNServer:restorePendingPlayerPositions", source)
-        self.assertIn("mover.setPosition", source)
+        self.assertIn("PlayerMover:setPosition", source)
+        self.assertIn("restore attempt", source)
+        self.assertIn("restored uniqueUserId", source)
+        self.assertIn("restore readback did not reach stored coordinates", source)
+        self.assertIn("tostring(savedWorld) == tostring(self.worldId)", source)
+        self.assertIn("pending.elapsed >= (self.positionRestoreTimeout or 60000)", source)
+        self.assertIn("if not self:isSafePlayerPosition(position) then", source)
+        self.assertNotIn("goto ", source)
+        self.assertNotIn("player.playerMover", source)
         self.assertIn("sinPlayerPositions#worldId", source)
+        sample_start = source.index("function FS25SiNServer:sampleOnFootPosition")
+        sample_end = source.index("function FS25SiNServer:isSafePlayerPosition", sample_start)
+        sample = source[sample_start:sample_end]
+        self.assertNotIn("player.getPosition", sample)
+        self.assertNotIn("capsuleController.getPosition", sample)
 
     def test_every_normal_lua_receipt_carries_current_world_generation(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(

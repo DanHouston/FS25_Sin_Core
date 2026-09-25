@@ -246,16 +246,26 @@ direction LIVE PASS until these checks are observed on the deployed build.
 ### Reconnect location boundary
 
 The mod does not replace vanilla first-entry spawning. On the authoritative
-server it records only a valid on-foot `(x, y, z)` sample in
+server it resolves `user:getConnection()` through
+`mission.connectionsToPlayer[connection]`, and records only when that exact
+player is `isControlled` with a valid `rootNode`; coordinates come from
+`getWorldTranslation(player.rootNode)`. The sample is stored in
 `FS25_SiN_Server_positions.xml`, tagged with the save-backed `worldId` and
-stable FS25 `uniqueUserId`. A reconnect restore is delayed until the player and
-world are ready and uses the native `PlayerMover:setPosition` API when that API
-is present. Invalid coordinates, missing APIs, and a world-ID mismatch fail
-closed; no position is restored for a first-time player. Live proof is one
-movement/save/disconnect/reconnect cycle in Hobo v1, followed by a restart and
-the same check, then a different logical save to confirm no cross-world
-position transfer. This remains LIVE REQUIRED because the repository cannot
-prove the target GIANTS runtime's save and player-mover behavior offline.
+stable FS25 `uniqueUserId`.
+
+A reconnect restore waits for the same controlled-player/root-node readiness
+instead of relying only on a timer. It uses the documented authoritative
+`PlayerMover:setPosition(x, y, z, true)` path, then reads the root node back and
+only completes when the resulting coordinates are within tolerance. Invalid
+coordinates, missing APIs, a readiness timeout, and a world-ID mismatch fail
+closed. The runtime logs the stored coordinates, controlled-player resolution,
+restore attempt, read-back, and rejection reason.
+
+Live proof is one movement/save/disconnect/reconnect cycle in Hobo v1, followed
+by a restart and the same check, then a different logical save to confirm no
+cross-world position transfer. This remains LIVE REQUIRED because the
+repository cannot prove the target GIANTS runtime's save and network movement
+behavior offline.
 
 ### Value-transfer boundary
 

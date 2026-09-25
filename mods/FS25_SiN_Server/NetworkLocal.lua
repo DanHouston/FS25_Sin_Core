@@ -330,6 +330,8 @@ function FS25SiNServer:loadMap()
     self.activityPositionUnavailableLogged = {}
     self.invalidFarmVisualStateLogged = {}
     self.chatCaptureUnavailableLogged = false
+    self.positionBoundaryLogged = {}
+    self.positionRestoreTimeout = 60000
     self:installLifecycleHooks()
     addConsoleCommand("sinPermissions", "Report local FS25 farm permission state", "consoleCommandPermissions", self)
     addConsoleCommand("sinSelfTest", "Report read-only SiN runtime integration checks", "consoleCommandSelfTest", self)
@@ -877,28 +879,58 @@ end
 -- Position restoration is deliberately a small SiN-owned convenience layer,
 -- not a replacement for the FS25 spawn lifecycle.  Activity telemetry may
 -- observe vehicles, but only an on-foot position is persisted/restored.
-function FS25SiNServer:sampleOnFootPosition(userId, user)
-    local player = self:findPlayerObject(userId, user)
-    if player == nil then return nil end
-    if player.getPosition ~= nil then
-        local ok, x, y, z = pcall(player.getPosition, player)
-        if ok and x ~= nil and y ~= nil and z ~= nil then
-            return {x=tonumber(x), y=tonumber(y), z=tonumber(z)}, "player"
-        end
+function FS25SiNServer:positionBoundaryWarning(uniqueId, reason)
+    local key = tostring(uniqueId or "unknown") .. ":" .. tostring(reason or "unavailable")
+    if self.positionBoundaryLogged[key] then return end
+    self.positionBoundaryLogged[key] = true
+    Logging.warning("[SiN Position] boundary rejected uniqueUserId=%s reason=%s world=%s",
+        self:shortIdentity(uniqueId), tostring(reason or "unavailable"), self:shortIdentity(self.worldId))
+end
+
+-- The authoritative multiplayer mapping is the connection-to-player table. A
+-- User's convenience player fields can refer to a stale/client-side object,
+-- so they are deliberately not used for persisted position capture/restore.
+function FS25SiNServer:resolveControlledPlayer(userId, user, connection)
+    if g_currentMission == nil then return nil, nil, "mission unavailable" end
+    local resolvedConnection = nil
+    if user ~= nil and type(user.getConnection) == "function" then
+        local ok, value = pcall(user.getConnection, user)
+        if ok then resolvedConnection = value end
     end
-    if player.capsuleController ~= nil and player.capsuleController.getPosition ~= nil then
-        local ok, x, y, z = pcall(player.capsuleController.getPosition, player.capsuleController)
-        if ok and x ~= nil and y ~= nil and z ~= nil then
-            return {x=tonumber(x), y=tonumber(y), z=tonumber(z)}, "capsule"
-        end
+    if resolvedConnection == nil and user ~= nil then resolvedConnection = user.connection end
+    if resolvedConnection == nil then resolvedConnection = connection end
+    if resolvedConnection == nil then return nil, nil, "connection unavailable" end
+    if type(g_currentMission.connectionsToPlayer) ~= "table" then
+        return nil, resolvedConnection, "connectionsToPlayer unavailable"
     end
-    if getWorldTranslation ~= nil and player.rootNode ~= nil and player.rootNode ~= 0 then
-        local ok, x, y, z = pcall(getWorldTranslation, player.rootNode)
-        if ok and x ~= nil and y ~= nil and z ~= nil then
-            return {x=tonumber(x), y=tonumber(y), z=tonumber(z)}, "root"
-        end
+    local player = g_currentMission.connectionsToPlayer[resolvedConnection]
+    if player == nil then return nil, resolvedConnection, "controlled player unavailable" end
+    if player.isControlled ~= true then return nil, resolvedConnection, "player is not controlled" end
+    if player.rootNode == nil or player.rootNode == 0 then
+        return nil, resolvedConnection, "controlled player rootNode unavailable"
     end
-    return nil
+    return player, resolvedConnection, nil
+end
+
+function FS25SiNServer:sampleOnFootPosition(userId, user, connection)
+    local player, _, reason = self:resolveControlledPlayer(userId, user, connection)
+    if player == nil then
+        self:positionBoundaryWarning(userId, reason)
+        return nil, reason
+    end
+    if getWorldTranslation == nil then
+        self:positionBoundaryWarning(userId, "getWorldTranslation unavailable")
+        return nil, "getWorldTranslation unavailable"
+    end
+    local ok, x, y, z = pcall(getWorldTranslation, player.rootNode)
+    local position = ok and {x=tonumber(x), y=tonumber(y), z=tonumber(z)} or nil
+    if not self:isSafePlayerPosition(position) then
+        self:positionBoundaryWarning(userId, "controlled rootNode coordinates invalid or unsafe")
+        return nil, "controlled rootNode coordinates invalid or unsafe"
+    end
+    Logging.info("[SiN Position] captured uniqueUserId=%s source=controlled-root x=%.3f y=%.3f z=%.3f world=%s",
+        self:shortIdentity(userId), position.x, position.y, position.z, self:shortIdentity(self.worldId))
+    return position, "controlled-root"
 end
 
 function FS25SiNServer:isSafePlayerPosition(position)
@@ -947,7 +979,7 @@ function FS25SiNServer:savePlayerPositionsDuringSave(mission, hookTarget)
     if path == nil or XMLFile == nil or XMLFile.create == nil then return false end
     local entries = {}
     for uniqueId, record in pairs(self.connectedPlayers or {}) do
-        local position = self:sampleOnFootPosition(record.user_id, record.user)
+        local position = self:sampleOnFootPosition(record.user_id, record.user, record.connection)
         if self:isSafePlayerPosition(position) then
             table.insert(entries, {uniqueId=tostring(uniqueId), position=position})
         end
@@ -989,7 +1021,9 @@ end
 function FS25SiNServer:queuePlayerPositionRestore(uniqueId)
     local position = self.savedPlayerPositions ~= nil and self.savedPlayerPositions[tostring(uniqueId)] or nil
     if self:isSafePlayerPosition(position) then
-        self.pendingPositionRestores[tostring(uniqueId)] = {position=position, elapsed=0}
+        self.pendingPositionRestores[tostring(uniqueId)] = {position=position, elapsed=0, attempts=0}
+        Logging.info("[SiN Position] restore queued uniqueUserId=%s storedX=%.3f storedY=%.3f storedZ=%.3f world=%s",
+            self:shortIdentity(uniqueId), position.x, position.y, position.z, self:shortIdentity(self.worldId))
     end
 end
 
@@ -998,19 +1032,48 @@ function FS25SiNServer:restorePendingPlayerPositions(dt)
     for uniqueId, pending in pairs(self.pendingPositionRestores or {}) do
         local position = pending.position or pending
         pending.elapsed = (pending.elapsed or 0) + (tonumber(dt) or 0)
-        -- Let the native reconnect/spawn flow finish before applying an
-        -- optional SiN restore.  A missing saved row never enters this map.
-        if pending.elapsed >= 3000 then
+        -- The delay only gives vanilla spawn a chance to settle. Readiness is
+        -- determined by the authoritative controlled-player/root-node checks,
+        -- not by elapsed time alone.
+        if pending.elapsed >= (self.positionRestoreTimeout or 60000) then
+            self:positionBoundaryWarning(uniqueId, "restore readiness timeout")
+            self.pendingPositionRestores[uniqueId] = nil
+        elseif pending.elapsed >= 3000 then
             local record = self.connectedPlayers[uniqueId]
-            local player = record ~= nil and self:findPlayerObject(record.user_id, record.user) or nil
-            local mover = player ~= nil and (player.mover or player.playerMover) or nil
-            if player ~= nil and mover ~= nil and type(mover.setPosition) == "function" and self:isSafePlayerPosition(position) then
-                local ok, errorMessage = pcall(mover.setPosition, mover, position.x, position.y, position.z, true)
-                if ok then
-                    self.pendingPositionRestores[uniqueId] = nil
-                    Logging.info("[SiN Position] restored uniqueUserId=%s world=%s", self:shortIdentity(uniqueId), self:shortIdentity(self.worldId))
+            if record == nil then
+                self:positionBoundaryWarning(uniqueId, "connected player record unavailable")
+            else
+                local player, _, reason = self:resolveControlledPlayer(record.user_id, record.user, record.connection)
+                if player == nil then
+                    self:positionBoundaryWarning(uniqueId, "restore " .. tostring(reason or "controlled player unavailable"))
                 else
-                    Logging.warning("[SiN Position] restore failed uniqueUserId=%s error=%s", self:shortIdentity(uniqueId), tostring(errorMessage))
+                    local mover = player.mover
+                    if mover == nil or type(mover.setPosition) ~= "function" then
+                        self:positionBoundaryWarning(uniqueId, "PlayerMover:setPosition unavailable")
+                    else
+                        pending.attempts = (pending.attempts or 0) + 1
+                        Logging.info("[SiN Position] restore attempt uniqueUserId=%s storedX=%.3f storedY=%.3f storedZ=%.3f api=PlayerMover:setPosition attempt=%s world=%s",
+                            self:shortIdentity(uniqueId), position.x, position.y, position.z, tostring(pending.attempts), self:shortIdentity(self.worldId))
+                        local ok, errorMessage = pcall(mover.setPosition, mover, position.x, position.y, position.z, true)
+                        local resulting = nil
+                        if ok and getWorldTranslation ~= nil and player.rootNode ~= nil and player.rootNode ~= 0 then
+                            local readOk, x, y, z = pcall(getWorldTranslation, player.rootNode)
+                            if readOk then resulting = {x=tonumber(x), y=tonumber(y), z=tonumber(z)} end
+                        end
+                        local reached = self:isSafePlayerPosition(resulting)
+                            and math.abs(resulting.x - position.x) <= 0.5
+                            and math.abs(resulting.y - position.y) <= 0.5
+                            and math.abs(resulting.z - position.z) <= 0.5
+                        if ok and reached then
+                            self.pendingPositionRestores[uniqueId] = nil
+                            Logging.info("[SiN Position] restored uniqueUserId=%s resultingX=%.3f resultingY=%.3f resultingZ=%.3f world=%s",
+                                self:shortIdentity(uniqueId), resulting.x, resulting.y, resulting.z, self:shortIdentity(self.worldId))
+                        elseif not ok then
+                            self:positionBoundaryWarning(uniqueId, "PlayerMover:setPosition failed: " .. tostring(errorMessage))
+                        else
+                            self:positionBoundaryWarning(uniqueId, "restore readback did not reach stored coordinates")
+                        end
+                    end
                 end
             end
         end
@@ -1167,8 +1230,14 @@ function FS25SiNServer:onPlayerConnected(user, connection, farmId)
     if self:isDedicatedServerUser(user, farm) then return end
     local uniqueId = tostring(user:getUniqueUserId() or "")
     if uniqueId == "" then return end
+    local resolvedConnection = connection
+    if resolvedConnection == nil and type(user.getConnection) == "function" then
+        local ok, value = pcall(user.getConnection, user)
+        if ok then resolvedConnection = value end
+    end
+    if resolvedConnection == nil then resolvedConnection = user.connection end
     local record = {name=user:getNickname() or "", user_id=user:getId(),
-        farm_id=farm ~= nil and farm.farmId or 0, connection=connection or user.connection, user=user}
+        farm_id=farm ~= nil and farm.farmId or 0, connection=resolvedConnection, user=user}
     local wasTracked = self.connectedPlayers[uniqueId] ~= nil
     self.connectedPlayers[uniqueId] = record
     self.previousPlayers[uniqueId] = {name=record.name, user_id=record.user_id, farm_id=record.farm_id}
@@ -1207,7 +1276,7 @@ function FS25SiNServer:onPlayerDisconnected(userId)
         end
     end
     if uniqueId == nil or record == nil then return end
-    local position = self:sampleOnFootPosition(record.user_id, record.user)
+    local position = self:sampleOnFootPosition(record.user_id, record.user, record.connection)
     if self:isSafePlayerPosition(position) then
         self.savedPlayerPositions[uniqueId] = position
         self:savePlayerPositionsDuringSave(g_currentMission, "disconnect")
