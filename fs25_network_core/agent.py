@@ -394,6 +394,8 @@ class PairingAgent:
             contractors = payload.get("contractors", []) if isinstance(payload, dict) else []
             if not isinstance(contractors, list):
                 raise ValueError("contractor authority API returned an invalid response")
+            LOG.info("[SiN Authorization] authority projection world=%s managers=%s contractors=%s",
+                     world_id, len(managers), len(contractors))
             root = ElementTree.Element("managerAuthority", schemaVersion="1", worldId=str(world_id))
             for manager in managers:
                 if isinstance(manager, dict) and manager.get("game_player_id") is not None:

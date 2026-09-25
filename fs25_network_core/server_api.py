@@ -104,6 +104,16 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/server/manager-authority":
                 self.farm_lifecycle.require_current_world(record["server_key"], save_key, world_id)
+                # Authority projection is also a repair boundary. Do not
+                # depend on the preceding operations poll having succeeded:
+                # an authority fetch must be able to establish current-world
+                # SiN Harvest contractor jobs before building FS25 XML.
+                try:
+                    self.farm_lifecycle._repair_contractor_authorizations(
+                        record["server_key"], save_key)
+                except Exception as error:  # pragma: no cover - defensive HTTP boundary
+                    LOG.warning("contractor authority reconciliation deferred server=%s save=%s reason=%s",
+                                record["server_key"], save_key, str(error)[:240])
                 relationships = self.event_processor.authorization.db.memberships.find({
                     "server_id": record["server_key"], "save_id": save_key,
                     "world_id": str(world_id),

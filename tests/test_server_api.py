@@ -287,6 +287,7 @@ class ServerApiTests(unittest.TestCase):
             "source_farm_id": 2,
             "state": "pending", "desired_role": "contractor", "applied_role": None,
         }]
+        handler.farm_lifecycle._repair_contractor_authorizations = MagicMock()
         connection = HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
         connection.request("GET", "/api/server/manager-authority?fs25_save_id=1&world_id=test-world", headers={
             "X-SiN-Server-Key": "sin-fs25-01", "Authorization": "Bearer secret"})
@@ -297,7 +298,9 @@ class ServerApiTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(body["managers"], [{"game_player_id": "stable-player", "farm_id": 2}])
         self.assertEqual(body["contractors"], [{"game_player_id": "stable-player", "farm_id": 99,
-                                                "source_farm_id": 2}])
+                                                 "source_farm_id": 2}])
+        handler.farm_lifecycle._repair_contractor_authorizations.assert_called_once_with(
+            "sin-fs25-01", "sin-fs25-main")
         query = handler.event_processor.authorization.db.memberships.find.call_args.args[0]
         self.assertEqual(query["state"], {"$in": ["pending", "active"]})
         self.assertEqual(query["desired_role"], {"$in": ["farm_manager", "contractor"]})

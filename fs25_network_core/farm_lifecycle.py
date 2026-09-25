@@ -810,12 +810,14 @@ class FarmLifecycle:
                     source_farm_name=eligible[discord_id]["source_farm_name"])
                 if operation:
                     operations[discord_id] = operation
-            except ValueError:
+            except ValueError as error:
                 # Identity and relationship checks are deliberately re-run by
                 # AuthorizationManager.  A malformed/ambiguous record must
                 # suppress this grant rather than guess an authority target.
-                LOG.warning("[SiN Contractor] grant deferred server=%s save=%s discord=%s reason=identity_or_relationship_validation",
-                            server_key, save_key, discord_id)
+                LOG.warning("[SiN Contractor] grant deferred server=%s save=%s discord=%s sourceFarmId=%s targetFarmId=%s reason=%s",
+                            server_key, save_key, discord_id,
+                            eligible[discord_id].get("source_farm_id"), shared_farm_id,
+                            str(error)[:240])
                 continue
 
         relationships = self.db.memberships.find({
