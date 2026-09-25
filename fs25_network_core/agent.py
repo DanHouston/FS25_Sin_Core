@@ -397,13 +397,19 @@ class PairingAgent:
             root = ElementTree.Element("managerAuthority", schemaVersion="1", worldId=str(world_id))
             for manager in managers:
                 if isinstance(manager, dict) and manager.get("game_player_id") is not None:
-                    ElementTree.SubElement(root, "manager", gamePlayerId=str(manager["game_player_id"]),
-                                            farmId=str(manager.get("farm_id", 0)))
+                    attrs = {"gamePlayerId": str(manager["game_player_id"]),
+                             "farmId": str(manager.get("farm_id", 0))}
+                    if manager.get("canonical_name"):
+                        attrs["canonicalName"] = str(manager["canonical_name"])
+                    ElementTree.SubElement(root, "manager", **attrs)
             for contractor in contractors:
                 if isinstance(contractor, dict) and contractor.get("game_player_id") is not None:
-                    ElementTree.SubElement(root, "contractor", gamePlayerId=str(contractor["game_player_id"]),
-                                            farmId=str(contractor.get("farm_id", 0)),
-                                            sourceFarmId=str(contractor.get("source_farm_id", 0)))
+                    attrs = {"gamePlayerId": str(contractor["game_player_id"]),
+                             "farmId": str(contractor.get("farm_id", 0)),
+                             "sourceFarmId": str(contractor.get("source_farm_id", 0))}
+                    if contractor.get("canonical_name"):
+                        attrs["canonicalName"] = str(contractor["canonical_name"])
+                    ElementTree.SubElement(root, "contractor", **attrs)
             destination = self.directory / "manager-authority.xml"
             temporary = destination.with_suffix(".tmp")
             ElementTree.ElementTree(root).write(temporary, encoding="utf-8", xml_declaration=True)

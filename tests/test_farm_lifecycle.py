@@ -628,6 +628,21 @@ class SharedContractorAuthorityTests(unittest.TestCase):
         membership = self.db.memberships.find_one({"discord_id": "repton", "farm_id": 99})
         self.assertEqual((membership["source_farm_id"], membership["state"]), (2, "pending"))
 
+    def test_newer_current_world_session_farm_supersedes_stale_farm_zero_projection(self):
+        self.approved_identity("repton", "stable-repton", farm_id=0)
+        self.db.player_activity_sessions.insert_one({
+            "server_key": "server", "save_key": "save", "world_id": "world-a",
+            "fs25_unique_user_id": "stable-repton", "observed_farm_id": 2,
+            "observed_farm_at": "2026-09-24T12:01:00+00:00", "last_seen_at": "2026-09-24T12:01:00+00:00"})
+        self.db.observed_fs25_identities.update_one(
+            {"fs25_unique_user_id": "stable-repton"}, {"$set": {
+                "current_farm_id": 0, "last_seen_at": "2026-09-24T12:00:00+00:00"}})
+
+        self.lifecycle.operations_for("server", "save")
+
+        membership = self.db.memberships.find_one({"discord_id": "repton", "farm_id": 99})
+        self.assertEqual((membership["source_farm_id"], membership["state"]), (2, "pending"))
+
     def test_reconciliation_required_false_positive_is_reissued_not_committed(self):
         self.approved_identity("repton", "stable-repton")
         self.lifecycle.operations_for("server", "save")

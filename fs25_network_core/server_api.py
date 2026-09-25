@@ -117,15 +117,43 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
                     # pending job in the first place.
                     "state": {"$in": ["pending", "active"]},
                     "desired_role": {"$in": ["farm_manager", "contractor"]}})
+                def canonical_name_for(row):
+                    # Presentation metadata is resolved from the durable
+                    # approved identity, never from the transient FS25 name.
+                    identity = self.event_processor.authorization.db.game_identities.find_one({
+                        "server_id": record["server_key"], "save_id": save_key,
+                        "game_player_id": row.get("game_player_id")})
+                    if not isinstance(identity, dict):
+                        return None
+                    try:
+                        resolved = self.event_processor.authorization.resolve_player_identity(
+                            record["server_key"], save_key,
+                            identity.get("fs25_unique_user_id") or identity.get("game_player_id"))
+                    except (TypeError, ValueError, KeyError):
+                        return None
+                    canonical = resolved.get("canonical_name") if isinstance(resolved, dict) else None
+                    return canonical.strip() if isinstance(canonical, str) and canonical.strip() else None
                 managers = [row for row in relationships if row.get("desired_role") == "farm_manager"]
                 contractors = [row for row in relationships
                                if row.get("desired_role") == "contractor"
                                and row.get("source_farm_id") not in (None, 0, "0")]
-                _json_response(self, 200, {"save_key": save_key, "managers": [
-                    {"game_player_id": row["game_player_id"], "farm_id": row["farm_id"]} for row in managers],
-                    "contractors": [{"game_player_id": row["game_player_id"], "farm_id": row["farm_id"],
-                                     "source_farm_id": row["source_farm_id"]}
-                                    for row in contractors]})
+                manager_payload = []
+                for row in managers:
+                    value = {"game_player_id": row["game_player_id"], "farm_id": row["farm_id"]}
+                    canonical = canonical_name_for(row)
+                    if canonical:
+                        value["canonical_name"] = canonical
+                    manager_payload.append(value)
+                contractor_payload = []
+                for row in contractors:
+                    value = {"game_player_id": row["game_player_id"], "farm_id": row["farm_id"],
+                             "source_farm_id": row["source_farm_id"]}
+                    canonical = canonical_name_for(row)
+                    if canonical:
+                        value["canonical_name"] = canonical
+                    contractor_payload.append(value)
+                _json_response(self, 200, {"save_key": save_key, "managers": manager_payload,
+                                           "contractors": contractor_payload})
                 return
             policy = self.event_processor.registry.clock_policy(record["server_key"], save_key)
             local = datetime.now(timezone.utc).astimezone(ZoneInfo(policy["timezone"]))

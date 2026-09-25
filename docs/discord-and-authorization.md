@@ -143,6 +143,16 @@ operator resolution. Registration is independent of farm authorization and
 grants neither a farm nor manager permissions. The server key is internal
 metadata and is not a Discord command argument.
 
+When the game registration response resolves an approved identity, Central
+also returns the canonical SiN display name. The FS25 server applies that
+name only through the native `PlayerSetNicknameEvent` network boundary after
+the player object is connected and verifies the server-side read-back. This
+is presentation/identity alignment only; it does not grant farm membership,
+manager authority, contractor access, or any other world-scoped state. The
+same alignment is retried on reconnect and from current-world authority
+metadata, so a transient registration or authority poll cannot leave a stale
+in-game nickname permanently.
+
 New Discord users first use `/apply nickname:<name> farm_name:<farm>` in
 `#sin-apply`. This creates only a community application; it grants no game,
 banking, farm, or wallet access. Network Admins review it in `#staff` with

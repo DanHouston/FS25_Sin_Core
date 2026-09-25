@@ -51,6 +51,16 @@ class RegistrationTests(unittest.TestCase):
         create_code.assert_not_called()
         self.database.db.observed_fs25_identities.update_one.assert_not_called()
 
+    def test_registered_identity_response_includes_approved_canonical_name(self):
+        self.database.db.game_identities.find.return_value.limit.return_value = [{
+            "server_id": "server", "save_id": "save", "fs25_unique_user_id": "stable-id",
+            "discord_id": "discord-user"}]
+        self.database.db.community_applications.find_one.return_value = {
+            "_id": "discord-user", "state": "approved", "server_nickname": "Repton | Repton Does"}
+        result = self.auth.registration_request("server", "save", "stable-id")
+        self.assertEqual(result["status"], "registered")
+        self.assertEqual(result["canonical_name"], "Repton | Repton Does")
+
     def test_registration_code_upsert_preserves_first_issued_at_without_operator_conflict(self):
         class RegistrationCodes:
             def __init__(self):
@@ -315,6 +325,18 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("sourceFarmId", source)
         self.assertIn("refusing to clean legacy contractor permissions from a farm manager", source)
 
+    def test_server_runtime_aligns_canonical_name_through_native_network_event(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8")
+        process = source[source.index("function FS25SiNServer:processRegistrationResponses()"):]
+        process = process[:process.index("function FS25SiNServer:enforceRegistration")]
+        self.assertIn('registrationResponse#canonical_name', process)
+        self.assertIn('self:alignConnectedPlayerName(uniqueId, canonicalName, "registration")', process)
+        self.assertIn('PlayerSetNicknameEvent.new(player, tostring(canonical), matched:getId())', source)
+        self.assertIn('g_server:broadcastEvent(PlayerSetNicknameEvent.new', source)
+        self.assertIn('canonicalName', source)
+        self.assertIn('nameAligned=', source)
+
     def test_server_runtime_exposes_read_only_economy_capability_probe(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
             encoding="utf-8"
@@ -574,7 +596,7 @@ class RegistrationTests(unittest.TestCase):
             "processContractorRevocationCommand": ('self:setReceiptWorldId(receipt, "permissionReceipt")', 1),
             "processChatCommand": ('self:setReceiptWorldId(receipt, "permissionReceipt")', 1),
             "processFarmProvisionCommand": ('self:setReceiptWorldId(receipt, "networkLocalReceipt")', 1),
-            "processNameAlignment": ('self:setReceiptWorldId(receipt, "networkLocalReceipt")', 2),
+            "processNameAlignment": ('self:setReceiptWorldId(receipt, "networkLocalReceipt")', 1),
             "processLandCommand": ('self:setReceiptWorldId(receipt, "networkLocalReceipt")', 1),
         }
         for function_name, (marker, count) in expected.items():

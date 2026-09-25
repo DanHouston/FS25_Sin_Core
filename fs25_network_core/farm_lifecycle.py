@@ -664,29 +664,55 @@ class FarmLifecycle:
         world_id = self.current_world_id(server_key, save_key)
         if world_id:
             query["world_id"] = str(world_id)
-        try:
-            observed = self.db.observed_fs25_identities.find_one(
-                query, sort=[("last_seen_at", -1)])
-        except TypeError:
-            observed = self.db.observed_fs25_identities.find_one(query)
-        if not isinstance(observed, dict):
-            # Normal runtime activity is durably recorded in sessions.  The
-            # trusted identity projection is populated by explicit roster/
-            # registration flows, so contractor reconciliation must also use
-            # the latest current-world session observation.  Never fall back
-            # to an older world or an older farm=0/farm>0 observation: the
-            # newest observation is authoritative for eligibility.
+        def latest(collection, sort):
             try:
-                observed = self.db.player_activity_sessions.find_one(
-                    query, sort=[("observed_farm_at", -1), ("last_seen_at", -1)])
+                return collection.find_one(query, sort=sort)
             except TypeError:
-                observed = self.db.player_activity_sessions.find_one(query)
+                return collection.find_one(query)
+
+        # Both projections are authoritative observations of the same current
+        # world.  A farm-0 projection is not a reason to ignore a newer session
+        # observation proving that the player has since joined a personal farm;
+        # conversely, a newer farm-0 observation must withdraw eligibility.
+        observed_projection = latest(self.db.observed_fs25_identities,
+                                     [("last_seen_at", -1), ("observed_farm_at", -1)])
+        observed_session = latest(self.db.player_activity_sessions,
+                                  [("observed_farm_at", -1), ("last_seen_at", -1),
+                                   ("updated_at", -1)])
+
+        def observation_time(row):
+            if not isinstance(row, dict):
+                return 0.0
+            values = []
+            for field in ("observed_farm_at", "last_seen_at", "updated_at", "connected_at"):
+                value = row.get(field)
+                if isinstance(value, datetime):
+                    values.append(value.timestamp())
+                elif value:
+                    try:
+                        text = str(value).replace("Z", "+00:00")
+                        parsed = datetime.fromisoformat(text)
+                        if parsed.tzinfo is None:
+                            parsed = parsed.replace(tzinfo=timezone.utc)
+                        values.append(parsed.timestamp())
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+            return max(values, default=0.0)
+
+        candidates = [row for row in (observed_projection, observed_session)
+                      if isinstance(row, dict)]
+        observed = max(enumerate(candidates),
+                       key=lambda item: (observation_time(item[1]), -item[0]),
+                       default=(0, None))[1]
         if not isinstance(observed, dict):
             return None
         try:
             farm_id = int(observed.get("current_farm_id", observed.get("observed_farm_id", 0)) or 0)
         except (TypeError, ValueError):
             return None
+        LOG.info("[SiN Contractor] current source observation server=%s save=%s unique=%s farm=%s source=%s",
+                 server_key, save_key, unique_id[:12], farm_id,
+                 "session" if observed is observed_session else "projection")
         return farm_id if farm_id > 0 else None
 
     def _current_farm_names(self, server_key, save_key):
@@ -735,6 +761,8 @@ class FarmLifecycle:
         """
         system = self._shared_system_farm(server_key, save_key)
         if not system:
+            LOG.info("[SiN Contractor] reconciliation deferred server=%s save=%s reason=system_farm_unavailable",
+                     server_key, save_key)
             return {}
         shared_farm_id = int(system["fs25_farm_id"])
         farm_names = self._current_farm_names(server_key, save_key)
@@ -786,6 +814,8 @@ class FarmLifecycle:
                 # Identity and relationship checks are deliberately re-run by
                 # AuthorizationManager.  A malformed/ambiguous record must
                 # suppress this grant rather than guess an authority target.
+                LOG.warning("[SiN Contractor] grant deferred server=%s save=%s discord=%s reason=identity_or_relationship_validation",
+                            server_key, save_key, discord_id)
                 continue
 
         relationships = self.db.memberships.find({

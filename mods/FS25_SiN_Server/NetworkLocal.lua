@@ -305,6 +305,7 @@ function FS25SiNServer:loadMap()
     self.previousPlayers = {}
     self.connectedPlayers = {}
     self.identityNames = {}
+    self.authorityCanonicalNames = {}
     self.registrationState = {}
     self.registrationQuarantined = {}
     self.registrationPromptAt = {}
@@ -541,6 +542,7 @@ function FS25SiNServer:loadManagerAuthority()
     local path = self.directory .. "manager-authority.xml"
     local authority = fileExists(path) and XMLFile.load("networkLocalAuthority", path) or nil
     local authorized, contractors = {}, {}
+    self.authorityCanonicalNames = {}
     if authority == nil then return authorized, contractors end
     if self.worldIdentityReady ~= true or self.worldId == nil
         or tostring(authority:getString("managerAuthority#worldId") or "") ~= tostring(self.worldId) then
@@ -554,6 +556,10 @@ function FS25SiNServer:loadManagerAuthority()
         local playerId = authority:getString(key .. "#gamePlayerId")
         if playerId == nil then break end
         authorized[tostring(playerId)] = authority:getInt(key .. "#farmId")
+        local canonical = authority:getString(key .. "#canonicalName")
+        if canonical ~= nil and canonical ~= "" then
+            self.authorityCanonicalNames[tostring(playerId)] = canonical
+        end
         index = index + 1
     end
     index = 0
@@ -567,6 +573,10 @@ function FS25SiNServer:loadManagerAuthority()
             and sourceFarmId ~= targetFarmId then
             contractors[tostring(playerId)] = {
                 sourceFarmId=sourceFarmId, targetFarmId=targetFarmId}
+            local canonical = authority:getString(key .. "#canonicalName")
+            if canonical ~= nil and canonical ~= "" then
+                self.authorityCanonicalNames[tostring(playerId)] = canonical
+            end
         else
             Logging.warning("[SiN Authorization] ignoring contractor authority without a valid source farm userId=%s sourceFarmId=%s targetFarmId=%s",
                 tostring(playerId), tostring(sourceFarmId), tostring(targetFarmId))
@@ -1255,6 +1265,9 @@ function FS25SiNServer:onPlayerConnected(user, connection, farmId)
     local state = self.registrationState[uniqueId]
     if state ~= nil and state.status ~= "pending" then
         self:sendRegistrationState(uniqueId, state.status, state.code)
+        if state.status == "registered" and state.canonicalName ~= nil then
+            self:alignConnectedPlayerName(uniqueId, state.canonicalName, "reconnect")
+        end
     end
 end
 
@@ -1416,9 +1429,11 @@ function FS25SiNServer:processRegistrationResponses()
             local uniqueId = xml:getString("registrationResponse#fs25_unique_user_id")
             local status = xml:getString("registrationResponse#status")
             local code = xml:getString("registrationResponse#code")
+            local canonicalName = xml:getString("registrationResponse#canonical_name")
             xml:delete()
             if uniqueId ~= nil and (status == "registered" or status == "registration_required") then
                 self.registrationState[uniqueId] = {status=status, code=code,
+                    canonicalName=(canonicalName ~= nil and canonicalName ~= "") and canonicalName or nil,
                     requestedAt=(self.registrationState[uniqueId] or {}).requestedAt or self.registrationClock}
                 self:sendRegistrationState(uniqueId, status, code)
                 if status == "registered" then
@@ -1427,6 +1442,9 @@ function FS25SiNServer:processRegistrationResponses()
                     if user ~= nil then
                         local farm = g_farmManager ~= nil and g_farmManager:getFarmByUserId(user:getId()) or nil
                         self:enforceRegistration(user, farm)
+                        if canonicalName ~= nil and canonicalName ~= "" then
+                            self:alignConnectedPlayerName(uniqueId, canonicalName, "registration")
+                        end
                     end
                 end
                 deleteFile(path)
@@ -2754,47 +2772,57 @@ function FS25SiNServer:processFarmProvisionCommand(command, operationId, operati
     self:saveReceiptAndConsume(receipt, command, operationId)
 end
 
+function FS25SiNServer:alignConnectedPlayerName(uniqueId, canonical, source)
+    if uniqueId == nil or canonical == nil or tostring(canonical) == "" then
+        Logging.warning("[SiN Identity] name alignment rejected uniqueUserId=%s reason=canonical_name_unavailable",
+            self:shortIdentity(uniqueId))
+        return false
+    end
+    local matched = self:findConnectedUser(uniqueId)
+    if matched == nil then
+        Logging.info("[SiN Identity] uniqueUserId=%s canonicalName=%s nameAligned=false reason=not_connected source=%s",
+            self:shortIdentity(uniqueId), tostring(canonical), tostring(source or "runtime"))
+        return false
+    end
+    local player = self:findPlayerObject(matched:getId(), matched)
+    local observed = tostring(matched:getNickname() or "")
+    if observed == tostring(canonical) then
+        Logging.info("[SiN Identity] uniqueUserId=%s observedName=%s canonicalName=%s nameAligned=true broadcast=false source=%s",
+            self:shortIdentity(uniqueId), observed, tostring(canonical), tostring(source or "runtime"))
+        return true
+    end
+    if player == nil or g_currentMission == nil or g_currentMission.setPlayerNickname == nil
+        or g_server == nil or type(g_server.broadcastEvent) ~= "function"
+        or PlayerSetNicknameEvent == nil or type(PlayerSetNicknameEvent.new) ~= "function" then
+        Logging.warning("[SiN Identity] uniqueUserId=%s observedName=%s canonicalName=%s nameAligned=false broadcast=false source=%s reason=native_nickname_api_unavailable",
+            self:shortIdentity(uniqueId), observed, tostring(canonical), tostring(source or "runtime"))
+        return false
+    end
+    local setOk, setError = pcall(g_currentMission.setPlayerNickname, g_currentMission,
+        player, tostring(canonical), matched:getId())
+    if not setOk then
+        Logging.error("[SiN Identity] uniqueUserId=%s nameAligned=false source=%s reason=server_nickname_update_failed error=%s",
+            self:shortIdentity(uniqueId), tostring(source or "runtime"), tostring(setError))
+        return false
+    end
+    local broadcastOk, broadcastError = pcall(function()
+        g_server:broadcastEvent(PlayerSetNicknameEvent.new(player, tostring(canonical), matched:getId()),
+            nil, nil, player)
+    end)
+    local aligned = tostring(matched:getNickname() or "") == tostring(canonical)
+    Logging.info("[SiN Identity] uniqueUserId=%s observedName=%s canonicalName=%s nameAligned=%s broadcast=%s source=%s%s",
+        self:shortIdentity(uniqueId), observed, tostring(canonical), tostring(aligned), tostring(broadcastOk),
+        tostring(source or "runtime"), broadcastOk and "" or (" error=" .. tostring(broadcastError)))
+    return aligned and broadcastOk
+end
+
 function FS25SiNServer:processNameAlignment(command, operationId)
     local uniqueId = command:getString("networkLocalCommand#unique_user_id")
     local canonical = command:getString("networkLocalCommand#canonical_name")
-    local matched = nil
-    if g_currentMission ~= nil and g_currentMission.userManager ~= nil then
-        for _, user in ipairs(g_currentMission.userManager:getUsers()) do
-            if tostring(user:getUniqueUserId()) == tostring(uniqueId) then
-                matched = user
-                break
-            end
-        end
-    end
-    if matched == nil then
-        Logging.info("[SiN Identity] uniqueUserId=%s canonicalName=%s nameAligned=false reason=not_connected", self:shortIdentity(uniqueId), tostring(canonical))
-        local receipt = XMLFile.create("networkLocalIdentityReceipt", self.receiptDirectory .. operationId .. ".xml", "networkLocalReceipt")
-        if receipt ~= nil then
-            receipt:setString("networkLocalReceipt#operation_id", operationId)
-            receipt:setString("networkLocalReceipt#operation_type", "align_name")
-            receipt:setString("networkLocalReceipt#server_id", command:getString("networkLocalCommand#server_id"))
-            receipt:setString("networkLocalReceipt#save_id", command:getString("networkLocalCommand#save_id"))
-            receipt:setString("networkLocalReceipt#revision", command:getString("networkLocalCommand#revision"))
-            receipt:setString("networkLocalReceipt#status", "pending_validation")
-            receipt:setString("networkLocalReceipt#receipt", "identity was not connected during command processing")
-            self:setReceiptWorldId(receipt, "networkLocalReceipt")
-            self:saveReceiptAndConsume(receipt, command, operationId)
-        end
-        return
-    end
-    local observed = matched:getNickname() or ""
-    local player = nil
-    if g_currentMission.players ~= nil then
-        for _, candidate in ipairs(g_currentMission.players) do
-            if candidate ~= nil and candidate.userId == matched:getId() then player = candidate; break end
-        end
-    end
-    if observed ~= canonical and player ~= nil and g_currentMission.setPlayerNickname ~= nil then
-        local ok, errorMessage = pcall(g_currentMission.setPlayerNickname, g_currentMission, player, canonical, matched:getId())
-        if not ok then Logging.error("[SiN Identity] uniqueUserId=%s nameAligned=false error=%s", self:shortIdentity(uniqueId), tostring(errorMessage)) end
-    end
-    local aligned = matched:getNickname() == canonical
-    Logging.info("[SiN Identity] uniqueUserId=%s observedName=%s canonicalName=%s nameAligned=%s", self:shortIdentity(uniqueId), tostring(observed), tostring(canonical), tostring(aligned))
+    local aligned = self:alignConnectedPlayerName(uniqueId, canonical, "operation")
+    local matched = self:findConnectedUser(uniqueId)
+    local reason = aligned and "nickname matched canonical identity" or
+        (matched == nil and "identity was not connected during command processing" or "nickname could not be verified")
     local receipt = XMLFile.create("networkLocalIdentityReceipt", self.receiptDirectory .. operationId .. ".xml", "networkLocalReceipt")
     if receipt ~= nil then
         receipt:setString("networkLocalReceipt#operation_id", operationId)
@@ -2803,7 +2831,7 @@ function FS25SiNServer:processNameAlignment(command, operationId)
         receipt:setString("networkLocalReceipt#save_id", command:getString("networkLocalCommand#save_id"))
         receipt:setString("networkLocalReceipt#revision", command:getString("networkLocalCommand#revision"))
         receipt:setString("networkLocalReceipt#status", aligned and "applied" or "pending_validation")
-        receipt:setString("networkLocalReceipt#receipt", aligned and "nickname matched canonical identity" or "nickname could not be verified")
+        receipt:setString("networkLocalReceipt#receipt", reason)
         self:setReceiptWorldId(receipt, "networkLocalReceipt")
         self:saveReceiptAndConsume(receipt, command, operationId)
     end
@@ -2874,6 +2902,9 @@ function FS25SiNServer:reconcileManagerAuthorityDrift()
     -- This is only a self-healing guardrail. Farm changes use the immediate
     -- plus deferred path above; the XML remains the sole SiN authority source.
     local authorized, contractors = self:loadManagerAuthority()
+    for uniqueId, canonicalName in pairs(self.authorityCanonicalNames or {}) do
+        self:alignConnectedPlayerName(uniqueId, canonicalName, "authority")
+    end
     for _, user in ipairs(g_currentMission.userManager:getUsers()) do
         local userId = user:getId()
         local farm = g_farmManager:getFarmByUserId(userId)

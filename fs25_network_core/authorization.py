@@ -245,6 +245,13 @@ class AuthorizationManager:
             raise ValueError("FS25 uniqueUserId is required")
         linked = self._auto_enroll_registration(server_id, save_id, unique_user_id)
         if linked is not None:
+            # Registration is the identity/presentation boundary only.  Return
+            # the approved member's canonical display name so the game can
+            # align its native nickname; no farm or authority state is copied.
+            resolved = self.resolve_player_identity(server_id, save_id, unique_user_id)
+            canonical_name = resolved.get("canonical_name")
+            if resolved.get("fully_registered") and isinstance(canonical_name, str) and canonical_name.strip():
+                linked["canonical_name"] = canonical_name.strip()
             return linked
         token, expires_at = self.create_registration_code(server_id, save_id, unique_user_id)
         self.db.observed_fs25_identities.update_one(
@@ -299,7 +306,7 @@ class AuthorizationManager:
                     "match_count": len(rows)}
         discord_id = str(rows[0].get("discord_id", ""))
         application = self.community_db.community_applications.find_one({"_id": discord_id, "state": "approved"})
-        if not application:
+        if not isinstance(application, dict) or application.get("state") != "approved":
             return {"linked": True, "discord_user_id": discord_id, "application_approved": False,
                     "canonical_name": None, "fully_registered": False, "reason": "no_approved_application", "match_count": 1}
         canonical_name = str(application.get("server_nickname") or "").strip()
