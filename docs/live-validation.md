@@ -271,13 +271,13 @@ behavior offline.
 ### Value-transfer boundary
 
 Vehicle and product transfers remain out of scope until their exact GIANTS
-ownership/fill APIs are verified. For the wallet bridge, use the Hobo backup and
-restore runbook before testing: perform one small deposit and withdrawal with
-the bridge disabled until the deployed mod emits authoritative receipts, then
-repeat after restart and verify the Central wallet, FS25 farm balance, and
-operation state agree. Unknown or malformed receipts stay pending; they never
-credit or reserve a wallet silently. Restore from the retained Hobo backup if a
-live probe has an unexpected result.
+ownership/fill APIs are verified. For the wallet bridge, take a fresh Hobo
+backup first, then temporarily enable the explicit capability for one small
+deposit and withdrawal probe. Verify the Central wallet, FS25 farm balance,
+authoritative receipts, operation states, and restart recovery before leaving
+the capability enabled. Unknown or malformed receipts stay pending; they
+never credit or reserve a wallet silently. Disable the bridge and restore from
+the retained Hobo backup if a live probe has an unexpected result.
 
 ## Results to retain
 
