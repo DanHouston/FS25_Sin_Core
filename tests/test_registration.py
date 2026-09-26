@@ -496,6 +496,16 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("permission drift repaired", source)
         self.assertIn("pcall(self.reconcileManagerAuthorityDrift, self)", source)
 
+    def test_server_runtime_periodic_contractor_reconciliation_suppresses_unchanged_success_logs(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8")
+        start = source.index("function FS25SiNServer:enforceAuthorizedContractorState")
+        end = source.index("function FS25SiNServer:revokeAuthorizedContractorState", start)
+        contractor = source[start:end]
+        self.assertIn('if before ~= after or syncReason ~= "periodic-contractor" then', contractor)
+        self.assertIn('Logging.info("[SiN Authorization] contractor state sync=', contractor)
+        self.assertIn('self, user, sourceFarm, contractorFarm, "periodic-contractor")', source)
+
     def test_sin_permissions_reports_local_client_state_read_only(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
             encoding="utf-8")

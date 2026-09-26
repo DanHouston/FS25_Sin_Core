@@ -769,9 +769,14 @@ function FS25SiNServer:enforceAuthorizedContractorState(user, sourceFarm, target
         sourceFarm:setIsContractingFor(targetFarm.farmId, true, false)
     end
     local after = sourceFarm:getIsContractingFor(targetFarm.farmId) == true
-    Logging.info("[SiN Authorization] contractor state sync=%s uniqueUserId=%s sourceFarmId=%s targetFarmId=%s beforeContracting=%s afterContracting=%s",
-        tostring(syncReason or "reconciliation"), self:shortIdentity(user:getUniqueUserId()),
-        tostring(sourceFarm.farmId), tostring(targetFarm.farmId), tostring(before), tostring(after))
+    -- Periodic reconciliation is intentionally quiet when the authoritative
+    -- state is already correct.  Keep transition/explicit-sync diagnostics,
+    -- but do not emit an identical success line on every heartbeat tick.
+    if before ~= after or syncReason ~= "periodic-contractor" then
+        Logging.info("[SiN Authorization] contractor state sync=%s uniqueUserId=%s sourceFarmId=%s targetFarmId=%s beforeContracting=%s afterContracting=%s",
+            tostring(syncReason or "reconciliation"), self:shortIdentity(user:getUniqueUserId()),
+            tostring(sourceFarm.farmId), tostring(targetFarm.farmId), tostring(before), tostring(after))
+    end
     return after
 end
 
