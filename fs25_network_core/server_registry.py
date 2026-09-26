@@ -43,6 +43,25 @@ class ServerRegistry:
     def info(self, server_key):
         return self.db.sin_servers.find_one({"server_key": server_key})
 
+    def configure_money_bridge(self, server_key, enabled):
+        """Explicitly enable/disable the verified FS25 wallet bridge.
+
+        The flag is intentionally separate from farm provisioning and from the
+        legacy ``withdrawals_enabled`` setting.  Operators must enable it only
+        after the deployed FS25 adapter has passed live mutation/readback
+        validation.
+        """
+        record = self.info(server_key)
+        if not record or not record.get("enabled"):
+            raise ValueError("Unknown or disabled SiN server")
+        result = self.db.sin_servers.update_one(
+            {"server_key": str(server_key), "enabled": True},
+            {"$set": {"fs25_money_bridge_enabled": bool(enabled),
+                      "updated_at": datetime.now(timezone.utc)}})
+        if getattr(result, "modified_count", 1) != 1 and record.get("fs25_money_bridge_enabled") != bool(enabled):
+            raise ValueError("FS25 money bridge setting was not changed")
+        return self.info(server_key)
+
     @staticmethod
     def _runtime_evidence(snapshot):
         """Normalize the small runtime proof carried by a game snapshot."""

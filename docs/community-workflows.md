@@ -45,7 +45,13 @@ Wallet changes use immutable `ledger_entries` plus a projected wallet balance.
 Wallet-to-wallet payments use an idempotent transaction ID. Deposits and
 withdrawals create durable game operations first; central credit or final
 settlement requires an authenticated FS25 receipt. Game money mutation is not
-claimed complete by queueing an operation.
+claimed complete by queueing an operation.  This wallet bridge is deliberately
+separate from farm provisioning: it does not grant starting cash, create loans,
+or alter an existing farm's initial economy.  `/deposit` debits the
+authenticated farm only after the deployed FS25 money adapter proves the native
+balance change; `/withdraw` reserves wallet funds and credits that same farm
+only after authoritative readback.  Invoice payments move value between SiN
+wallets without mutating FS25 farm balances.
 
 ## Contracts, invoices, and events
 

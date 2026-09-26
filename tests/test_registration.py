@@ -367,6 +367,19 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("if not self.registrationRequired or self.registrationCode == \"\"", source)
         self.assertIn("self:sendRegistrationState(uniqueId, state.status, state.code)", source)
 
+    def test_server_runtime_has_receipt_gated_wallet_money_handlers(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('operationType == "deposit_funds" or operationType == "withdraw_funds"', source)
+        handler = source[source.index("function FS25SiNServer:processMoneyCommand"):]
+        handler = handler[:handler.index("function FS25SiNServer:processContractorPermissionCommand")]
+        self.assertIn("farm.changeBalance", handler)
+        self.assertIn("authoritative_readback", handler)
+        self.assertIn('status = "pending_validation"', handler)
+        self.assertIn('source_event_id', handler)
+        self.assertIn("self:saveReceiptAndConsume", handler)
+
     def test_server_runtime_snapshot_does_not_export_dedicated_server_pseudo_user(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
             encoding="utf-8"

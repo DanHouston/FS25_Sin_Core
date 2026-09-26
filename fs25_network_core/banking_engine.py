@@ -218,8 +218,59 @@ class BankingEngine:
             return "pending"
         return self.database.atomic(queue)
 
+    @staticmethod
+    def _receipt_bool(receipt, field):
+        value = receipt.get(field)
+        if value is True or value == 1:
+            return True
+        return isinstance(value, str) and value.strip().lower() in {"1", "true", "yes"}
+
+    @classmethod
+    def _validate_money_receipt(cls, record, receipt, operation_type, outcome, request_id):
+        """Require native FS25 balance evidence before settling the wallet.
+
+        XML attributes arrive from the Agent as strings.  A successful receipt
+        must identify the exact queued operation/farm/amount and prove that the
+        native mutation was performed and read back.  A definitive failure must
+        explicitly prove that no mutation was performed; uncertain receipts
+        remain pending and are never projected into the wallet.
+        """
+        if receipt.get("operation_type") != operation_type:
+            raise ValueError("Money receipt operation type does not match queued operation")
+        if str(receipt.get("farm_id")) != str(record.get("farm_id")):
+            raise ValueError("Money receipt farm does not match queued operation")
+        try:
+            receipt_amount = int(float(receipt.get("amount")))
+        except (TypeError, ValueError):
+            raise ValueError("Money receipt amount is invalid") from None
+        if receipt_amount != int(record.get("amount")):
+            raise ValueError("Money receipt amount does not match queued operation")
+        expected_request_field = "deposit_id" if operation_type == "deposit_funds" else "withdrawal_id"
+        if str(receipt.get(expected_request_field)) != str(request_id):
+            raise ValueError("Money receipt request ID does not match queued operation")
+        if outcome in {"applied", "already_applied"}:
+            if not cls._receipt_bool(receipt, "mutation_performed"):
+                raise ValueError("Successful money receipt lacks mutation evidence")
+            if not cls._receipt_bool(receipt, "authoritative_readback"):
+                raise ValueError("Successful money receipt lacks authoritative readback")
+            if operation_type == "deposit_funds" and not receipt.get("source_event_id"):
+                raise ValueError("Successful deposit receipt lacks source event evidence")
+            try:
+                before = float(receipt["before_balance"])
+                after = float(receipt["after_balance"])
+            except (KeyError, TypeError, ValueError):
+                raise ValueError("Successful money receipt lacks balance readback") from None
+            expected_delta = -receipt_amount if operation_type == "deposit_funds" else receipt_amount
+            if abs((after - before) - expected_delta) >= 0.01:
+                raise ValueError("Money receipt balance delta does not match requested amount")
+        elif outcome == "definitively_not_applied":
+            if cls._receipt_bool(receipt, "mutation_performed") or cls._receipt_bool(receipt, "authoritative_readback"):
+                raise ValueError("Definitive money failure contains mutation evidence")
+        else:
+            raise ValueError("Money receipt outcome is not definitive")
+
     def settle_deposit(self, request_id, outcome, receipt, server_id=None, save_id=None, world_id=None):
-        if outcome not in ("applied", "already_applied") or not receipt:
+        if outcome not in ("applied", "already_applied", "definitively_not_applied") or not receipt:
             raise ValueError("A definitive deposit outcome and durable receipt are required")
         if not isinstance(receipt, dict):
             raise ValueError("A durable deposit receipt object is required")
@@ -236,8 +287,26 @@ class BankingEngine:
                 raise ValueError("Deposit receipt is outside the active FS25 world generation")
             if record["state"] == "completed":
                 return "completed"
+            if record["state"] == "failed":
+                return "failed"
             if record["state"] != "pending":
                 raise ValueError("Deposit is not awaiting settlement")
+            self._validate_money_receipt(record, receipt, "deposit_funds", outcome, request_id)
+            if outcome == "definitively_not_applied":
+                result = self.db.deposit_requests.update_one(
+                    {"_id": request_id, "state": "pending"},
+                    {"$set": {"state": "failed", "receipt": receipt,
+                              "completed_at": datetime.now(timezone.utc)}}, session=session)
+                if result.modified_count != 1:
+                    raise ValueError("Deposit changed before failure could be committed")
+                operation = self.db.farm_operations.update_one(
+                    {"_id": record["operation_id"], "operation_type": "deposit_funds",
+                     "state": {"$in": ["pending", "dispatched"]}},
+                    {"$set": {"state": "failed", "receipt": receipt,
+                              "updated_at": datetime.now(timezone.utc)}}, session=session)
+                if operation.modified_count != 1:
+                    raise ValueError("Deposit operation changed before failure could be committed")
+                return "failed"
             event_id = receipt.get("source_event_id") or request_id
             evidence = receipt.get("receipt") or receipt
             # Use the existing verified-transfer projection so the immutable
@@ -283,6 +352,7 @@ class BankingEngine:
                 if record["state"] != state:
                     raise ValueError("Conflicting settlement")
                 return state
+            self._validate_money_receipt(record, receipt, "withdraw_funds", outcome, request_id)
             if state == "refunded":
                 transaction_id = self.transaction_id("withdrawal-refund", request_id)
                 if self._ledger(transaction_id, record["discord_id"], record["amount"], "withdrawal_refund",

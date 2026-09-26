@@ -28,3 +28,17 @@ class ServerRegistryPairingTests(unittest.TestCase):
         for code in ("expired", "already-used"):
             with self.subTest(code=code), self.assertRaises(ValueError):
                 self.registry.pair_code(code)
+
+    def test_money_bridge_requires_explicit_operator_setting(self):
+        self.record["fs25_money_bridge_enabled"] = False
+        updated = dict(self.record, fs25_money_bridge_enabled=True)
+        self.db.sin_servers.find_one.side_effect = [self.record, updated]
+        result = self.registry.configure_money_bridge("local-dev", True)
+        self.assertTrue(result["fs25_money_bridge_enabled"])
+        update = self.db.sin_servers.update_one.call_args.args[1]
+        self.assertTrue(update["$set"]["fs25_money_bridge_enabled"])
+
+    def test_money_bridge_rejects_unknown_server(self):
+        self.db.sin_servers.find_one.return_value = None
+        with self.assertRaisesRegex(ValueError, "Unknown or disabled"):
+            self.registry.configure_money_bridge("missing", True)

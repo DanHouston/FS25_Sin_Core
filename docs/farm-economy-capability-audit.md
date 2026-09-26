@@ -37,6 +37,40 @@ Sources: [FS25 FarmlandManager](https://gdn.giants-software.com/documentation_sc
 [FS25 source use of `farmland.price`](https://gdn.giants-software.com/documentation_scripting_fs25.php?category=78&class=713&version=engine),
 and [GIANTS FarmManager reference](https://gdn.giants-software.com/documentation_print.php).
 
+## Banking bridge (separate from farm provisioning)
+
+The existing farm financial-provisioning record (`target_operating_cash` and
+`target_land_loan`) is not the banking feature and remains deferred.  Existing
+farms are not retroactively funded or loaned.  Banking means a network-wide SiN
+wallet, keyed by approved Discord identity, with authenticated game-side
+transfers:
+
+```text
+FS25 farm -- /deposit --> SiN wallet -- /withdraw --> FS25 farm
+SiN wallet -- invoice/payment --> SiN wallet
+```
+
+The central queue and receipt settlement paths are world/save scoped and
+idempotent.  The FS25 side must use the authoritative server farm's native
+`Farm:changeBalance(amount)` API, then read `Farm:getBalance()` back before an
+`applied` receipt is accepted.  A failed operation emits a definitive
+not-applied receipt and credits/reserves nothing.  Unknown readback remains
+pending for operator reconciliation.  `fs25_money_bridge_enabled` must stay
+false until the live validation below succeeds.
+
+After the deployed FS25 adapter passes that validation, an operator may enable
+the bridge for one registered server explicitly:
+
+```powershell
+python -m fs25_network_core.money_bridge_config `
+  --server sin-fs25-01 --enable
+```
+
+Use `--disable` to close the bridge before maintenance.  This command changes
+only the server capability flag; it does not alter farm balances, loans, wallet
+funds, or provisioning records.  Do not enable it merely because the
+read-only capability probe found `changeBalance`.
+
 ## Required live capability probe
 
 `FS25_SiN_Server` now runs a bounded, read-only capability probe once after the

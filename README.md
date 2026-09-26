@@ -111,8 +111,10 @@ a separate policy and game integration.
 3. `servers.json` contains `local-dev`, configured for test save slot 1. Its
    onboarding records use a separate `fs25_network_local_test` database. When ready,
    add production entries using `servers.example.json` as a template,
-   configure real snapshot paths and unique save IDs, and keep
-   `withdrawals_enabled` false until delivery works.
+   configure real snapshot paths and unique save IDs.  Keep
+   `fs25_money_bridge_enabled` false until both receipt-gated native wallet
+   directions have passed live validation; the legacy `withdrawals_enabled`
+   flag is not sufficient.
 4. Set `DISCORD_TOKEN` in the process environment or in the root `.env` file as
    `DISCORD_TOKEN=your-bot-token`. `discord.json` configures guild
    `1547411827539837081`; `DISCORD_GUILD_ID` can override it. Invite

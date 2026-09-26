@@ -125,12 +125,13 @@ Use the existing Hobo's Hollow replacement as the first non-mutating proof:
    and then issue personal manager authority. Establish a new SiN Harvest map
    explicitly; no old Farm 1 mapping may be adopted.
 
-Do not test starting cash, loans, player positioning, deletion/reset, money
-administration, deposits, or withdrawals on Hobo's Hollow. Their GIANTS
-capability status remains live-deferred. In particular, both bank bridge
-directions require the explicit `fs25_money_bridge_enabled` capability after
-receipt-gated debit/credit, read-back, replication, and restart tests prove the
-target build; the old `withdrawals_enabled` flag is not sufficient.
+Starting cash, first-land loans, and farm deletion/reset remain deferred policy
+work; the existing Hobo farms must not be rewritten to introduce those rules.
+The separate wallet bridge is the only money feature in this validation pass.
+It remains disabled until the target build proves receipt-gated native debit
+and credit, authoritative read-back, replication, and restart recovery.  Enable
+it only with the explicit `fs25_money_bridge_enabled` operator command after
+those checks; the legacy `withdrawals_enabled` flag is not sufficient.
 
 ## One deployment/restart group
 
@@ -269,10 +270,14 @@ behavior offline.
 
 ### Value-transfer boundary
 
-Do not test deposits, withdrawals, vehicle transfers, or product transfers in
-the live save until their exact GIANTS money/ownership/fill APIs have been
-verified in the target game build. The central workflows intentionally require
-durable receipts and keep unverified game mutations out of the success path.
+Vehicle and product transfers remain out of scope until their exact GIANTS
+ownership/fill APIs are verified. For the wallet bridge, use the Hobo backup and
+restore runbook before testing: perform one small deposit and withdrawal with
+the bridge disabled until the deployed mod emits authoritative receipts, then
+repeat after restart and verify the Central wallet, FS25 farm balance, and
+operation state agree. Unknown or malformed receipts stay pending; they never
+credit or reserve a wallet silently. Restore from the retained Hobo backup if a
+live probe has an unexpected result.
 
 ## Results to retain
 

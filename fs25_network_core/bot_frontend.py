@@ -990,9 +990,10 @@ class NetworkBot(discord.Client):
             context = await asyncio.to_thread(self.resolve_identity_context, str(interaction.user.id), None, "reconcile")
             server_key, save_key = context["server_key"], context["save_key"]
             # The deployed mod deliberately has no verified authoritative
-            # money-debit adapter yet.  Queueing a deposit anyway would create
-            # an indefinitely pending distributed-money operation, so deposits
-            # use the same explicit live capability gate as withdrawals.
+            # Queueing a deposit while the native adapter is not explicitly
+            # enabled would create an indefinitely pending distributed-money
+            # operation, so deposits use the same capability gate as
+            # withdrawals.
             if not self.fs25_money_bridge_enabled(server_key):
                 await interaction.response.send_message(
                     "Deposits are disabled because no verified FS25 money-debit adapter is enabled for this server.",

@@ -172,7 +172,7 @@ class BusinessWorkflowTests(unittest.TestCase):
         engine = BankingEngine(self.database)
         self.db.withdrawals.find_one.return_value = {
             "_id": "withdraw-1", "operation_id": "operation-1", "server_id": "server",
-            "save_id": "save", "discord_id": "actor", "amount": 5, "state": "pending"}
+            "save_id": "save", "discord_id": "actor", "amount": 5, "farm_id": 2, "state": "pending"}
         with self.assertRaises(ValueError):
             engine.settle_withdrawal("withdraw-1", "applied", {"status": "applied"}, "server", "save")
         with self.assertRaises(ValueError):
@@ -183,8 +183,64 @@ class BusinessWorkflowTests(unittest.TestCase):
         self.db.withdrawals.update_one.return_value.modified_count = 1
         self.db.farm_operations.update_one.return_value.modified_count = 1
         result = engine.settle_withdrawal(
-            "withdraw-1", "applied", {"status": "applied", "operation_id": "operation-1"},
+            "withdraw-1", "applied", {
+                "status": "applied", "operation_id": "operation-1", "operation_type": "withdraw_funds",
+                "withdrawal_id": "withdraw-1", "farm_id": "2", "amount": "5",
+                "mutation_performed": "true", "authoritative_readback": "true",
+                "before_balance": "100", "after_balance": "105"},
             "server", "save")
         self.assertEqual(result, "completed")
         operation_update = self.db.farm_operations.update_one.call_args.args[1]
         self.assertEqual(operation_update["$set"]["state"], "succeeded")
+
+    def test_money_receipt_cannot_settle_without_native_readback(self):
+        engine = BankingEngine(self.database)
+        self.db.withdrawals.find_one.return_value = {
+            "_id": "withdraw-2", "operation_id": "operation-2", "server_id": "server",
+            "save_id": "save", "discord_id": "actor", "amount": 5, "farm_id": 2, "state": "pending"}
+        with self.assertRaisesRegex(ValueError, "readback"):
+            engine.settle_withdrawal(
+                "withdraw-2", "applied", {
+                    "operation_id": "operation-2", "operation_type": "withdraw_funds",
+                    "withdrawal_id": "withdraw-2", "farm_id": "2", "amount": "5",
+                    "mutation_performed": "true", "authoritative_readback": "false"},
+                "server", "save")
+        self.db.withdrawals.update_one.assert_not_called()
+
+    def test_definitive_failed_deposit_does_not_credit_wallet(self):
+        engine = BankingEngine(self.database)
+        self.db.deposit_requests.find_one.return_value = {
+            "_id": "deposit-1", "operation_id": "operation-3", "server_id": "server",
+            "save_id": "save", "discord_id": "actor", "amount": 5, "farm_id": 2, "state": "pending"}
+        self.db.deposit_requests.update_one.return_value.modified_count = 1
+        self.db.farm_operations.update_one.return_value.modified_count = 1
+        result = engine.settle_deposit(
+            "deposit-1", "definitively_not_applied", {
+                "operation_id": "operation-3", "operation_type": "deposit_funds",
+                "deposit_id": "deposit-1", "farm_id": "2", "amount": "5",
+                "mutation_performed": "false", "authoritative_readback": "false",
+                "status": "definitively_not_applied"}, "server", "save")
+        self.assertEqual(result, "failed")
+        self.db.ledger_entries.insert_one.assert_not_called()
+        self.assertEqual(self.db.deposit_requests.update_one.call_args.args[1]["$set"]["state"], "failed")
+
+    def test_applied_deposit_requires_and_projects_native_balance_evidence(self):
+        engine = BankingEngine(self.database)
+        self.db.deposit_requests.find_one.return_value = {
+            "_id": "deposit-2", "operation_id": "operation-4", "server_id": "server",
+            "save_id": "save", "discord_id": "actor", "amount": 5, "farm_id": 2,
+            "state": "pending"}
+        self.db.deposit_requests.update_one.return_value.modified_count = 1
+        self.db.farm_operations.update_one.return_value.modified_count = 1
+        engine.credit_verified_transfer = MagicMock()
+        receipt = {
+            "operation_id": "operation-4", "operation_type": "deposit_funds",
+            "deposit_id": "deposit-2", "source_event_id": "event-4", "farm_id": "2",
+            "amount": "5", "mutation_performed": "true", "authoritative_readback": "true",
+            "before_balance": "100", "after_balance": "95", "status": "applied"}
+        result = engine.settle_deposit("deposit-2", "applied", receipt, "server", "save")
+        self.assertEqual(result, "completed")
+        engine.credit_verified_transfer.assert_called_once_with(
+            "server", "save", "event-4", "actor", 2, 5, receipt,
+            session="session", world_id=None)
+        self.assertEqual(self.db.farm_operations.update_one.call_args.args[1]["$set"]["state"], "succeeded")

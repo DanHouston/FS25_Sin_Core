@@ -2433,6 +2433,8 @@ function FS25SiNServer:processPermissionCommands()
                     self:processNameAlignment(command, operationId)
                 elseif operationType == "chat_message" then
                     self:processChatCommand(command, operationId)
+                elseif operationType == "deposit_funds" or operationType == "withdraw_funds" then
+                    self:processMoneyCommand(command, operationId, operationType)
                 else
                     local requestedRole = command:getString("permissionCommand#role")
                     if requestedRole == "contractor" then
@@ -2488,6 +2490,92 @@ function FS25SiNServer:processPermissionCommands()
     end
     manifest:delete()
     if deleteFile ~= nil then deleteFile(manifestPath) end
+end
+
+-- Move money between a player's authoritative FS25 farm and the SiN wallet.
+-- The central side reserves/credits only after this receipt proves both the
+-- native mutation and the resulting farm balance.  Farm:changeBalance is the
+-- native server-side API; do not fall back to an unscoped client call.
+function FS25SiNServer:processMoneyCommand(command, operationId, operationType)
+    local farmId = command:getString("networkLocalCommand#farm_id")
+    local farmIdNumber = tonumber(farmId)
+    local amountRaw = command:getString("networkLocalCommand#amount")
+    local amount = tonumber(amountRaw)
+    local farm = amount ~= nil and farmIdNumber ~= nil and g_farmManager ~= nil
+        and g_farmManager:getFarmById(farmIdNumber) or nil
+    local before = nil
+    if farm ~= nil and type(farm.getBalance) == "function" then
+        local balanceOk, balanceValue = pcall(farm.getBalance, farm)
+        if balanceOk then before = tonumber(balanceValue) end
+    end
+    local delta = nil
+    local status = "pending_validation"
+    local reason = "money mutation was not attempted"
+    local mutationPerformed = false
+    local authoritativeReadback = false
+    local after = nil
+
+    if g_currentMission == nil or not g_currentMission:getIsServer() then
+        status = "definitively_not_applied"
+        reason = "authoritative FS25 server is unavailable"
+    elseif amount == nil or amount <= 0 or math.floor(amount) ~= amount or amount > 1000000000 then
+        status = "definitively_not_applied"
+        reason = "amount must be a positive whole currency unit"
+    elseif farm == nil then
+        status = "definitively_not_applied"
+        reason = "FS25 farm unavailable"
+    elseif before == nil then
+        status = "pending_validation"
+        reason = "FS25 farm balance readback unavailable before mutation"
+    elseif operationType == "deposit_funds" and before < amount then
+        status = "definitively_not_applied"
+        reason = "insufficient FS25 farm balance"
+    elseif type(farm.changeBalance) ~= "function" then
+        status = "definitively_not_applied"
+        reason = "FS25 farm balance mutation API unavailable"
+    else
+        delta = operationType == "deposit_funds" and -amount or amount
+        local ok, errorMessage = pcall(farm.changeBalance, farm, delta)
+        mutationPerformed = ok
+        if not ok then
+            status = "definitively_not_applied"
+            reason = "FS25 farm balance mutation failed: " .. tostring(errorMessage)
+        else
+            if type(farm.getBalance) == "function" then
+                local balanceOk, balanceValue = pcall(farm.getBalance, farm)
+                if balanceOk then after = tonumber(balanceValue) end
+            end
+            local expected = before + delta
+            authoritativeReadback = after ~= nil and math.abs(after - expected) < 0.01
+            if authoritativeReadback then
+                status = "applied"
+                reason = "FS25 farm balance changed and was verified"
+            else
+                status = "pending_validation"
+                reason = "FS25 farm balance readback did not match requested change"
+            end
+        end
+    end
+
+    local receipt = XMLFile.create("networkLocalMoneyReceipt", self.receiptDirectory .. operationId .. ".xml", "networkLocalReceipt")
+    if receipt == nil then return end
+    receipt:setString("networkLocalReceipt#operation_id", operationId)
+    receipt:setString("networkLocalReceipt#operation_type", operationType)
+    receipt:setString("networkLocalReceipt#server_id", command:getString("networkLocalCommand#server_id"))
+    receipt:setString("networkLocalReceipt#save_id", command:getString("networkLocalCommand#save_id"))
+    receipt:setString("networkLocalReceipt#deposit_id", command:getString("networkLocalCommand#deposit_id") or "")
+    receipt:setString("networkLocalReceipt#withdrawal_id", command:getString("networkLocalCommand#withdrawal_id") or "")
+    receipt:setString("networkLocalReceipt#source_event_id", operationId)
+    receipt:setInt("networkLocalReceipt#farm_id", farmIdNumber or 0)
+    receipt:setInt("networkLocalReceipt#amount", amount or 0)
+    receipt:setString("networkLocalReceipt#before_balance", before ~= nil and tostring(before) or "")
+    receipt:setString("networkLocalReceipt#after_balance", after ~= nil and tostring(after) or "")
+    receipt:setBool("networkLocalReceipt#mutation_performed", mutationPerformed)
+    receipt:setBool("networkLocalReceipt#authoritative_readback", authoritativeReadback)
+    receipt:setString("networkLocalReceipt#status", status)
+    receipt:setString("networkLocalReceipt#receipt", reason)
+    self:setReceiptWorldId(receipt, "networkLocalReceipt")
+    self:saveReceiptAndConsume(receipt, command, operationId)
 end
 
 function FS25SiNServer:processContractorPermissionCommand(command, operationId)
