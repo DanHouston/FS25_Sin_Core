@@ -292,6 +292,44 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
             options = command.to_dict(self.bot.tree)["options"]
             self.assertEqual([option["name"] for option in options], ["amount"])
 
+    async def test_bank_context_carries_active_world_generation(self):
+        database = self.bot.bank.database.db
+        database.game_identities.find.return_value.limit.return_value = [{
+            "server_id": "server-a", "save_id": "save-a", "fs25_unique_user_id": "stable",
+        }]
+        self.bot.server_registry.eligible_server = MagicMock(return_value={
+            "server_key": "server-a", "display_name": "Server A",
+            "saves": [{"save_key": "save-a", "fs25_save_id": "4"}],
+        })
+        self.bot.farm_lifecycle.current_world_id = MagicMock(return_value="world-a")
+
+        context = self.bot.resolve_identity_context("member", purpose="reconcile")
+
+        self.assertEqual(context["world_id"], "world-a")
+        self.bot.farm_lifecycle.current_world_id.assert_called_once_with("server-a", "save-a")
+
+    async def test_bank_callbacks_pass_active_world_to_receipt_gated_operations(self):
+        interaction = MagicMock()
+        interaction.id = 9001
+        interaction.user.id = 42
+        interaction.response.send_message = AsyncMock()
+        interaction.response.defer = AsyncMock()
+        interaction.followup.send = AsyncMock()
+        self.bot.resolve_identity_context = MagicMock(return_value={
+            "server_key": "server-a", "save_key": "save-a", "world_id": "world-a",
+        })
+        self.bot.fs25_money_bridge_enabled = MagicMock(return_value=True)
+        self.bot.bank.request_deposit = MagicMock(return_value="pending")
+        self.bot.bank.request_withdrawal = MagicMock(return_value="pending")
+
+        await self.bot.tree.get_command("deposit").callback(interaction, 1)
+        self.bot.bank.request_deposit.assert_called_once_with(
+            "9001", "42", "server-a", "save-a", 1, world_id="world-a")
+
+        await self.bot.tree.get_command("withdraw").callback(interaction, 1)
+        self.bot.bank.request_withdrawal.assert_called_once_with(
+            "9001", "42", "server-a", "save-a", 1, world_id="world-a")
+
     async def test_contract_identity_context_auto_selects_one_server_and_fails_closed_for_multiple(self):
         database = self.bot.bank.database.db
         database.game_identities.find.return_value.limit.return_value = [{

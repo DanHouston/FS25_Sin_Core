@@ -1000,7 +1000,8 @@ class NetworkBot(discord.Client):
                     ephemeral=True)
                 return
             state = await asyncio.to_thread(self.bank.request_deposit, str(interaction.id),
-                                             str(interaction.user.id), server_key, save_key, amount)
+                                             str(interaction.user.id), server_key, save_key, amount,
+                                             world_id=context.get("world_id"))
             await interaction.response.send_message(
                 f"Deposit is {state} for the selected game context. The game-side debit must be confirmed before your balance changes.",
                 ephemeral=True)
@@ -1019,7 +1020,8 @@ class NetworkBot(discord.Client):
                 return
             await interaction.response.defer(ephemeral=True)
             state = await asyncio.to_thread(self.bank.request_withdrawal, str(interaction.id),
-                                           str(interaction.user.id), server_key, save_key, amount)
+                                           str(interaction.user.id), server_key, save_key, amount,
+                                           world_id=context.get("world_id"))
             await interaction.followup.send(f"Withdrawal is {state}. Pending funds are reserved until delivery is confirmed.", ephemeral=True)
 
         @self.tree.command(name="chat_send", description="Staff: send a message to an FS25 server chat")
@@ -1375,6 +1377,11 @@ class NetworkBot(discord.Client):
                 continue
             if config.get("active_save_key") and str(save_key) != str(config["active_save_key"]):
                 continue
+            # Game-money operations are world-scoped. Resolve the active
+            # save-backed generation here and carry it through to the banking
+            # engine; passing only server/save would make the engine (correctly)
+            # reject every operation once a real world generation is active.
+            world_id = self.farm_lifecycle.current_world_id(key, save_key)
             observation = database.observed_fs25_identities.find_one({
                 "server_id": key, "save_id": save_key,
                 "fs25_unique_user_id": identity.get("fs25_unique_user_id"),
@@ -1384,6 +1391,7 @@ class NetworkBot(discord.Client):
             candidates.append({
                 "server_key": key, "save_key": save_key,
                 "server_name": config.get("display_name") or key,
+                "world_id": world_id,
                 "unique_user_id": identity.get("fs25_unique_user_id") or identity.get("game_player_id"),
                 "farm_id": request.get("farm_id") if isinstance(request, dict)
                     and request.get("server_key") == key and request.get("save_key") == save_key else None,
