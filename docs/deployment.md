@@ -191,7 +191,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -ModsPath "C:\Users\Dan\OneDrive\Documents\My Games\SiN" `
   -PublishModpack -RefreshApprovedModpack `
   -ModpackRepositoryRoot "C:\repos\FS25_SiN_Core" `
-  -ModpackPublicationRoot "G:\My Drive\SiN Mods" `
+  -ModpackPublicationRoot "H:\My Drive\SiN Mods" `
   -ModpackServerKey sin-fs25-01 `
   -ModpackServerName "SiN Test Server 01" `
   -ModpackVersion v0.1.32

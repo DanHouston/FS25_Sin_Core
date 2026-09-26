@@ -41,9 +41,15 @@ variables or pass the command-line options:
 
 ```powershell
 $env:SIN_MODPACK_SOURCE_DIR = '<tested-client-mod-directory>'
-$env:SIN_MODPACK_PUBLICATION_ROOT = '<Google-Drive-publication-root>'
+$env:SIN_MODPACK_PUBLICATION_ROOT = 'H:\My Drive\SiN Mods'
 $env:SIN_MODPACK_CLIENT_MOD_DIR = '<client-mod-directory-for-sync>'
 ```
+
+The current operator publication root is `H:\My Drive\SiN Mods`.  The drive
+letter is not part of the packager contract: pass a different mounted drive
+with `SIN_MODPACK_PUBLICATION_ROOT` or `--publication-root` whenever the
+Google Drive desktop mount changes.  The tested/source directory remains
+independent of the publication root.
 
 The operator's current paths may be supplied explicitly when performing a
 live-approved operation, but they must not be used by automated development
@@ -98,7 +104,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -ModsPath 'C:\Users\Dan\OneDrive\Documents\My Games\SiN' `
   -PublishModpack -RefreshApprovedModpack `
   -ModpackRepositoryRoot 'C:\repos\FS25_SiN_Core' `
-  -ModpackPublicationRoot 'G:\My Drive\SiN Mods' `
+  -ModpackPublicationRoot 'H:\My Drive\SiN Mods' `
   -ModpackServerKey 'sin-fs25-01' `
   -ModpackServerName 'SiN Test Server 01' `
   -ModpackVersion v0.1.32
@@ -116,7 +122,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -ModsPath 'C:\Users\Dan\OneDrive\Documents\My Games\SiN' `
   -PublishModpack -ApproveAllSourceMods `
   -ModpackRepositoryRoot 'C:\repos\FS25_SiN_Core' `
-  -ModpackPublicationRoot 'G:\My Drive\SiN Mods' `
+  -ModpackPublicationRoot 'H:\My Drive\SiN Mods' `
   -ModpackServerKey 'sin-fs25-01' `
   -ModpackServerName 'SiN Test Server 01' `
   -ModpackVersion v0.1.32
@@ -142,7 +148,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File 'C:\repos\FS25_SiN_Core\scripts\Update-SiN-Client.ps1' `
   -Version v0.1.33 -ModsPath 'C:\Users\Dan\OneDrive\Documents\My Games\SiN' `
   -PublishModpack -ModpackRepositoryRoot 'C:\repos\FS25_SiN_Core' `
-  -ModpackPublicationRoot 'G:\My Drive\SiN Mods' `
+  -ModpackPublicationRoot 'H:\My Drive\SiN Mods' `
   -ModpackServerKey 'sin-fs25-01' -ModpackServerName 'SiN Test Server 01' `
   -ModpackVersion v0.1.33 `
   -ApprovedMod 'FS25_SiN_Server.zip' -ApprovedMod 'ThirdPartyMod.zip'

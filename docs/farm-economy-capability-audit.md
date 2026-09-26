@@ -48,7 +48,12 @@ server console, but it is not expected to be available from a normal client.
 Neither path mutates FS25 state or enables banking.
 
 After reviewing that output, use a disposable dedicated save for mutation
-probes.  Test one operation at a time with exact before/after records:
+probes when one is available.  If no disposable save is available, do **not**
+mutate Hobo in place until the [Hobo save backup/restore runbook](hobo-save-backup-restore.md)
+has been completed and independently verified.  A mod ZIP
+rollback is not a save rollback: it cannot undo an FS25 money, loan, farm, or
+world-state change.  Test one operation at a time with exact before/after
+records:
 
 1. Read a farm's current money and loan through the candidate runtime methods.
 2. Identify the specific money change type accepted by the target FS25 build;
