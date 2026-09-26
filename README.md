@@ -12,6 +12,8 @@ See [Discord channels and authorization](docs/discord-and-authorization.md) for
 the channel layout, account linking, farm role workflow, and custom mod contract.
 See [deterministic FS25 modpack distribution](docs/modpack-distribution.md) for
 the explicit capture, validation, publication, and client synchronization flow.
+See the [deployment runbook](docs/deploy-runbook.md) for copy/paste release,
+server, Agent, client, modpack, hash, rollback, and live-validation commands.
 See [validation architecture](docs/validation-architecture.md) for the
 fail-first source, contract, scenario, packaged-artifact, and live validation
 boundaries.
