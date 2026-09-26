@@ -352,6 +352,10 @@ class RegistrationTests(unittest.TestCase):
         )
         self.assertIn('addConsoleCommand("sinEconomy"', source)
         self.assertIn("function FS25SiNServer:consoleCommandEconomy", source)
+        self.assertIn("function FS25SiNServer:runEconomyCapabilityProbe", source)
+        self.assertIn("self.economyProbeCompleted = false", source)
+        self.assertIn("pcall(self.runEconomyCapabilityProbe, self)", source)
+        self.assertIn("automatic read-only capability probe", source)
         probe = source[source.index("function FS25SiNServer:consoleCommandEconomy"):]
         probe = probe[:probe.index("function FS25SiNServer:consumeCommandFile")]
         self.assertIn('observe("getBalance")', probe)

@@ -39,8 +39,16 @@ and [GIANTS FarmManager reference](https://gdn.giants-software.com/documentation
 
 ## Required live capability probe
 
-On a disposable dedicated save, instrument a read-only runtime probe first and
-then test one operation at a time with exact before/after records:
+`FS25_SiN_Server` now runs a bounded, read-only capability probe once after the
+authoritative server mission is ready.  It writes `[SiN Economy] automatic ...`
+lines to the dedicated-server log for every currently present farm, including
+the observed balance/loan values and method availability.  The `sinEconomy
+<farmId> [farmlandId]` console command remains available for an interactive
+server console, but it is not expected to be available from a normal client.
+Neither path mutates FS25 state or enables banking.
+
+After reviewing that output, use a disposable dedicated save for mutation
+probes.  Test one operation at a time with exact before/after records:
 
 1. Read a farm's current money and loan through the candidate runtime methods.
 2. Identify the specific money change type accepted by the target FS25 build;

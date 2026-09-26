@@ -329,6 +329,7 @@ function FS25SiNServer:loadMap()
     self.clockMode = "synced"
     self.clockPolicyGeneratedAt = nil
     self.clockHardFallbackLogged = false
+    self.economyProbeCompleted = false
     self.activityPositionUnavailableLogged = {}
     self.invalidFarmVisualStateLogged = {}
     self.chatCaptureUnavailableLogged = false
@@ -1809,6 +1810,12 @@ function FS25SiNServer:update(dt)
         return
     end
     self.elapsed = 0
+    if not self.economyProbeCompleted then
+        local economyOk, economyError = pcall(self.runEconomyCapabilityProbe, self)
+        if not economyOk then
+            Logging.error("[SiN Economy] automatic read-only capability probe failed: %s", tostring(economyError))
+        end
+    end
     self:validateLoadedFarmVisualStates()
     self:processRegistrationResponses()
     local ok, errorMessage = pcall(self.exportSnapshot, self)
@@ -2292,6 +2299,42 @@ end
 -- method availability and observed values before SiN can safely add an
 -- economic mutation adapter. A successful method lookup is not permission to
 -- call addMoney, alter a loan, or delete a farm.
+function FS25SiNServer:runEconomyCapabilityProbe()
+    if g_currentMission == nil or not g_currentMission:getIsServer() or g_farmManager == nil then
+        return false
+    end
+    local farmCount = 0
+    local balanceAvailable = false
+    local loanAvailable = false
+    local changeBalanceAvailable = false
+    local observations = {}
+    for farmId = 1, 254 do
+        local farm = g_farmManager:getFarmById(farmId)
+        if farm ~= nil and farm.name ~= nil then
+            farmCount = farmCount + 1
+            local function observe(methodName)
+                local method = farm[methodName]
+                if type(method) ~= "function" then return "unavailable" end
+                if methodName == "getBalance" then balanceAvailable = true end
+                if methodName == "getLoan" then loanAvailable = true end
+                local ok, value = pcall(method, farm)
+                return ok and tostring(value) or "read_failed"
+            end
+            if type(farm.changeBalance) == "function" then changeBalanceAvailable = true end
+            table.insert(observations, string.format("farm=%d balance=%s loan=%s",
+                farmId, observe("getBalance"), observe("getLoan")))
+        end
+    end
+    Logging.info("[SiN Economy] automatic read-only capability probe farms=%d getBalance=%s getLoan=%s farmChangeBalance=%s missionAddMoney=%s",
+        farmCount, tostring(balanceAvailable), tostring(loanAvailable), tostring(changeBalanceAvailable),
+        tostring(g_currentMission.addMoney ~= nil and type(g_currentMission.addMoney) == "function"))
+    for _, observation in ipairs(observations) do
+        Logging.info("[SiN Economy] automatic observation %s", observation)
+    end
+    self.economyProbeCompleted = true
+    return true
+end
+
 function FS25SiNServer:consoleCommandEconomy(farmId, farmlandId)
     local parsedFarmId = tonumber(farmId)
     if parsedFarmId == nil or parsedFarmId <= 0 or math.floor(parsedFarmId) ~= parsedFarmId then
