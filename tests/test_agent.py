@@ -491,6 +491,37 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(agent.process_operations_once(), [])
             self.assertFalse((root / "permission-commands/already-rejected.xml").exists())
 
+    def test_pending_validation_receipt_allows_one_audited_permission_redispatch(self):
+        class OperationResponse:
+            status = 200
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self):
+                return json.dumps({"operations": [{
+                    "operation_id": "manager-retry", "operation_type": "permission",
+                    "save_key": "hobo", "payload": {"game_player_id": "stable",
+                    "farm_id": 2, "role": "farm_manager", "revision": 1},
+                }]}).encode()
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "serverBinding.xml").write_text(
+                '<serverBinding serverKey="server" credential="secret"/>', encoding="utf-8")
+            (root / "snapshot.xml").write_text(
+                '<networkLocal source="game" savegameIndex="4" worldId="hobo-world"/>', encoding="utf-8")
+            receipts = root / "permission-receipts"
+            receipts.mkdir()
+            failed = receipts / "manager-retry.xml.failed"
+            failed.write_text(
+                '<permissionReceipt operation_id="manager-retry" operation_type="permission" '
+                'status="pending_validation" receipt="player unavailable"/>', encoding="utf-8")
+            agent = PairingAgent(root, "https://central", MagicMock(return_value=OperationResponse()))
+
+            self.assertEqual(agent.process_operations_once(), ["manager-retry"])
+            self.assertTrue((root / "permission-commands/manager-retry.xml").exists())
+            self.assertTrue((receipts / "manager-retry.xml.retrying").exists())
+            self.assertFalse(failed.exists())
+
     def test_permission_manifest_replace_retries_transient_windows_access_denied(self):
         class OperationResponse:
             status = 200

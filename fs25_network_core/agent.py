@@ -291,8 +291,35 @@ class PairingAgent:
             # permanent rejection is also a terminal audit marker: redispatch
             # could repeat a game-side mutation whose receipt was not trusted.
             receipt_path = self.directory / "permission-receipts" / (operation_id + ".xml")
-            if receipt_path.exists() or any(receipt_path.parent.glob(receipt_path.name + ".failed*")):
+            if receipt_path.exists():
                 continue
+            quarantined = sorted(receipt_path.parent.glob(receipt_path.name + ".failed*"))
+            if quarantined:
+                # A permission receipt marked pending_validation means the
+                # runtime was not ready (for example, the player was not yet
+                # connected).  Central deliberately keeps that job pending so
+                # it can converge later; do not let the audit quarantine marker
+                # turn a recoverable condition into a permanent delivery loss.
+                retryable = []
+                for failed in quarantined:
+                    try:
+                        failed_root = ElementTree.parse(failed).getroot()
+                    except (ElementTree.ParseError, OSError):
+                        continue
+                    if (failed_root.get("operation_type") == "permission"
+                            and failed_root.get("status") == "pending_validation"):
+                        retryable.append(failed)
+                if not retryable:
+                    continue
+                # Rename the marker out of the ``.failed*`` namespace before
+                # redispatch so one pending job is retried exactly once.  The
+                # renamed file remains durable audit evidence.
+                for failed in retryable:
+                    retry_marker = failed.with_name(failed.name.replace(".failed", ".retrying", 1))
+                    try:
+                        failed.replace(retry_marker)
+                    except OSError:
+                        continue
             if not destination.exists():
                 values = {"operation_id": operation_id, "operation_type": operation.get("operation_type", ""),
                           "server_id": server_key, "save_id": operation.get("save_key", ""),
