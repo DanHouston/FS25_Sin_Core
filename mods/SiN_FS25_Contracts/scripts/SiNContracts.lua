@@ -325,19 +325,28 @@ function SiNContracts:consoleCommandContracts()
     return string.format("SiN contracts observed %d native missions", count)
 end
 
-local function appendMethod(target, name, callback, marker)
+local function appendMethod(target, name, callback, marker, preserveReturns)
     if target == nil or type(target[name]) ~= "function" then return false end
     marker = marker or ("__sinContractsHook_" .. name)
     if target[marker] == true then return true end
-    if Utils ~= nil and type(Utils.appendedFunction) == "function" then
-        target[name] = Utils.appendedFunction(target[name], callback)
-    else
+    -- FS25's appendedFunction is appropriate for void lifecycle methods, but
+    -- its wrapper does not forward the native return tuple.  MissionManager
+    -- methods are queried by the native UI for MissionStartState/booleans;
+    -- replacing one with a nil-returning wrapper makes a successfully started
+    -- mission display "could not start".  Use an explicit forwarding wrapper
+    -- whenever the native result is part of the contract.
+    if preserveReturns == true or Utils == nil or type(Utils.appendedFunction) ~= "function" then
         local native = target[name]
         target[name] = function(...)
             local values = {native(...)}
-            callback(...)
+            local ok = pcall(callback, ...)
+            if not ok then
+                logWarning("observer callback failed after native method=%s; native result preserved", name)
+            end
             return unpack(values)
         end
+    else
+        target[name] = Utils.appendedFunction(target[name], callback)
     end
     target[marker] = true
     return true
@@ -349,27 +358,27 @@ function SiNContracts:installHooks()
     if MissionManager ~= nil then
         installed = appendMethod(MissionManager, "registerMission", function(manager, mission)
             SiNContracts:observe(mission, "generated")
-        end) or installed
+        end, nil, true) or installed
         installed = appendMethod(MissionManager, "startMission", function(manager, mission)
             if mission ~= nil and (mission.activeMissionId ~= nil or call(mission, "getWasStarted") == true) then
                 SiNContracts:observe(mission, "accepted")
             else
                 SiNContracts:observe(mission, "acceptance-rejected")
             end
-        end) or installed
+        end, nil, true) or installed
         installed = appendMethod(MissionManager, "cancelMission", function(manager, mission)
             SiNContracts:observe(mission, "cancelled")
-        end) or installed
+        end, nil, true) or installed
         installed = appendMethod(MissionManager, "dismissMission", function(manager, mission)
             SiNContracts:observe(mission, "payment_or_dismissed")
-        end) or installed
+        end, nil, true) or installed
         installed = appendMethod(MissionManager, "update", function(manager)
             local now = nowMs()
             if now == nil or self.lastPollMs == nil or now - self.lastPollMs >= POLL_INTERVAL_MS then
                 self.lastPollMs = now
                 self:scan("observed")
             end
-        end) or installed
+        end, nil, true) or installed
     end
     if AbstractMission ~= nil then
         installed = appendMethod(AbstractMission, "finish", function(mission, finishState)

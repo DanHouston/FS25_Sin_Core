@@ -71,3 +71,28 @@ class ContractsLuaTests(unittest.TestCase):
             assert(calls == 1)
             """
         )
+
+    def test_mission_manager_return_value_survives_observer_hook(self):
+        lua = self._runtime()
+        lua.execute(
+            """
+            -- Model the FS25 appendedFunction behavior: it invokes the
+            -- callback but does not forward the wrapped function's result.
+            Utils = {appendedFunction = function(old, callback)
+                return function(...)
+                    old(...)
+                    callback(...)
+                end
+            end}
+            MissionManager = {}
+            function MissionManager:registerMission() end
+            function MissionManager:startMission() return 17 end
+            function MissionManager:cancelMission() return true end
+            function MissionManager:dismissMission() return true end
+            function MissionManager:update() return 23 end
+            SiNContracts:installHooks()
+            assert(MissionManager:startMission(nil, 1, false) == 17)
+            assert(MissionManager:cancelMission(nil) == true)
+            assert(MissionManager:dismissMission(nil) == true)
+            """
+        )

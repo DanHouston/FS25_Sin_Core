@@ -41,6 +41,12 @@ Lifecycle observation uses these native boundaries:
 | `AbstractMission:dismiss` / `MissionManager:dismissMission` | `payment_or_dismissed` |
 | periodic `MissionManager:update` scan | status/progress observation |
 
+The `MissionManager` hooks explicitly forward every native return value. This
+is required because the FS25 UI consumes `MissionStartState` and cancellation
+booleans; an observer wrapper that returns `nil` can show a false “could not
+start” message even while the native mission has entered `PREPARING` or
+`RUNNING`.
+
 There is no separately documented payment callback on the generic mission
 surface. Native payment occurs as part of dismissal; that boundary is reported
 as `payment_or_dismissed`, while the native finish state remains authoritative.

@@ -41,6 +41,8 @@ class ContractsModTests(unittest.TestCase):
         self.assertIn('"getMissions"', source)
         self.assertIn("registerMission", source)
         self.assertIn("startMission", source)
+        self.assertIn("preserveReturns", source)
+        self.assertIn("pcall(callback, ...)", source)
         self.assertIn("payment_or_dismissed", source)
         self.assertNotIn("FS25SiNServer", source)
         self.assertNotIn("mission:finish(", source)
