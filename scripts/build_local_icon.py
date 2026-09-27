@@ -3,7 +3,7 @@ from pathlib import Path
 import struct
 
 
-def build_icon():
+def build_icon(destination=None):
     size = 512
     header = [124, 0x81007, size, size, size * size // 2, 0, 0] + [0] * 11
     header += [32, 4, int.from_bytes(b"DXT1", "little"), 0, 0, 0, 0, 0]
@@ -19,7 +19,9 @@ def build_icon():
             r, g, b = (232, 245, 226) if node else (76, 176, 108) if line else (20, 42, 34)
             color = (r >> 3) << 11 | (g >> 2) << 5 | b >> 3
             data.extend(struct.pack("<HHI", color, 0, 0))
-    path = Path(__file__).resolve().parent.parent / "mods/FS25_SiN_Server/icon_network.dds"
+    path = (Path(destination) if destination is not None else
+            Path(__file__).resolve().parent.parent / "mods/FS25_SiN_Server/icon_network.dds")
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
     return path
 

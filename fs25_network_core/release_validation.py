@@ -136,6 +136,9 @@ def _validate_crop_archive(path: Path) -> None:
             source_names = [node.get("filename") for node in descriptor.findall("./extraSourceFiles/sourceFile")]
             if source_names != ["scripts/SiNCropSettings.lua"]:
                 raise ReleaseValidationError("SiN_FS25_Crop_Settings.zip has unexpected source files")
+            icon_name = descriptor.findtext("iconFilename")
+            if not icon_name or Path(icon_name).name != icon_name or icon_name not in names:
+                raise ReleaseValidationError("SiN_FS25_Crop_Settings.zip has an invalid iconFilename")
             if policy.tag != "cropPolicy" or policy.get("schemaVersion") != "1":
                 raise ReleaseValidationError("SiN_FS25_Crop_Settings.zip has an invalid policy schema")
             try:

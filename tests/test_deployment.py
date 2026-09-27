@@ -75,7 +75,7 @@ class DeploymentPackagingTests(unittest.TestCase):
                 self.assertIn("_event_minute_sequence", agent_source)
             with ZipFile(output / "SiN_FS25_Crop_Settings.zip") as archive:
                 self.assertEqual(set(archive.namelist()), {
-                    "modDesc.xml", "scripts/SiNCropSettings.lua", "config/fruit-policy.xml"
+                    "modDesc.xml", "scripts/SiNCropSettings.lua", "config/fruit-policy.xml", "icon_crop.dds"
                 })
                 self.assertIn("FruitTypeManager.loadMapData", archive.read("scripts/SiNCropSettings.lua").decode("utf-8"))
             self.assertFalse((output / "FS25_SiN_NetworkLocal.zip").exists())

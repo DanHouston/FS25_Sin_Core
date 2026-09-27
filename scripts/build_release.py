@@ -79,11 +79,14 @@ def build_crop_mod(destination):
     descriptor = source / "modDesc.xml"
     import xml.etree.ElementTree as ET
     descriptor_xml = ET.parse(descriptor)
+    icon_name = descriptor_xml.findtext("iconFilename")
+    if not icon_name or Path(icon_name).name != icon_name or not (source / icon_name).is_file():
+        raise ValueError("SiN_FS25_Crop_Settings mod descriptor/icon is invalid")
     source_names = [node.get("filename") for node in descriptor_xml.findall("./extraSourceFiles/sourceFile")]
     if any(not name or Path(name).is_absolute() or ".." in Path(name).parts for name in source_names):
         raise ValueError("SiN_FS25_Crop_Settings descriptor contains an invalid source file")
     config_name = "config/fruit-policy.xml"
-    names_to_package = ["modDesc.xml"] + source_names + [config_name]
+    names_to_package = ["modDesc.xml"] + source_names + [config_name, icon_name]
     for name in names_to_package:
         if not (source / name).is_file():
             raise ValueError(f"SiN_FS25_Crop_Settings source is missing: {name}")

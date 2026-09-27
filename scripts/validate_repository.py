@@ -109,7 +109,10 @@ def _validate_crop_mod(root: Path) -> None:
     source_names = [node.get("filename") for node in descriptor.findall("./extraSourceFiles/sourceFile")]
     if source_names != ["scripts/SiNCropSettings.lua"]:
         raise RepositoryValidationError("SiN_FS25_Crop_Settings has unexpected source files")
-    for name in source_names + ["config/fruit-policy.xml"]:
+    icon_name = descriptor.findtext("iconFilename")
+    if not icon_name or Path(icon_name).name != icon_name or not (mod_root / icon_name).is_file():
+        raise RepositoryValidationError("SiN_FS25_Crop_Settings/modDesc.xml has an invalid icon")
+    for name in source_names + ["config/fruit-policy.xml", icon_name]:
         if not name or Path(name).is_absolute() or ".." in Path(name).parts or not (mod_root / name).is_file():
             raise RepositoryValidationError(f"SiN_FS25_Crop_Settings source is missing or unsafe: {name}")
     try:

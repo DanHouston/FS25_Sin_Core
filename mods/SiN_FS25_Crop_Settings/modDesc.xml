@@ -2,6 +2,7 @@
 <modDesc descVersion="92">
     <author>SiN (SimNet)</author>
     <version>0.1.0.0</version>
+    <iconFilename>icon_crop.dds</iconFilename>
     <title>
         <en>SiN FS25 Crop Settings</en>
     </title>
