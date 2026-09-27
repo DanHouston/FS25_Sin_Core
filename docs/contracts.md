@@ -74,6 +74,14 @@ duration. The same records are updated when a lifecycle transition is observed.
 Repeated unchanged polling is suppressed; the in-memory report is bounded to
 128 missions. No native mission field is mutated.
 
+Completion is probed only after FS25 has initialized the field mission's
+density-map `completionModifier` and non-empty `completionPartitions`. The
+native `getCompletion()` method is lifecycle-sensitive rather than a passive
+property read; offered missions and failed starts do not have those structures
+yet. Such records intentionally report `completion=unavailable` until the
+native structure is ready, avoiding a diagnostic read from turning a failed
+native start into a repeated `AbstractFieldMission` update error.
+
 Use the command while the save is running, then accept a field contract, work
 it normally, and run it again after success/cancellation. Compare the logged
 `estimateHours`/`nativeDollarsPerHour` with `actualHours`. If a mission type

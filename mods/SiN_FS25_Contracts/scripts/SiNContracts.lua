@@ -95,6 +95,29 @@ local function statusName(mission)
     return text(raw) or "unknown"
 end
 
+-- AbstractFieldMission:getCompletion() is not a passive getter.  On FS25 it
+-- initializes a density-map modifier and then indexes completionPartitions.
+-- A newly offered mission, and a mission whose start/validation just failed,
+-- legitimately has neither structure yet.  Calling the getter for those
+-- objects makes the native method throw from AbstractFieldMission.lua and can
+-- repeat every time our bounded MissionManager scan runs.  Only probe the
+-- native getter after the mission has initialized a non-empty partition list;
+-- a direct percentage field remains safe to read at any earlier lifecycle
+-- stage.  Completion is diagnostic only, so an unavailable value is the
+-- fail-closed result.
+local function completionValue(mission)
+    local direct = number(fieldValue(mission, {"fieldPercentageDone", "completion"}))
+    if direct ~= nil then return direct end
+
+    local partitions = fieldValue(mission, {"completionPartitions"})
+    if type(partitions) ~= "table" or next(partitions) == nil then return nil end
+    if fieldValue(mission, {"completionModifier"}) == nil then return nil end
+    local partitionIndex = fieldValue(mission, {"currentPartitionCompletionIndex"})
+    if partitionIndex ~= nil and partitions[partitionIndex] == nil then return nil end
+
+    return number(call(mission, "getCompletion"))
+end
+
 local function finishName(value)
     if value == nil then return nil end
     if MissionFinishState ~= nil then
@@ -202,7 +225,7 @@ function SiNContracts:observe(mission, eventName, finishState)
     record.missionId = id
     record.missionType = missionType(mission)
     record.status = statusName(mission)
-    record.completion = number(call(mission, "getCompletion"))
+    record.completion = completionValue(mission)
     record.finishState = finishName(finishState) or record.finishState
     record.field = field
     record.targetLocation = targetLocation

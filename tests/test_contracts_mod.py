@@ -46,5 +46,15 @@ class ContractsModTests(unittest.TestCase):
         self.assertNotIn("mission:finish(", source)
         self.assertNotIn("g_missionManager:startMission(", source)
 
+    def test_completion_probe_is_guarded_until_native_partitions_exist(self):
+        source = (MOD / "scripts/SiNContracts.lua").read_text(encoding="utf-8")
+        self.assertIn("local function completionValue(mission)", source)
+        self.assertIn('fieldValue(mission, {"completionPartitions"})', source)
+        self.assertIn("type(partitions) ~= \"table\" or next(partitions) == nil", source)
+        self.assertIn('fieldValue(mission, {"completionModifier"})', source)
+        self.assertIn('fieldValue(mission, {"currentPartitionCompletionIndex"})', source)
+        self.assertIn("record.completion = completionValue(mission)", source)
+        self.assertNotIn('record.completion = number(call(mission, "getCompletion"))', source)
+
     def test_icon_is_present(self):
         self.assertGreater((MOD / "icon_contracts.dds").stat().st_size, 0)
