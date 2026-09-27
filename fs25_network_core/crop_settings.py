@@ -297,8 +297,12 @@ def _native_state_path(states: list[int], period_map: dict[str, dict[str, Any]])
 def _annual_lifecycle_plan(entry: FruitPolicy, period_map: dict[str, dict[str, Any]],
                            descriptor: dict[str, Any], result: ApplyResult) -> dict[str, dict[int, int]] | None:
     """Validate and build annual mappings without mutating the descriptor."""
-    if entry.lifecycle != "ANNUAL" or not entry.state_chain:
+    if entry.lifecycle != "ANNUAL":
         return {}
+    if len(entry.state_chain) < 2:
+        result.unsupported += 1
+        result.diagnostics.append(f"{entry.name}: annual lifecycle requires state ordering")
+        return None
     planting = {period.name for period in entry.periods if period.planting_allowed is True}
     harvest = {period.name for period in entry.periods if period.harvest_allowed is True}
     if not planting or not harvest:
@@ -308,7 +312,8 @@ def _annual_lifecycle_plan(entry: FruitPolicy, period_map: dict[str, dict[str, A
     resolved_states = [_resolve_state(descriptor, token) for token in entry.state_chain]
     invisible = _resolve_state(descriptor, "INVISIBLE")
     dead = _resolve_state(descriptor, "DEAD")
-    if invisible is None or dead is None or len([state for state in resolved_states if state is not None]) < 2:
+    if (invisible is None or dead is None or resolved_states[0] is None or
+            resolved_states[-1] is None or len(set(resolved_states) - {None}) < 2):
         result.unsupported += 1
         result.diagnostics.append(f"{entry.name}: annual lifecycle state chain unsupported")
         return None
@@ -321,7 +326,7 @@ def _annual_lifecycle_plan(entry: FruitPolicy, period_map: dict[str, dict[str, A
                 f"{entry.name}: native growth path selected {len(native_path)} of "
                 f"{len(resolved_states)} configured states"
             )
-    elif any(state is None for state in resolved_states):
+    else:
         result.unsupported += 1
         result.diagnostics.append(f"{entry.name}: native growth path unavailable")
         return None
@@ -340,6 +345,11 @@ def _annual_lifecycle_plan(entry: FruitPolicy, period_map: dict[str, dict[str, A
             result.unsupported += 1
             result.diagnostics.append(f"{entry.name}/{period_name}: growthMapping unsupported")
             return None
+        if (not isinstance(runtime.get("plantingAllowed"), bool) or
+                not isinstance(runtime.get("isHarvestable"), bool)):
+            result.unsupported += 1
+            result.diagnostics.append(f"{entry.name}/{period_name}: annual period gates unsupported")
+            return None
         runtimes[period_name] = runtime
     replacements: dict[str, dict[int, int]] = {}
     for index, period_name in enumerate(_PERIOD_ORDER, start=1):
@@ -356,6 +366,25 @@ def _annual_lifecycle_plan(entry: FruitPolicy, period_map: dict[str, dict[str, A
         elif offset == last_harvest_offset + 1:
             replacement[states[-1]] = dead
         replacements[period_name] = replacement
+    for planting_name in planting:
+        start = _PERIOD_ORDER.index(planting_name)
+        end_offset = last_harvest_offset - ((start + 1 - first_plant) % 12)
+        current = invisible
+        reached_ready = False
+        valid = end_offset >= 1
+        for step in range(end_offset + 1):
+            name = _PERIOD_ORDER[(start + step) % 12]
+            current = replacements[name].get(current, current)
+            if current == states[-1]:
+                valid = valid and name in harvest
+                reached_ready = True
+            elif reached_ready:
+                valid = False
+        death_name = _PERIOD_ORDER[(start + end_offset + 1) % 12]
+        if not valid or not reached_ready or replacements[death_name].get(current, current) != dead:
+            result.unsupported += 1
+            result.diagnostics.append(f"{entry.name}: planting cohort cannot complete annual lifecycle")
+            return None
     return replacements
 
 
@@ -397,7 +426,7 @@ def apply_policy(policy: CropPolicy, descriptors: list[dict[str, Any]]) -> Apply
             result.diagnostics.append(f"{name}: seasonal descriptor unsupported")
             continue
         annual_plan = _annual_lifecycle_plan(entry, period_map, descriptor, result)
-        if entry.lifecycle == "ANNUAL" and entry.state_chain and annual_plan is None:
+        if entry.lifecycle == "ANNUAL" and annual_plan is None:
             # Do not partially apply period gates when the complete annual
             # descriptor cannot be validated.
             continue

@@ -256,7 +256,7 @@ local function resolveGrowthState(fruitType, value)
     if type(value) == "number" then
         return value
     end
-    local mappings = { fruitType.growthStateIds, fruitType.nameToGrowthState }
+    local mappings = { fruitType.growthStateIds or {}, fruitType.nameToGrowthState or {} }
     for _, mapping in ipairs(mappings) do
         if type(mapping) == "table" then
             for name, state in pairs(mapping) do
@@ -436,9 +436,17 @@ local function deriveNativeStatePath(states, runtimePeriods)
     return result
 end
 
-local function applyAnnualLifecycle(fruitType, entry, seasonal, state)
-    if entry.lifecycle ~= "ANNUAL" or #entry.stateChain < 2 then
-        return false
+local function buildAnnualLifecycle(fruitType, entry, seasonal, state)
+    if entry.lifecycle ~= "ANNUAL" then
+        return {}
+    end
+    local function reject(reason)
+        state.unsupported = state.unsupported + 1
+        addDiagnostic(state, entry.name .. ": " .. reason)
+        return nil
+    end
+    if #entry.stateChain < 2 then
+        return reject("annual lifecycle requires state ordering")
     end
     local planting = {}
     local harvest = {}
@@ -455,24 +463,23 @@ local function applyAnnualLifecycle(fruitType, entry, seasonal, state)
         end
     end
     if firstPlant == nil or harvestCount == 0 then
-        return false
+        return reject("annual lifecycle requires planting and harvest windows")
     end
     local states = {}
-    local missingConfiguredState = false
     for _, token in ipairs(entry.stateChain) do
         local resolved = resolveGrowthState(fruitType, token)
         if resolved ~= nil then
             table.insert(states, resolved)
-        else
-            missingConfiguredState = true
         end
     end
     local invisible = resolveGrowthState(fruitType, "INVISIBLE")
     local dead = resolveGrowthState(fruitType, "DEAD")
     if invisible == nil or dead == nil or #states < 2 then
-        state.unsupported = state.unsupported + 1
-        addDiagnostic(state, entry.name .. ": annual lifecycle requires invisible/dead states")
-        return false
+        return reject("annual lifecycle requires invisible/dead states")
+    end
+    if resolveGrowthState(fruitType, entry.stateChain[1]) == nil or
+       resolveGrowthState(fruitType, entry.stateChain[#entry.stateChain]) == nil then
+        return reject("annual lifecycle requires initial and final growth states")
     end
     local lastHarvestOffset = -1
     for period = 1, 12 do
@@ -484,7 +491,7 @@ local function applyAnnualLifecycle(fruitType, entry, seasonal, state)
         end
     end
     if lastHarvestOffset < 0 then
-        return false
+        return reject("annual lifecycle harvest window unsupported")
     end
     -- Validate every period before changing any mapping.  A partially
     -- rewritten annual descriptor is worse than leaving the map native when a
@@ -493,9 +500,7 @@ local function applyAnnualLifecycle(fruitType, entry, seasonal, state)
     for period = 1, 12 do
         local runtimePeriod = seasonal.periods[period]
         if type(runtimePeriod) ~= "table" or type(runtimePeriod.growthMapping) ~= "table" then
-            state.unsupported = state.unsupported + 1
-            addDiagnostic(state, entry.name .. ": annual lifecycle growthMapping unsupported")
-            return false
+            return reject("annual lifecycle growthMapping unsupported")
         end
         runtimePeriods[period] = runtimePeriod
     end
@@ -505,14 +510,11 @@ local function applyAnnualLifecycle(fruitType, entry, seasonal, state)
         if #nativePath ~= #entry.stateChain then
             addDiagnostic(state, entry.name .. ": native growth path omitted optional state(s)")
         end
-    elseif missingConfiguredState then
-        state.unsupported = state.unsupported + 1
-        addDiagnostic(state, entry.name .. ": native growth path unavailable")
-        return false
+    else
+        return reject("native growth path unavailable")
     end
-    local changed = false
+    local plan = {}
     for period = 1, 12 do
-        local runtimePeriod = runtimePeriods[period]
         local offset = periodOffset(firstPlant, period)
         local replacement = {}
         if planting[period] then
@@ -533,19 +535,47 @@ local function applyAnnualLifecycle(fruitType, entry, seasonal, state)
         elseif offset == lastHarvestOffset + 1 then
             replacement[states[#states]] = dead
         end
-        local beforeMapping = copyMapping(runtimePeriod.growthMapping)
-        replaceMappingContents(runtimePeriod.growthMapping, replacement)
-        if not mappingsEqual(beforeMapping, runtimePeriod.growthMapping) then
-            changed = true
+        plan[period] = replacement
+    end
+    -- Prove every allowed sowing cohort reaches readiness inside this cycle,
+    -- stays ready to the window's end, then withers. Never publish flags alone.
+    for plantingPeriod = 1, 12 do
+        if planting[plantingPeriod] then
+            local current = invisible
+            local reachedReady = false
+            local endOffset = lastHarvestOffset - periodOffset(firstPlant, plantingPeriod)
+            if endOffset < 1 then
+                return reject("planting falls outside viable annual cycle")
+            end
+            for step = 0, endOffset do
+                local period = (plantingPeriod - 1 + step) % 12 + 1
+                current = plan[period][current] or current
+                if current == states[#states] then
+                    if not harvest[period] then
+                        return reject("maturity outside harvest window")
+                    end
+                    reachedReady = true
+                elseif reachedReady then
+                    return reject("ready crop lost before harvest window ends")
+                end
+            end
+            local deathPeriod = (plantingPeriod + endOffset) % 12 + 1
+            if not reachedReady or (plan[deathPeriod][current] or current) ~= dead then
+                return reject("planting cohort cannot complete annual lifecycle")
+            end
         end
     end
-    return changed
+    return plan
 end
 
 local function applyFruit(fruitType, entry, state, policyXmlFile)
     local before = validateFruitDescriptor(fruitType, entry, state)
     if before == nil then
-        return false
+        return nil
+    end
+    local annualPlan = buildAnnualLifecycle(fruitType, entry, before, state)
+    if annualPlan == nil then
+        return nil
     end
     local beforePeriods = {}
     for _, period in ipairs(entry.periods) do
@@ -581,6 +611,9 @@ local function applyFruit(fruitType, entry, state, policyXmlFile)
         end
         -- harvestAllowed is a SiN policy attribute; native FS25 stores the
         -- resulting calendar gate as isHarvestable on each seasonal period.
+        if period.plantingAllowed ~= nil then
+            runtimePeriod.plantingAllowed = period.plantingAllowed
+        end
         if period.harvestAllowed ~= nil then
             if type(runtimePeriod.isHarvestable) ~= "boolean" then
                 state.unsupported = state.unsupported + 1
@@ -597,8 +630,12 @@ local function applyFruit(fruitType, entry, state, policyXmlFile)
             changed = true
         end
     end
-    if applyAnnualLifecycle(fruitType, entry, after, state) then
-        changed = true
+    for period, replacement in pairs(annualPlan) do
+        local mapping = after.periods[period].growthMapping
+        if not mappingsEqual(mapping, replacement) then
+            replaceMappingContents(mapping, replacement)
+            changed = true
+        end
     end
     return changed
 end
@@ -631,7 +668,9 @@ function SiNCropSettings.apply(manager, missionInfo)
                 addDiagnostic(state, entry.name .. ": not registered by active map")
             else
                 local changed = applyFruit(fruitType, entry, state, policy.xmlFile)
-                state.applied = state.applied + 1
+                if changed ~= nil then
+                    state.applied = state.applied + 1
+                end
                 if changed then
                     state.changed = state.changed + 1
                 end

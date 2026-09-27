@@ -168,7 +168,9 @@ class CropSettingsTests(unittest.TestCase):
                 "nameToGrowthState": state_ids,
                 "growthDataSeasonal": {"periods": {
                     name: {"plantingAllowed": False, "isHarvestable": False,
-                           "growthMapping": {99: 98}} for name in period_names
+                           "growthMapping": {state_ids[a]: state_ids[b]
+                                             for a, b in zip(fruit.state_chain, fruit.state_chain[1:])}}
+                    for name in period_names
                 }},
             }
             result = apply_policy(policy, [descriptor])
@@ -204,7 +206,7 @@ class CropSettingsTests(unittest.TestCase):
                                 "GREENBIG": 3, "HARVESTREADY": 4, "DEAD": 5},
             "growthDataSeasonal": {"periods": {
                 name: {"plantingAllowed": False, "isHarvestable": False,
-                       "growthMapping": {99: 98}} for name in names}},
+                       "growthMapping": {1: 2, 2: 3, 3: 4}} for name in names}},
         }
         result = apply_policy(policy, [descriptor])
         self.assertEqual(result.unsupported, 0)

@@ -13,7 +13,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install dependencies
-        run: python -m pip install -r requirements.txt
+        run: python -m pip install -r requirements-test.txt
       - name: Fast static and configuration validation
         run: python scripts/validate_repository.py
       - name: Run tests

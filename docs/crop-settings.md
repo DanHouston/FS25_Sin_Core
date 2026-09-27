@@ -2,7 +2,7 @@
 
 `SiN_FS25_Crop_Settings.zip` is a standalone multiplayer mod. It is deliberately
 separate from `FS25_SiN_Server` and from every map. The shipped
-`config/fruit-policy.xml` is the canonical SiN calendar (`policyVersion="0.3.0-full-calendar"`).
+`config/fruit-policy.xml` is the canonical SiN calendar (`policyVersion="0.3.1-verified-annual-cycles"`).
 Only fruit types registered by the active map are touched; absent map fruits are
 reported as skipped and are never fabricated.
 
@@ -77,6 +77,63 @@ until the harvest window, then the ready state is held until the following perio
 withers it. This preserves staggered maturity without inventing map stages or
 changing `growthTime`.
 
+For an `annual` entry, `preserveNative="true"` means **skip calling
+`FruitTypeDesc:loadGrowth` on the empty policy `<seasonal/>`**. It does not mean
+keep the original seasonal transitions. `buildAnnualLifecycle` prepares all
+twelve replacement `growthMapping` tables from the map's native path and the
+configured windows. `applyFruit` then installs those mappings in place and sets
+both `plantingAllowed` and `isHarvestable`. Without `lifecycle="annual"`, the
+preserve-native entries retain their original growth mappings.
+
+Before any annual mutation, each planting period is simulated from `invisible`
+to the final ready state, through the last harvest period and into `dead`.
+Missing initial/final states, a missing native path, malformed descriptors, or
+a cohort that cannot finish in the window reject the entire fruit policy; the
+original flags and mappings remain intact. There is no fallback that invents a
+path merely because the state names exist. Intermediate stages follow native
+edges; final readiness is held until the allowed window. The generated schedule
+does not preserve the map's original monthly timing or winter pauses: those
+timings are replaced by the configured SiN annual cycle.
+
+### Executable lifecycle verification
+
+Install test dependencies with `python -m pip install -r requirements-test.txt`,
+then run `python -m unittest tests.test_crop_settings tests.test_crop_settings_lua`.
+The Lua 5.1 harness executes the shipped script and XML through the map-load hook,
+with adapters for the GIANTS XML/fruit registry interfaces. It tests both sowing
+months for each of the following annual crops, using full native paths and
+shortened paths where the reference descriptors skip optional visual states:
+
+| Annual crop | Tested sowing periods | Ready state retained through | Withers in |
+| --- | --- | --- | --- |
+| Barley | Sep, Oct | Jun | Jul |
+| Canola | Aug, Sep | Jun | Jul |
+| Carrot | Apr, May | Nov | Dec |
+| Maize | Apr, May | Dec | Jan |
+| Cotton | Mar, Apr | Dec | Jan |
+| Green bean | Apr, May | Oct | Nov |
+| Long grain rice | Apr, May | Nov | Dec |
+| Oat | Mar, Apr | Oct | Nov |
+| Parsnip | Apr, May | Nov | Dec |
+| Pea | Mar, Apr | Sep | Oct |
+| Potato | Mar, Apr | Oct | Nov |
+| Red beet | Apr, May | Nov | Dec |
+| Rice | Apr, May | Nov | Dec |
+| Soybean | Apr, May | Dec | Jan |
+| Sugar beet | Mar, Apr | Dec | Jan |
+| Sunflower | Apr, May | Nov | Dec |
+| Wheat | Oct, Nov | Jul | Aug |
+| Sorghum (unchanged explicit policy) | Apr, May | Nov | Dec |
+
+Every tested cohort must traverse the selected path, first reach maturity within
+the crop's configured harvest window, and remain ready until that window ends.
+Different planting dates can converge on the same maturity period if both reach
+the pre-maturity state before the window opens. Tests also prove rejection is
+atomic and a repeat map-load hook does not reapply the policy. These are executable
+descriptor tests; density-map scheduling and actual harvesting remain live FS25
+validation responsibilities. Perennial/regrowth entries are not claimed to pass
+this annual-cycle test.
+
 Grass, Poplar, Sugarcane, Grapes, Olives and Spinach are treated as native
 perennial/regrowth lifecycles: SiN changes their planting and harvest gates while
 leaving map-owned growth transitions intact. Oilseed Radish has no normal harvest
@@ -127,7 +184,7 @@ For a live validation, build the ZIP, install the same bytes on server and every
 client, and restart/reload the save (policy application is map-load scoped).
 Verify one bounded log line like:
 
-`[SiN Crop Settings] policy=0.3.0-full-calendar map=<map> applied=<n> changed=<n> skipped=<n> unsupported=0 conflicts=0`
+`[SiN Crop Settings] policy=0.3.1-verified-annual-cycles map=<map> applied=<n> changed=<n> skipped=<n> unsupported=0 conflicts=0`
 
 Then inspect the in-game calendar against the table above. Existing crop
 density states are not rewritten; changing future calendar transitions should

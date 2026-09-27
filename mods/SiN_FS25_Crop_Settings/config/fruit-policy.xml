@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Canonical SiN crop calendar. Period names follow FS25's twelve seasonal periods. -->
-<cropPolicy schemaVersion="1" policyVersion="0.3.0-full-calendar"
+<cropPolicy schemaVersion="1" policyVersion="0.3.1-verified-annual-cycles"
     defaultPlantingAllowed="false" defaultHarvestAllowed="false">
     <fruits>
         <fruit name="BARLEY" enabled="true" plantPeriods="EARLY_AUTUMN,MID_AUTUMN"
