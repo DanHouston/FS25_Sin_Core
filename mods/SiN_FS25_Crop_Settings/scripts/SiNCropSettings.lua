@@ -60,6 +60,21 @@ local function parseGrowthTime(value)
     return number
 end
 
+local function parseState(xmlFile, key, primaryAttribute, aliasAttribute)
+    local raw = xmlFile:getString(key .. "#" .. primaryAttribute)
+    if raw == nil then
+        raw = xmlFile:getString(key .. "#" .. aliasAttribute)
+    end
+    if raw == nil then
+        return nil
+    end
+    local number = tonumber(raw)
+    if number ~= nil and number >= 0 then
+        return number
+    end
+    return normalizeName(raw)
+end
+
 local function addDiagnostic(state, message)
     if state.diagnosticCount < MAX_DIAGNOSTICS then
         logWarning(message)
@@ -114,9 +129,11 @@ local function parsePolicy()
                         if not xmlFile:hasProperty(updateKey) then
                             break
                         end
-                        local fromState = xmlFile:getInt(updateKey .. "#fromState")
-                        local toState = xmlFile:getInt(updateKey .. "#toState")
-                        if fromState ~= nil and toState ~= nil and fromState >= 0 and toState >= 0 then
+                        local fromState = parseState(xmlFile, updateKey, "fromState", "startState")
+                        local toState = parseState(xmlFile, updateKey, "toState", "endState")
+                        -- State tokens may be native numeric IDs or normalized names.
+                        -- Name resolution is performed against the active fruit descriptor.
+                        if fromState ~= nil and toState ~= nil then
                             table.insert(period.transitions, { fromState = fromState, toState = toState })
                         end
                         updateIndex = updateIndex + 1
@@ -158,6 +175,29 @@ local function findFruit(manager, wanted)
     for _, fruitType in pairs(fruitTypes(manager) or {}) do
         if fruitType ~= nil and normalizeName(fruitType.name) == wanted then
             return fruitType
+        end
+    end
+    return nil
+end
+
+local function resolveGrowthState(fruitType, value)
+    if type(value) == "number" then
+        return value
+    end
+    local mappings = { fruitType.growthStateIds, fruitType.nameToGrowthState }
+    for _, mapping in ipairs(mappings) do
+        if type(mapping) == "table" then
+            for name, state in pairs(mapping) do
+                if type(name) == "string" and type(state) == "number" and normalizeName(name) == value then
+                    return state
+                end
+            end
+        end
+    end
+    if fruitType.getGrowthStateByName ~= nil then
+        local state = fruitType:getGrowthStateByName(value)
+        if type(state) == "number" then
+            return state
         end
     end
     return nil
@@ -211,8 +251,13 @@ local function applyFruit(fruitType, entry, state)
                     addDiagnostic(state, entry.name .. ": growthMapping unsupported")
                 else
                     for _, transition in ipairs(period.transitions) do
-                        if runtimePeriod.growthMapping[transition.fromState] ~= transition.toState then
-                            runtimePeriod.growthMapping[transition.fromState] = transition.toState
+                        local fromState = resolveGrowthState(fruitType, transition.fromState)
+                        local toState = resolveGrowthState(fruitType, transition.toState)
+                        if fromState == nil or toState == nil then
+                            state.unsupported = state.unsupported + 1
+                            addDiagnostic(state, entry.name .. ": growth state name unresolved")
+                        elseif runtimePeriod.growthMapping[fromState] ~= toState then
+                            runtimePeriod.growthMapping[fromState] = toState
                             changed = true
                         end
                     end

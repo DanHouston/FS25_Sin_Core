@@ -10,7 +10,10 @@
                 <period name="EARLY_SUMMER" plantingAllowed="false" harvestAllowed="false"/>
                 <period name="MID_SUMMER" plantingAllowed="false" harvestAllowed="false"/>
                 <period name="LATE_SUMMER" plantingAllowed="false" harvestAllowed="true"/>
-                <period name="EARLY_AUTUMN" plantingAllowed="false" harvestAllowed="true"/>
+                <period name="EARLY_AUTUMN" plantingAllowed="false" harvestAllowed="true">
+                    <!-- Keep native harvest-ready Sorghum from withering before November. -->
+                    <growth><update startState="harvestReady" endState="harvestReady"/></growth>
+                </period>
                 <period name="MID_AUTUMN" plantingAllowed="false" harvestAllowed="true"/>
                 <period name="LATE_AUTUMN" plantingAllowed="false" harvestAllowed="true"/>
                 <period name="EARLY_WINTER" plantingAllowed="false" harvestAllowed="false"/>

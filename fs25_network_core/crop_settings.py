@@ -51,11 +51,15 @@ def _boolean(value: str | None, *, default: bool | None = None) -> bool | None:
     raise CropPolicyError(f"invalid boolean value: {value!r}")
 
 
-def _state(value: str, label: str) -> int:
+def _state(value: str, label: str) -> int | str:
+    text = str(value or "").strip()
     try:
-        result = int(value)
-    except (TypeError, ValueError) as error:
-        raise CropPolicyError(f"{label} must be an integer") from error
+        result = int(text)
+    except (TypeError, ValueError):
+        normalized = text.upper()
+        if not _NAME.fullmatch(normalized):
+            raise CropPolicyError(f"{label} must be a non-negative integer or state name")
+        return normalized
     if result < 0:
         raise CropPolicyError(f"{label} must be non-negative")
     return result
@@ -79,7 +83,7 @@ class PeriodPolicy:
     planting_allowed: bool | None = None
     harvest_allowed: bool | None = None
     growth_time: float | None = None
-    transitions: tuple[tuple[int, int], ...] = ()
+    transitions: tuple[tuple[int | str, int | str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -143,11 +147,13 @@ def parse_policy(source: str | bytes | Path) -> CropPolicy:
             if period_name in period_seen:
                 raise CropPolicyError(f"duplicate period policy: {name}/{period_name}")
             period_seen.add(period_name)
-            transitions: list[tuple[int, int]] = []
-            transition_seen: set[tuple[int, int]] = set()
+            transitions: list[tuple[int | str, int | str]] = []
+            transition_seen: set[tuple[int | str, int | str]] = set()
             for update in period.findall("./growth/update"):
-                pair = (_state(update.get("fromState", ""), "fromState"),
-                        _state(update.get("toState", ""), "toState"))
+                from_value = update.get("fromState") or update.get("startState") or ""
+                to_value = update.get("toState") or update.get("endState") or ""
+                pair = (_state(from_value, "fromState/startState"),
+                        _state(to_value, "toState/endState"))
                 if pair in transition_seen:
                     raise CropPolicyError(f"duplicate transition policy: {name}/{period_name}")
                 transition_seen.add(pair)
@@ -173,6 +179,17 @@ def _periods(descriptor: dict[str, Any]) -> dict[str, dict[str, Any]] | None:
     if isinstance(raw, list):
         return {_PERIOD_ORDER[index]: value for index, value in enumerate(raw)
                 if index < len(_PERIOD_ORDER) and isinstance(value, dict)}
+    return None
+
+
+def _resolve_state(descriptor: dict[str, Any], token: int | str) -> int | None:
+    if isinstance(token, int):
+        return token
+    for mapping in (descriptor.get("growthStateIds"), descriptor.get("nameToGrowthState")):
+        if isinstance(mapping, dict):
+            for key, value in mapping.items():
+                if str(key).strip().upper() == token and isinstance(value, int) and value >= 0:
+                    return value
     return None
 
 
@@ -228,8 +245,16 @@ def apply_policy(policy: CropPolicy, descriptors: list[dict[str, Any]]) -> Apply
                     result.diagnostics.append(f"{name}/{period.name}: growthMapping unsupported")
                 else:
                     for from_state, to_state in period.transitions:
-                        if mapping.get(from_state) != to_state:
-                            mapping[from_state] = to_state
+                        resolved_from = _resolve_state(descriptor, from_state)
+                        resolved_to = _resolve_state(descriptor, to_state)
+                        if resolved_from is None or resolved_to is None:
+                            result.unsupported += 1
+                            result.diagnostics.append(
+                                f"{name}/{period.name}: growth state name unresolved"
+                            )
+                            continue
+                        if mapping.get(resolved_from) != resolved_to:
+                            mapping[resolved_from] = resolved_to
                             fruit_changed = True
         if harvest_policy:
             # The native FS25 descriptor commonly exposes harvestability as

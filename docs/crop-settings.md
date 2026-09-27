@@ -38,11 +38,19 @@ The Sorghum probe intentionally changes only planting and harvest periods:
 - harvest: `LATE_SUMMER`, `EARLY_AUTUMN`, `MID_AUTUMN`, `LATE_AUTUMN`
   (August-November).
 
-No `growthTime` or `growthMapping` entries are shipped. Native Sorghum
-transitions still determine when a field reaches a harvest-ready state; the
-policy only permits that state to be harvested in the requested window. A
-policy change requires a normal map/save reload; the script does not
-continuously overwrite native state.
+- The native `EARLY_AUTUMN` `harvestReady -> dead` transition is replaced with
+  `harvestReady -> harvestReady`; otherwise the crop would wither before the
+  requested November end date.
+- No `growthTime` is changed, and no other Sorghum transition is changed.
+
+Native Sorghum transitions still determine when a field reaches a harvest-ready
+state; the policy only holds that state through the requested window and gates
+harvesting to those periods. A policy change requires a normal map/save reload;
+the script does not continuously overwrite native state.
+
+Growth updates may use native state names (`startState`/`endState`) or validated
+numeric state IDs. Names are resolved against the active fruit descriptor and
+unresolved states fail closed.
 
 The reviewed schema for a future entry is:
 
