@@ -40,6 +40,7 @@ class DeploymentPackagingTests(unittest.TestCase):
             restart = output / "Restart-SiN-Agent.ps1"
             self.assertTrue((output / "sin-agent.zip").is_file())
             self.assertTrue((output / "FS25_SiN_Server.zip").is_file())
+            self.assertTrue((output / "SiN_FS25_Crop_Settings.zip").is_file())
             self.assertTrue((output / "SHA256SUMS.txt").is_file())
             self.assertTrue(updater.is_file())
             self.assertTrue(client.is_file())
@@ -50,6 +51,7 @@ class DeploymentPackagingTests(unittest.TestCase):
             sums = (output / "SHA256SUMS.txt").read_text(encoding="utf-8")
             self.assertIn("sin-agent.zip", sums)
             self.assertIn("FS25_SiN_Server.zip", sums)
+            self.assertIn("SiN_FS25_Crop_Settings.zip", sums)
             self.assertIn("Update-SiN.ps1", sums)
             self.assertIn("Update-SiN-Client.ps1", sums)
             self.assertIn("Restart-SiN-Agent.ps1", sums)
@@ -57,7 +59,7 @@ class DeploymentPackagingTests(unittest.TestCase):
                 line.split(None, 1)[1]: line.split(None, 1)[0]
                 for line in sums.splitlines() if line.strip()
             }
-            for asset in ("sin-agent.zip", "FS25_SiN_Server.zip", "Update-SiN.ps1", "Update-SiN-Client.ps1", "Restart-SiN-Agent.ps1"):
+            for asset in ("sin-agent.zip", "FS25_SiN_Server.zip", "SiN_FS25_Crop_Settings.zip", "Update-SiN.ps1", "Update-SiN-Client.ps1", "Restart-SiN-Agent.ps1"):
                 self.assertEqual(hashlib.sha256((output / asset).read_bytes()).hexdigest(),
                                  checksum_entries[asset])
             with ZipFile(output / "FS25_SiN_Server.zip") as archive:
@@ -71,10 +73,19 @@ class DeploymentPackagingTests(unittest.TestCase):
                 agent_source = archive.read("fs25_network_core/agent.py").decode("utf-8")
                 self.assertIn("process_events_once(self.event_batch_size)", agent_source)
                 self.assertIn("_event_minute_sequence", agent_source)
+            with ZipFile(output / "SiN_FS25_Crop_Settings.zip") as archive:
+                self.assertEqual(set(archive.namelist()), {
+                    "modDesc.xml", "scripts/SiNCropSettings.lua", "config/fruit-policy.xml"
+                })
+                self.assertIn("FruitTypeManager.loadMapData", archive.read("scripts/SiNCropSettings.lua").decode("utf-8"))
             self.assertFalse((output / "FS25_SiN_NetworkLocal.zip").exists())
             self.assertEqual(
                 hashlib.sha256((output / "FS25_SiN_Server.zip").read_bytes()).hexdigest(),
                 manifest["server_sha256"],
+            )
+            self.assertEqual(
+                hashlib.sha256((output / "SiN_FS25_Crop_Settings.zip").read_bytes()).hexdigest(),
+                manifest["crop_settings_sha256"],
             )
 
     def test_fs25_lua_gate_rejects_lua52_control_flow(self):

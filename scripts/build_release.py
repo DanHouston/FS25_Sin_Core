@@ -19,6 +19,7 @@ from fs25_network_core.lua_validation import validate_fs25_lua_source
 from fs25_network_core.release_validation import validate_release_directory
 AGENT_FILES = ("fs25_network_core/__init__.py", "fs25_network_core/agent.py")
 MOD_ASSET = "FS25_SiN_Server.zip"
+CROP_MOD_ASSET = "SiN_FS25_Crop_Settings.zip"
 CLIENT_UPDATER_ASSET = "Update-SiN-Client.ps1"
 AGENT_RESTART_ASSET = "Restart-SiN-Agent.ps1"
 
@@ -72,6 +73,34 @@ def build_mod(destination):
                 validate_fs25_lua_source(archive.read(name), name)
 
 
+def build_crop_mod(destination):
+    """Build the standalone crop policy mod without map/server dependencies."""
+    source = ROOT / "mods" / "SiN_FS25_Crop_Settings"
+    descriptor = source / "modDesc.xml"
+    import xml.etree.ElementTree as ET
+    descriptor_xml = ET.parse(descriptor)
+    source_names = [node.get("filename") for node in descriptor_xml.findall("./extraSourceFiles/sourceFile")]
+    if any(not name or Path(name).is_absolute() or ".." in Path(name).parts for name in source_names):
+        raise ValueError("SiN_FS25_Crop_Settings descriptor contains an invalid source file")
+    config_name = "config/fruit-policy.xml"
+    names_to_package = ["modDesc.xml"] + source_names + [config_name]
+    for name in names_to_package:
+        if not (source / name).is_file():
+            raise ValueError(f"SiN_FS25_Crop_Settings source is missing: {name}")
+    for lua_path in source.rglob("*.lua"):
+        validate_fs25_lua_source(lua_path.read_bytes(), str(lua_path.relative_to(ROOT)))
+    files = [(name, source / name) for name in names_to_package]
+    zip_files(destination, files)
+    with ZipFile(destination) as archive:
+        names = set(archive.namelist())
+        if set(names_to_package) != names:
+            raise ValueError("SiN_FS25_Crop_Settings ZIP does not match its declared sources")
+        for name in names:
+            if name.lower().endswith(".lua"):
+                validate_fs25_lua_source(archive.read(name), name)
+        ET.fromstring(archive.read(config_name))
+
+
 def build_agent(destination):
     files = [(name, ROOT / name) for name in AGENT_FILES]
     zip_files(destination, files)
@@ -107,8 +136,10 @@ def build(version, output):
         legacy_mod.unlink()
     agent = output / "sin-agent.zip"
     mod = output / MOD_ASSET
+    crop_mod = output / CROP_MOD_ASSET
     build_agent(agent)
     build_mod(mod)
+    build_crop_mod(crop_mod)
     updater = output / "Update-SiN.ps1"
     shutil.copy2(ROOT / "scripts" / "Update-SiN.ps1", updater)
     client_updater = output / CLIENT_UPDATER_ASSET
@@ -128,6 +159,7 @@ def build(version, output):
         "build_time_utc": datetime.now(timezone.utc).isoformat(),
         "agent_sha256": sha256(agent),
         "server_sha256": sha256(mod),
+        "crop_settings_sha256": sha256(crop_mod),
         "updater_sha256": sha256(updater),
         "client_updater_sha256": sha256(client_updater),
         "agent_restart_sha256": sha256(agent_restart),
@@ -144,7 +176,7 @@ def build(version, output):
         "github_run_id": os.environ.get("GITHUB_RUN_ID"),
     }
     (output / "build-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    checksummed = (agent, mod, updater, client_updater, agent_restart, campaign_report, live_manifest)
+    checksummed = (agent, mod, crop_mod, updater, client_updater, agent_restart, campaign_report, live_manifest)
     (output / "SHA256SUMS.txt").write_text(
         "".join(f"{sha256(path)}  {path.name}\n" for path in checksummed), encoding="utf-8")
     validate_release_directory(output, expected_version=version)

@@ -19,6 +19,7 @@ For a server record such as `server_key=sin-fs25-01` and
     manifest.json
     mods\
         FS25_SiN_Server.zip
+        SiN_FS25_Crop_Settings.zip
         ThirdPartyMod.zip
 <publication-root>\sin-fs25-01\Releases\2026.09.22\
     SiN Test Server 01-Modpack.zip

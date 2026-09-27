@@ -282,3 +282,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 
 Rollback restores the latest backup and restarts only the Agent. It does not
 rewrite server bindings, MongoDB state, world history, or FS25 save data.
+## Crop settings mod
+
+Releases also contain `SiN_FS25_Crop_Settings.zip`. It is an independent
+server/client mod and must be included in the approved modpack with identical
+bytes on every participant. The production policy is currently an intentional
+no-op; changing `config/fruit-policy.xml` requires a new release and a map/save
+reload. Verify the ZIP with the release `SHA256SUMS.txt` before copying it into
+the modpack source directory.

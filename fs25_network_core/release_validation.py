@@ -11,6 +11,7 @@ from zipfile import BadZipFile, ZipFile
 from defusedxml import ElementTree
 
 from fs25_network_core.lua_validation import validate_fs25_lua_source
+from fs25_network_core.crop_settings import CropPolicyError, parse_policy
 
 
 class ReleaseValidationError(ValueError):
@@ -20,6 +21,7 @@ class ReleaseValidationError(ValueError):
 RELEASE_ASSETS = frozenset({
     "build-manifest.json",
     "FS25_SiN_Server.zip",
+    "SiN_FS25_Crop_Settings.zip",
     "integration-campaign.json",
     "live-validation-manifest.json",
     "Restart-SiN-Agent.ps1",
@@ -31,6 +33,7 @@ RELEASE_ASSETS = frozenset({
 CHECKSUM_ASSETS = frozenset({
     "sin-agent.zip",
     "FS25_SiN_Server.zip",
+    "SiN_FS25_Crop_Settings.zip",
     "Update-SiN.ps1",
     "Update-SiN-Client.ps1",
     "Restart-SiN-Agent.ps1",
@@ -115,6 +118,37 @@ def _validate_agent_archive(path: Path) -> None:
         raise ReleaseValidationError("sin-agent.zip has an unexpected runtime layout")
 
 
+def _validate_crop_archive(path: Path) -> None:
+    expected_required = {"modDesc.xml", "scripts/SiNCropSettings.lua", "config/fruit-policy.xml"}
+    try:
+        with ZipFile(path) as archive:
+            names = set(_safe_archive_names(archive, path.name))
+            if not expected_required.issubset(names):
+                raise ReleaseValidationError("SiN_FS25_Crop_Settings.zip is missing required files")
+            try:
+                descriptor = ElementTree.fromstring(archive.read("modDesc.xml"))
+                policy_bytes = archive.read("config/fruit-policy.xml")
+                policy = ElementTree.fromstring(policy_bytes)
+            except (ValueError, ElementTree.ParseError) as error:
+                raise ReleaseValidationError("SiN_FS25_Crop_Settings.zip has invalid XML") from error
+            if descriptor.get("descVersion") != "92":
+                raise ReleaseValidationError("SiN_FS25_Crop_Settings.zip has an unexpected descVersion")
+            source_names = [node.get("filename") for node in descriptor.findall("./extraSourceFiles/sourceFile")]
+            if source_names != ["scripts/SiNCropSettings.lua"]:
+                raise ReleaseValidationError("SiN_FS25_Crop_Settings.zip has unexpected source files")
+            if policy.tag != "cropPolicy" or policy.get("schemaVersion") != "1":
+                raise ReleaseValidationError("SiN_FS25_Crop_Settings.zip has an invalid policy schema")
+            try:
+                parse_policy(policy_bytes)
+            except CropPolicyError as error:
+                raise ReleaseValidationError("SiN_FS25_Crop_Settings.zip has an invalid crop policy") from error
+            for member in names:
+                if member.lower().endswith(".lua"):
+                    validate_fs25_lua_source(archive.read(member), member)
+    except BadZipFile as error:
+        raise ReleaseValidationError("SiN_FS25_Crop_Settings.zip is not a valid ZIP archive") from error
+
+
 def validate_release_directory(root: str | Path, *, expected_version: str | None = None,
                                require_clean: bool = False) -> dict:
     """Validate the complete release output, including packaged Lua bytes."""
@@ -148,6 +182,7 @@ def validate_release_directory(root: str | Path, *, expected_version: str | None
     manifest_fields = {
         "sin-agent.zip": "agent_sha256",
         "FS25_SiN_Server.zip": "server_sha256",
+        "SiN_FS25_Crop_Settings.zip": "crop_settings_sha256",
         "Update-SiN.ps1": "updater_sha256",
         "Update-SiN-Client.ps1": "client_updater_sha256",
         "Restart-SiN-Agent.ps1": "agent_restart_sha256",
@@ -169,5 +204,5 @@ def validate_release_directory(root: str | Path, *, expected_version: str | None
         raise ReleaseValidationError("live validation manifest required scenarios are invalid")
     _validate_agent_archive(root / "sin-agent.zip")
     _validate_server_archive(root / "FS25_SiN_Server.zip")
+    _validate_crop_archive(root / "SiN_FS25_Crop_Settings.zip")
     return manifest
-

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Intentionally empty: no production crop behavior is selected yet. -->
+<cropPolicy schemaVersion="1" policyVersion="0.1.0">
+    <fruits/>
+</cropPolicy>

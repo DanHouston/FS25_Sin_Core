@@ -6,6 +6,7 @@ modifies the FS25 VM. A `vMAJOR.MINOR.PATCH` tag creates a release containing:
 ```text
 sin-agent.zip
 FS25_SiN_Server.zip
+SiN_FS25_Crop_Settings.zip
 build-manifest.json
 SHA256SUMS.txt
 Update-SiN.ps1
@@ -17,6 +18,10 @@ The Agent archive contains only `fs25_network_core/__init__.py` and
 `fs25_network_core/agent.py`; it has no Mongo dependency or credentials. The
 FS25_SiN_Server archive is rebuilt from `mods/FS25_SiN_Server` and verified
 to contain `modDesc.xml` and `NetworkLocal.lua` at its archive root.
+`SiN_FS25_Crop_Settings.zip` is a separate, map-independent multiplayer mod;
+install the exact release bytes on the server and all clients (normally via
+the approved modpack). Its production policy is currently an intentional
+no-op until a reviewed crop calendar is selected.
 The release builder also validates every packaged Lua source against the FS25
 Lua runtime dialect (including rejection of Lua 5.2+ `goto`/label syntax) both
 before and after archive creation. A GIANTS runtime load test remains required,

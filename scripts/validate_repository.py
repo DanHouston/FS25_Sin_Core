@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from fs25_network_core.lua_validation import validate_fs25_lua_source
+from fs25_network_core.crop_settings import CropPolicyError, parse_policy
 from fs25_network_core.release_validation import REQUIRED_SCENARIOS
 
 
@@ -97,6 +98,26 @@ def _validate_mod_descriptor(root: Path) -> None:
             raise RepositoryValidationError(f"FS25_SiN_Server source is missing: {name}")
 
 
+def _validate_crop_mod(root: Path) -> None:
+    mod_root = root / "mods" / "SiN_FS25_Crop_Settings"
+    try:
+        descriptor = ElementTree.parse(mod_root / "modDesc.xml").getroot()
+    except (OSError, ElementTree.ParseError) as error:
+        raise RepositoryValidationError("SiN_FS25_Crop_Settings/modDesc.xml is invalid") from error
+    if descriptor.get("descVersion") != "92":
+        raise RepositoryValidationError("SiN_FS25_Crop_Settings/modDesc.xml has an unexpected descVersion")
+    source_names = [node.get("filename") for node in descriptor.findall("./extraSourceFiles/sourceFile")]
+    if source_names != ["scripts/SiNCropSettings.lua"]:
+        raise RepositoryValidationError("SiN_FS25_Crop_Settings has unexpected source files")
+    for name in source_names + ["config/fruit-policy.xml"]:
+        if not name or Path(name).is_absolute() or ".." in Path(name).parts or not (mod_root / name).is_file():
+            raise RepositoryValidationError(f"SiN_FS25_Crop_Settings source is missing or unsafe: {name}")
+    try:
+        parse_policy(mod_root / "config" / "fruit-policy.xml")
+    except CropPolicyError as error:
+        raise RepositoryValidationError(f"SiN_FS25_Crop_Settings policy is invalid: {error}") from error
+
+
 def _validate_python_sources(root: Path) -> int:
     files = sorted(path for base in (root / "fs25_network_core", root / "tests", root / "scripts")
                    for path in base.rglob("*.py"))
@@ -117,7 +138,8 @@ def _validate_imports() -> int:
 
 
 def _validate_lua_sources(root: Path) -> int:
-    files = sorted((root / "mods" / "FS25_SiN_Server").rglob("*.lua"))
+    files = sorted(path for mod in ("FS25_SiN_Server", "SiN_FS25_Crop_Settings")
+                   for path in (root / "mods" / mod).rglob("*.lua"))
     for path in files:
         validate_fs25_lua_source(path.read_bytes(), str(path.relative_to(root)))
     return len(files)
@@ -134,6 +156,7 @@ def validate_repository(root: str | Path = ROOT, *, import_modules: bool = True)
     _validate_server_config(root / "servers.example.json")
     _validate_live_manifest(root / "docs" / "live-validation-manifest.json")
     _validate_mod_descriptor(root)
+    _validate_crop_mod(root)
     return {
         "python_files": python_files,
         "imported_modules": imported_modules,
@@ -157,4 +180,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
