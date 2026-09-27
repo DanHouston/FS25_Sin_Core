@@ -67,8 +67,8 @@ job-card content in place during startup, so attribution is retained across
 card refreshes and bot restarts. Compensation is rendered as a
 currency amount (for example `Fixed - $1` or `Hourly - $250/hour`). Without
 that channel configuration, the durable slash commands remain available.
-Cancelled contracts have their public job cards removed during cancellation or
-the next JiN startup; the contract record remains available for history.
+Cancelled contracts remain as durable history cards. Their cards show the
+cancellation identity and timestamp, and all obsolete controls are disabled.
 
 The jobs channel is guild-level deployment configuration, not a server or
 business-logic constant. The checked-in `discord.json` carries the current
@@ -131,7 +131,8 @@ REQUIRED` until a verified GIANTS runtime API and replication path is proven.
 - Money: `/balance`, `/deposit`, `/withdraw` (withdrawal availability is
   server-configured).
 - Contracts: `/contract_create`, `/contract_list`, `/contract_view`,
-  `/contract_accept`, `/contract_cancel`, `/contract_complete`.
+  `/contract_accept`, `/contract_complete`. Cancellation is performed from the
+  posted contract card by its creator.
 - Invoices: `/invoice_create`, `/invoice_list`, `/invoice_view`,
   `/invoice_pay`, `/invoice_cancel`.
 - Community events: `/event_create`, `/event_list`, `/event_view`,

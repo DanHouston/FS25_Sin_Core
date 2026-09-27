@@ -96,13 +96,28 @@ class BusinessWorkflowTests(unittest.TestCase):
         self.assertEqual(update["$set"]["marketplace_message_id"], "456")
         self.assertNotIn("status", update["$set"])
 
-    def test_retiring_marketplace_message_keeps_contract_state_and_clears_location(self):
+    def test_contract_cancellation_persists_attribution_for_card_refresh(self):
         service = ContractService(self.database)
-        service.retire_marketplace_message("contract-1")
-        update = self.db.contracts.update_one.call_args.args[1]
-        self.assertIn("marketplace_retired_at", update["$set"])
-        self.assertEqual(update["$unset"], {"marketplace_channel_id": "", "marketplace_message_id": ""})
-        self.assertNotIn("status", update["$set"])
+        self.db.contracts.find_one.side_effect = [
+            {"contract_id": "contract-1", "creator_discord_id": "creator", "status": "open"},
+            {"contract_id": "contract-1", "creator_discord_id": "creator", "status": "cancelled",
+             "cancelled_by": "creator", "cancelled_display_name": "Matt70", "cancelled_at": "now"},
+        ]
+        self.db.contracts.update_one.return_value.modified_count = 1
+        cancelled = service.cancel("contract-1", "creator", "No longer needed", actor_name="Matt70")
+        update = self.db.contracts.update_one.call_args.args[1]["$set"]
+        self.assertEqual(update["cancelled_by"], "creator")
+        self.assertEqual(update["cancelled_display_name"], "Matt70")
+        self.assertIn("cancelled_at", update)
+        self.assertEqual(cancelled["cancelled_display_name"], "Matt70")
+
+    def test_contract_cancellation_remains_creator_authorized(self):
+        service = ContractService(self.database)
+        self.db.contracts.find_one.return_value = {
+            "contract_id": "contract-1", "creator_discord_id": "creator", "status": "open"}
+        with self.assertRaisesRegex(ValueError, "creator"):
+            service.cancel("contract-1", "other", "No longer needed")
+        self.db.contracts.update_one.assert_not_called()
 
     def test_invoice_payment_calls_idempotent_wallet_transfer(self):
         banking = MagicMock()

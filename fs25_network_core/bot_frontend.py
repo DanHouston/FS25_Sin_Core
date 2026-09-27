@@ -167,6 +167,16 @@ def contract_acceptor_text(record):
     return f"{display_name} ({mention})" if display_name else mention
 
 
+def contract_canceller_text(record):
+    """Render the persisted cancellation identity, with a mention fallback."""
+    discord_id = record.get("cancelled_by")
+    if not discord_id:
+        return "Unknown SiN member"
+    display_name = str(record.get("cancelled_display_name") or "").strip()
+    mention = f"<@{discord_id}>"
+    return f"{display_name} ({mention})" if display_name else mention
+
+
 class ContractView(discord.ui.View):
     """Persistent marketplace action backed by the durable contract state."""
 
@@ -176,6 +186,7 @@ class ContractView(discord.ui.View):
         self.contract_id = str(contract_id)
         # Persistent views need a distinct routing key per contract card.
         self.children[0].custom_id = f"sin:contract:accept:{self.contract_id}"
+        self.children[1].custom_id = f"sin:contract:cancel:{self.contract_id}"
 
     @discord.ui.button(label="Accept contract", style=discord.ButtonStyle.success,
                        custom_id="sin:contract:accept")
@@ -190,6 +201,24 @@ class ContractView(discord.ui.View):
             return
         button.disabled = True
         button.label = "Accepted"
+        await interaction.response.edit_message(content=self.bot.contract_card_text(record), view=self)
+
+    @discord.ui.button(label="Cancel Contract", style=discord.ButtonStyle.danger,
+                       custom_id="sin:contract:cancel")
+    async def cancel_contract(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            record = await asyncio.to_thread(
+                self.bot.contracts.cancel, self.contract_id, str(interaction.user.id),
+                "Cancelled from contract card",
+                actor_name=(getattr(interaction.user, "display_name", None)
+                            or getattr(interaction.user, "name", None)))
+        except ValueError as error:
+            await interaction.response.send_message(str(error), ephemeral=True)
+            return
+        self.children[0].label = "Unavailable"
+        for child in self.children:
+            child.disabled = True
+        button.label = "Cancelled"
         await interaction.response.edit_message(content=self.bot.contract_card_text(record), view=self)
 
 
@@ -1154,17 +1183,6 @@ class NetworkBot(discord.Client):
         async def contract_accept_autocomplete(interaction: discord.Interaction, current: str):
             return await contract_choices(interaction, current)
 
-        @self.tree.command(name="contract_cancel", description="Cancel your SiN contract")
-        @app_commands.check(channel_check)
-        async def contract_cancel(interaction: discord.Interaction, contract_id: str, reason: str):
-            record = await asyncio.to_thread(self.contracts.cancel, contract_id, str(interaction.user.id), reason)
-            await interaction.response.send_message(f"Contract `{record['contract_id']}` cancelled.", ephemeral=True)
-            await self.retire_contract_card(record)
-
-        @contract_cancel.autocomplete("contract_id")
-        async def contract_cancel_autocomplete(interaction: discord.Interaction, current: str):
-            return await contract_choices(interaction, current)
-
         @self.tree.command(name="contract_complete", description="Complete a SiN contract")
         @app_commands.check(channel_check)
         async def contract_complete(interaction: discord.Interaction, contract_id: str, note: str = ""):
@@ -1481,6 +1499,9 @@ class NetworkBot(discord.Client):
         if record.get("acceptor_discord_id") and record.get("accepted_at"):
             text += (f"\nAccepted by: {contract_acceptor_text(record)}"
                      f"\nAccepted: {discord_timestamp(record.get('accepted_at'))}")
+        if record.get("status") == "cancelled" and record.get("cancelled_at"):
+            text += (f"\nCancelled by: {contract_canceller_text(record)}"
+                     f"\nCancelled: {discord_timestamp(record.get('cancelled_at'))}")
         return text
 
     @staticmethod
@@ -1631,16 +1652,13 @@ class NetworkBot(discord.Client):
             message_id = record.get("marketplace_message_id")
             if not channel_id or not message_id:
                 continue
-            if record.get("status") == "cancelled":
-                await self.retire_contract_card(record)
-                continue
             try:
                 channel = self.get_channel(int(channel_id))
                 if channel is None:
                     channel = await self.fetch_channel(int(channel_id))
                 message = await channel.fetch_message(int(message_id))
                 view = self.contract_view(record)
-                if record.get("status") == "open":
+                if record.get("status") not in {"cancelled", "completed"}:
                     self.add_view(view, message_id=int(message_id))
                 content = self.contract_card_text(record)
                 if getattr(message, "content", None) != content:
@@ -1649,34 +1667,18 @@ class NetworkBot(discord.Client):
                 logging.warning("Contract card startup refresh unavailable contract=%s: %s",
                                 record.get("contract_id"), error)
 
-    async def retire_contract_card(self, record):
-        """Delete a cancelled public card and retire its stored location."""
-        channel_id = record.get("marketplace_channel_id")
-        message_id = record.get("marketplace_message_id")
-        if not channel_id or not message_id:
-            return False
-        try:
-            channel = self.get_channel(int(channel_id))
-            if channel is None:
-                channel = await self.fetch_channel(int(channel_id))
-            message = await channel.fetch_message(int(message_id))
-            await message.delete()
-        except discord.NotFound:
-            pass
-        except (discord.DiscordException, TypeError, ValueError) as error:
-            logging.warning("Cancelled contract card could not be retired contract=%s: %s",
-                            record.get("contract_id"), error)
-            return False
-        await asyncio.to_thread(self.contracts.retire_marketplace_message, record["contract_id"])
-        return True
-
     def contract_view(self, record):
-        """Build the persisted card view without re-enabling accepted cards."""
+        """Build the persisted card view without re-enabling terminal actions."""
         view = ContractView(self, record["contract_id"])
-        if record.get("status") != "open":
-            button = view.children[0]
-            button.disabled = True
-            button.label = "Accepted" if record.get("status") == "accepted" else str(record.get("status", "closed")).title()
+        status = record.get("status")
+        if status != "open":
+            accept_button = view.children[0]
+            accept_button.disabled = True
+            accept_button.label = "Accepted" if status in {"accepted", "in_progress"} else "Unavailable"
+        if status in {"cancelled", "completed"}:
+            cancel_button = view.children[1]
+            cancel_button.disabled = True
+            cancel_button.label = "Cancelled" if status == "cancelled" else "Completed"
         return view
 
     async def restore_event_views(self):

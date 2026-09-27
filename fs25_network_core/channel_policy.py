@@ -16,7 +16,7 @@ COMMAND_CHANNELS = {
 # boundary. Staff/operator workflows remain channel-scoped below.
 UNRESTRICTED_MEMBER_COMMANDS = {
     "register", "farm_request", "farm_status", "balance", "deposit", "withdraw",
-    "contract_create", "contract_list", "contract_view", "contract_accept", "contract_cancel",
+    "contract_create", "contract_list", "contract_view", "contract_accept",
     "contract_complete", "invoice_create", "invoice_list", "invoice_view", "invoice_pay",
     "invoice_cancel", "event_list", "event_view", "event_join", "event_leave",
 }

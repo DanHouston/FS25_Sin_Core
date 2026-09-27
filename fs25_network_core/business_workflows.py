@@ -284,13 +284,6 @@ class ContractService:
                        "marketplace_message_id": str(message_id),
                        "marketplace_updated_at": _now()}})
 
-    def retire_marketplace_message(self, contract_id):
-        """Forget a removed marketplace card while retaining contract history."""
-        self.db.contracts.update_one(
-            {"contract_id": str(contract_id)},
-            {"$set": {"marketplace_retired_at": _now()},
-             "$unset": {"marketplace_channel_id": "", "marketplace_message_id": ""}})
-
     def accept(self, contract_id, actor_id, farm_id=None, actor_name=None):
         existing = self.get(contract_id)
         if existing and existing.get("world_id"):
@@ -309,7 +302,7 @@ class ContractService:
             raise ValueError("Contract is unavailable or cannot be accepted by this actor")
         return self.get(contract_id)
 
-    def cancel(self, contract_id, actor_id, reason, staff=False):
+    def cancel(self, contract_id, actor_id, reason, staff=False, actor_name=None):
         reason = _text(reason, "Cancellation reason", 300)
         record = self.get(contract_id)
         if record and record.get("world_id"):
@@ -318,10 +311,13 @@ class ContractService:
             raise ValueError("Only the contract creator or staff can cancel this contract")
         if record.get("status") in {"completed", "cancelled"}:
             raise ValueError("Contract is already terminal")
+        cancellation = {"status": "cancelled", "cancellation_reason": reason,
+                        "cancelled_at": _now(), "cancelled_by": str(actor_id)}
+        if actor_name:
+            cancellation["cancelled_display_name"] = _text(actor_name, "Canceller display name", 80)
         result = self.db.contracts.update_one(
             {"contract_id": str(contract_id), "status": {"$nin": ["completed", "cancelled"]}},
-            {"$set": {"status": "cancelled", "cancellation_reason": reason,
-                      "cancelled_at": _now(), "cancelled_by": str(actor_id)}})
+            {"$set": cancellation})
         if result.modified_count != 1:
             raise ValueError("Contract changed before it could be cancelled")
         return self.get(contract_id)

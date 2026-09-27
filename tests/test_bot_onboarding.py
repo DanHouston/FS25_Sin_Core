@@ -284,6 +284,7 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(contract_view.timeout, None)
         self.assertEqual(event_view.timeout, None)
         self.assertEqual(contract_view.children[0].custom_id, "sin:contract:accept:contract-1")
+        self.assertEqual(contract_view.children[1].custom_id, "sin:contract:cancel:contract-1")
         self.assertEqual(event_view.children[0].custom_id, "sin:event:join:event-1")
         self.assertEqual(event_view.children[1].custom_id, "sin:event:leave:event-1")
 
@@ -321,19 +322,74 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         message.edit.assert_awaited_once()
         self.assertIn("Accepted by: Matt70 (<@42>)", message.edit.await_args.kwargs["content"])
         self.assertIn("Compensation: Fixed - $1", message.edit.await_args.kwargs["content"])
-        self.bot.add_view.assert_not_called()
+        self.bot.add_view.assert_called_once()
 
-    async def test_startup_removes_cancelled_contract_card(self):
-        record = {"contract_id": "contract-cancelled", "status": "cancelled",
-                  "marketplace_channel_id": 123, "marketplace_message_id": 99}
-        message = SimpleNamespace(delete=AsyncMock())
+    async def test_startup_refreshes_cancelled_contract_card_and_disables_controls(self):
+        record = {
+            "contract_id": "contract-cancelled", "title": "Harvest Field 44", "description": "Sorghum",
+            "work_type": "harvesting", "fields": "44", "server_name": "Hobo",
+            "compensation_type": "fixed", "rate": 1, "creator_discord_id": "creator",
+            "status": "cancelled", "cancelled_by": "42", "cancelled_display_name": "Matt70",
+            "cancelled_at": __import__("datetime").datetime(2026, 9, 27, 12,
+                                                               tzinfo=__import__("datetime").timezone.utc),
+            "marketplace_channel_id": 123, "marketplace_message_id": 99,
+        }
+        message = SimpleNamespace(content="old card", edit=AsyncMock())
         channel = SimpleNamespace(fetch_message=AsyncMock(return_value=message))
         self.bot.contracts.marketplace = MagicMock(return_value=[record])
-        self.bot.contracts.retire_marketplace_message = MagicMock()
         self.bot.get_channel = MagicMock(return_value=channel)
+        self.bot.add_view = MagicMock()
         await self.bot.restore_contract_views()
-        message.delete.assert_awaited_once()
-        self.bot.contracts.retire_marketplace_message.assert_called_once_with("contract-cancelled")
+        message.edit.assert_awaited_once()
+        card = message.edit.await_args.kwargs["content"]
+        self.assertIn("Status: Cancelled", card)
+        self.assertIn("Cancelled by: Matt70 (<@42>)", card)
+        self.assertIn("Cancelled: <t:1790510400:F>", card)
+        self.bot.add_view.assert_not_called()
+
+    async def test_contract_card_cancel_button_uses_authoritative_creator_check(self):
+        view = ContractView(self.bot, "contract-1")
+        interaction = MagicMock()
+        interaction.user.id = "other"
+        interaction.user.display_name = "Other"
+        interaction.user.name = "Other"
+        interaction.response.send_message = AsyncMock()
+        self.bot.contracts.cancel = MagicMock(
+            side_effect=ValueError("Only the contract creator or staff can cancel this contract"))
+
+        await view.cancel_contract.callback(interaction)
+
+        self.bot.contracts.cancel.assert_called_once()
+        interaction.response.send_message.assert_awaited_once_with(
+            "Only the contract creator or staff can cancel this contract", ephemeral=True)
+        interaction.response.edit_message.assert_not_called()
+
+    async def test_contract_card_cancel_button_persists_and_disables_controls(self):
+        view = ContractView(self.bot, "contract-1")
+        interaction = MagicMock()
+        interaction.user.id = "creator"
+        interaction.user.display_name = "Matt70"
+        interaction.user.name = "Matt70"
+        interaction.response.edit_message = AsyncMock()
+        cancelled = {
+            "contract_id": "contract-1", "title": "Harvest Field 44", "description": "Sorghum",
+            "work_type": "harvesting", "fields": "44", "server_name": "Hobo",
+            "compensation_type": "fixed", "rate": 1, "creator_discord_id": "creator",
+            "status": "cancelled", "cancelled_by": "creator", "cancelled_display_name": "Matt70",
+            "cancelled_at": __import__("datetime").datetime(2026, 9, 27, 12,
+                                                               tzinfo=__import__("datetime").timezone.utc),
+        }
+        self.bot.contracts.cancel = MagicMock(return_value=cancelled)
+
+        await view.cancel_contract.callback(interaction)
+
+        self.bot.contracts.cancel.assert_called_once_with(
+            "contract-1", "creator", "Cancelled from contract card", actor_name="Matt70")
+        interaction.response.edit_message.assert_awaited_once()
+        self.assertTrue(all(child.disabled for child in view.children))
+        self.assertEqual(view.children[0].label, "Unavailable")
+        self.assertEqual(view.children[1].label, "Cancelled")
+        self.assertIn("Status: Cancelled", interaction.response.edit_message.await_args.kwargs["content"])
 
     async def test_bank_commands_resolve_authenticated_context_without_server_selector(self):
         for name in ("deposit", "withdraw"):
