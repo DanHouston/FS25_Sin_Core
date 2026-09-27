@@ -58,5 +58,12 @@ class ContractsModTests(unittest.TestCase):
         self.assertIn("record.completion = completionValue(mission)", source)
         self.assertNotIn('record.completion = number(call(mission, "getCompletion"))', source)
 
+    def test_working_width_uses_runtime_work_area(self):
+        source = (MOD / "scripts/SiNContracts.lua").read_text(encoding="utf-8")
+        self.assertIn('getAIWorkAreaWidth', source)
+        self.assertIn('spec_workArea', source)
+        self.assertIn('workWidth', source)
+        self.assertIn('workingWidthSource', source)
+
     def test_icon_is_present(self):
         self.assertGreater((MOD / "icon_contracts.dds").stat().st_size, 0)

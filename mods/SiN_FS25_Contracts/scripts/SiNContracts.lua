@@ -146,13 +146,43 @@ local function fieldData(mission)
     }
 end
 
+-- WorkAreaSpecialization owns the authoritative implement width. A vehicle's
+-- config/physics width is not necessarily the width used for field work and is
+-- often absent until leased equipment is instantiated.
+local function runtimeWorkAreaWidth(item)
+    local aiWidth = number(call(item, "getAIWorkAreaWidth"))
+    if aiWidth ~= nil and aiWidth > 0 then return aiWidth, "ai-work-area" end
+
+    local workAreaSpec = fieldValue(item, {"spec_workArea"})
+    local workAreas = type(workAreaSpec) == "table" and fieldValue(workAreaSpec, {"workAreas"}) or nil
+    if type(workAreas) ~= "table" then return nil, nil end
+
+    local maximum = nil
+    for index, workArea in pairs(workAreas) do
+        local width = number(fieldValue(workArea, {"workWidth", "workingWidth", "width"}))
+        if width == nil and type(index) == "number" then
+            width = number(call(item, "getWorkAreaWidth", index))
+        end
+        if width ~= nil and width > 0 then
+            maximum = math.max(maximum or 0, width)
+        end
+    end
+    if maximum ~= nil then return maximum, "work-area" end
+    return nil, nil
+end
+
 local function equipmentValues(item)
     if type(item) ~= "table" then return nil end
     local width = number(fieldValue(item, {"workingWidth", "workWidth", "width"}))
+    local widthSource = width ~= nil and "native-field" or nil
     local speed = number(fieldValue(item, {"workingSpeed", "workSpeed", "speed", "maxSpeed"}))
     local capacity = number(fieldValue(item, {"capacity", "fillUnitCapacity", "maxCapacity"}))
     if width == nil then
         width = number(call(item, "getWorkingWidth")) or number(call(item, "getWorkWidth"))
+        if width ~= nil then widthSource = "native-method" end
+    end
+    if width == nil then
+        width, widthSource = runtimeWorkAreaWidth(item)
     end
     if speed == nil then
         speed = number(call(item, "getWorkingSpeed")) or number(call(item, "getSpeedLimit"))
@@ -160,7 +190,8 @@ local function equipmentValues(item)
     if capacity == nil then capacity = number(call(item, "getFillUnitCapacity", 1)) end
     local config = fieldValue(item, {"configFileName", "filename", "name", "vehicleName"})
     if width == nil and speed == nil and capacity == nil and config == nil then return nil end
-    return {name = text(config), workingWidthM = width, workingSpeedKmh = speed, capacity = capacity}
+    return {name = text(config), workingWidthM = width, workingWidthSource = widthSource,
+        workingSpeedKmh = speed, capacity = capacity}
 end
 
 local function equipmentData(mission)
@@ -260,9 +291,10 @@ function SiNContracts:observe(mission, eventName, finishState)
             tostring(estimatedHours or "unavailable"), tostring(record.estimatedNativeDollarsPerHour or "unavailable"),
             #equipment, tostring(equipmentSource or "unavailable"))
         for equipmentIndex, item in ipairs(equipment) do
-            logInfo("mission=%s equipment=%d name=%s widthM=%s speedKmh=%s capacity=%s",
+            logInfo("mission=%s equipment=%d name=%s widthM=%s widthSource=%s speedKmh=%s capacity=%s",
                 id, equipmentIndex, tostring(item.name or "unavailable"),
-                tostring(item.workingWidthM or "unavailable"), tostring(item.workingSpeedKmh or "unavailable"),
+                tostring(item.workingWidthM or "unavailable"), tostring(item.workingWidthSource or "unavailable"),
+                tostring(item.workingSpeedKmh or "unavailable"),
                 tostring(item.capacity or "unavailable"))
         end
     end
@@ -316,9 +348,10 @@ function SiNContracts:consoleCommandContracts()
             tostring(r.estimatedNativeDollarsPerHour or "unavailable"), tostring(r.actualHours or "unavailable"),
             #(r.equipment or {}))
         for equipmentIndex, item in ipairs(r.equipment or {}) do
-            logInfo("diagnostic mission=%s equipment=%d name=%s widthM=%s speedKmh=%s capacity=%s",
+            logInfo("diagnostic mission=%s equipment=%d name=%s widthM=%s widthSource=%s speedKmh=%s capacity=%s",
                 id, equipmentIndex, tostring(item.name or "unavailable"),
-                tostring(item.workingWidthM or "unavailable"), tostring(item.workingSpeedKmh or "unavailable"),
+                tostring(item.workingWidthM or "unavailable"), tostring(item.workingWidthSource or "unavailable"),
+                tostring(item.workingSpeedKmh or "unavailable"),
                 tostring(item.capacity or "unavailable"))
         end
     end

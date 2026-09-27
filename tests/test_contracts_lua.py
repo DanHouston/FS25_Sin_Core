@@ -96,3 +96,51 @@ class ContractsLuaTests(unittest.TestCase):
             assert(MissionManager:dismissMission(nil) == true)
             """
         )
+
+    def test_equipment_width_uses_native_ai_work_area_after_lease(self):
+        lua = self._runtime()
+        lua.execute(
+            """
+            local field = {id = 26, areaHa = 2.3, name = "Field 26"}
+            function field:getId() return self.id end
+            function field:getAreaHa() return self.areaHa end
+            function field:getName() return self.name end
+            local vehicle = {configFileName = "r700i.xml"}
+            function vehicle:getAIWorkAreaWidth() return 24 end
+            function vehicle:getWorkingSpeed() return 12 end
+            function vehicle:getFillUnitCapacity() return 3360 end
+            local mission = {status = "RUNNING", reward = 3444.825, vehicles = {vehicle}}
+            function mission:getUniqueId() return "width-from-work-area" end
+            function mission:getField() return field end
+            function mission:getReward() return self.reward end
+            local record = SiNContracts:observe(mission, "observed")
+            assert(#record.equipment == 1)
+            assert(record.equipment[1].workingWidthM == 24)
+            assert(record.equipment[1].workingWidthSource == "ai-work-area")
+            assert(record.estimatedHours ~= nil)
+            assert(record.estimatedNativeDollarsPerHour ~= nil)
+            """
+        )
+
+    def test_equipment_width_falls_back_to_runtime_work_area_records(self):
+        lua = self._runtime()
+        lua.execute(
+            """
+            local field = {id = 24, areaHa = 15.2, name = "Field 24"}
+            function field:getId() return self.id end
+            function field:getAreaHa() return self.areaHa end
+            function field:getName() return self.name end
+            local vehicle = {configFileName = "implement.xml",
+                             spec_workArea = {workAreas = {{workWidth = 18.5}, {workWidth = 12}}}}
+            function vehicle:getAIWorkAreaWidth() return 0 end
+            function vehicle:getWorkingSpeed() return 18 end
+            local mission = {status = "RUNNING", reward = 2000, vehicles = {vehicle}}
+            function mission:getUniqueId() return "width-from-work-area-records" end
+            function mission:getField() return field end
+            function mission:getReward() return self.reward end
+            local record = SiNContracts:observe(mission, "observed")
+            assert(record.equipment[1].workingWidthM == 18.5)
+            assert(record.equipment[1].workingWidthSource == "work-area")
+            assert(record.estimatedHours ~= nil)
+            """
+        )

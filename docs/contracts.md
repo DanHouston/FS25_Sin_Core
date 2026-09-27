@@ -71,6 +71,15 @@ speed is absent. Actual duration is measured from accepted observation to
 native finish observation. Transport and other non-field missions remain
 observable but are normally not time-estimable without a native route metric.
 
+After acceptance, when FS25 has instantiated leased equipment, the observer
+reads the current implement work width from the native WorkArea specialization:
+`getAIWorkAreaWidth()`, falling back to
+`spec_workArea.workAreas[].workWidth`. This is the field-working width rather
+than a cosmetic/configuration width. Width is therefore normally unavailable
+for an unaccepted offer, and remains unavailable when the native vehicle
+exposes no positive work area; the observer does not infer a width or fabricate
+an estimate.
+
 ## Live diagnostics
 
 The server installs a bounded `sinContracts` console command. It logs a summary
