@@ -251,6 +251,49 @@ def _resolve_state(descriptor: dict[str, Any], token: int | str) -> int | None:
     return None
 
 
+def _native_state_path(states: list[int], period_map: dict[str, dict[str, Any]]) -> list[int] | None:
+    """Find the active map's ordered growth path through the configured states.
+
+    State chains in the policy describe the allowed ordering, not a promise that
+    every optional visual state exists or is used by every map.  Native FS25
+    descriptors can, for example, go directly from ``harvestReadyGreen`` to
+    ``harvestReady3``.  Derive the path from the map's actual mappings so the
+    policy does not invent intermediate stages.
+    """
+    if len(states) < 2:
+        return None
+    order = {state: index for index, state in enumerate(states)}
+    edges: dict[int, set[int]] = {index: set() for index in range(len(states))}
+    for runtime in period_map.values():
+        mapping = runtime.get("growthMapping") if isinstance(runtime, dict) else None
+        if not isinstance(mapping, dict):
+            continue
+        for from_state, to_state in mapping.items():
+            if not isinstance(from_state, int) or not isinstance(to_state, int):
+                continue
+            from_index = order.get(from_state)
+            to_index = order.get(to_state)
+            if from_index is not None and to_index is not None and to_index > from_index:
+                edges[from_index].add(to_index)
+
+    def walk(index: int, seen: set[int]) -> list[int] | None:
+        if index == len(states) - 1:
+            return [index]
+        best: list[int] | None = None
+        for next_index in sorted(edges[index]):
+            if next_index in seen:
+                continue
+            tail = walk(next_index, seen | {next_index})
+            if tail is not None and (best is None or len(tail) > len(best)):
+                best = tail
+        return None if best is None else [index, *best]
+
+    path = walk(0, {0})
+    if path is None or len(path) < 2:
+        return None
+    return [states[index] for index in path]
+
+
 def _annual_lifecycle_plan(entry: FruitPolicy, period_map: dict[str, dict[str, Any]],
                            descriptor: dict[str, Any], result: ApplyResult) -> dict[str, dict[int, int]] | None:
     """Validate and build annual mappings without mutating the descriptor."""
@@ -262,12 +305,25 @@ def _annual_lifecycle_plan(entry: FruitPolicy, period_map: dict[str, dict[str, A
         result.unsupported += 1
         result.diagnostics.append(f"{entry.name}: annual lifecycle windows unsupported")
         return None
-    states = [_resolve_state(descriptor, token) for token in entry.state_chain]
+    resolved_states = [_resolve_state(descriptor, token) for token in entry.state_chain]
     invisible = _resolve_state(descriptor, "INVISIBLE")
     dead = _resolve_state(descriptor, "DEAD")
-    if invisible is None or dead is None or any(state is None for state in states) or len(states) < 2:
+    if invisible is None or dead is None or len([state for state in resolved_states if state is not None]) < 2:
         result.unsupported += 1
         result.diagnostics.append(f"{entry.name}: annual lifecycle state chain unsupported")
+        return None
+    states = [state for state in resolved_states if state is not None]
+    native_path = _native_state_path(states, period_map)
+    if native_path is not None:
+        states = native_path
+        if len(native_path) != len(resolved_states):
+            result.diagnostics.append(
+                f"{entry.name}: native growth path selected {len(native_path)} of "
+                f"{len(resolved_states)} configured states"
+            )
+    elif any(state is None for state in resolved_states):
+        result.unsupported += 1
+        result.diagnostics.append(f"{entry.name}: native growth path unavailable")
         return None
     first_plant = min(_PERIOD_ORDER.index(name) + 1 for name in planting)
     harvest_indices = [_PERIOD_ORDER.index(name) + 1 for name in harvest]

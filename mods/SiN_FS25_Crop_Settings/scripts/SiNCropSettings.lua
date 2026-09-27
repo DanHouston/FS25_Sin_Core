@@ -371,6 +371,71 @@ local function periodOffset(firstPeriod, period)
     return (period - firstPeriod) % 12
 end
 
+-- A policy stateChain is an ordering hint.  Maps may omit optional visual
+-- stages or use a direct native transition (for example maize may use
+-- harvestReadyGreen -> harvestReady3 without harvestReadyGreen2).  Derive the
+-- path that this map actually exposes before retiming it to the SiN calendar.
+local function deriveNativeStatePath(states, runtimePeriods)
+    if #states < 2 then
+        return nil
+    end
+    local order = {}
+    for index, state in ipairs(states) do
+        order[state] = index
+    end
+    local edges = {}
+    for index = 1, #states do
+        edges[index] = {}
+    end
+    for _, runtimePeriod in ipairs(runtimePeriods) do
+        for fromState, toState in pairs(runtimePeriod.growthMapping or {}) do
+            local fromIndex = order[fromState]
+            local toIndex = order[toState]
+            if fromIndex ~= nil and toIndex ~= nil and toIndex > fromIndex then
+                edges[fromIndex][toIndex] = true
+            end
+        end
+    end
+    local function walk(index, seen)
+        if index == #states then
+            return {index}
+        end
+        local candidates = {}
+        for nextIndex in pairs(edges[index]) do
+            if seen[nextIndex] == nil then
+                table.insert(candidates, nextIndex)
+            end
+        end
+        table.sort(candidates)
+        local best = nil
+        for _, nextIndex in ipairs(candidates) do
+            local nextSeen = {}
+            for seenIndex in pairs(seen) do
+                nextSeen[seenIndex] = true
+            end
+            nextSeen[nextIndex] = true
+            local tail = walk(nextIndex, nextSeen)
+            if tail ~= nil and (best == nil or #tail > #best) then
+                best = tail
+            end
+        end
+        if best == nil then
+            return nil
+        end
+        table.insert(best, 1, index)
+        return best
+    end
+    local path = walk(1, {[1] = true})
+    if path == nil or #path < 2 then
+        return nil
+    end
+    local result = {}
+    for _, index in ipairs(path) do
+        table.insert(result, states[index])
+    end
+    return result
+end
+
 local function applyAnnualLifecycle(fruitType, entry, seasonal, state)
     if entry.lifecycle ~= "ANNUAL" or #entry.stateChain < 2 then
         return false
@@ -393,18 +458,18 @@ local function applyAnnualLifecycle(fruitType, entry, seasonal, state)
         return false
     end
     local states = {}
+    local missingConfiguredState = false
     for _, token in ipairs(entry.stateChain) do
         local resolved = resolveGrowthState(fruitType, token)
-        if resolved == nil then
-            state.unsupported = state.unsupported + 1
-            addDiagnostic(state, entry.name .. ": annual lifecycle state unresolved")
-            return false
+        if resolved ~= nil then
+            table.insert(states, resolved)
+        else
+            missingConfiguredState = true
         end
-        table.insert(states, resolved)
     end
     local invisible = resolveGrowthState(fruitType, "INVISIBLE")
     local dead = resolveGrowthState(fruitType, "DEAD")
-    if invisible == nil or dead == nil then
+    if invisible == nil or dead == nil or #states < 2 then
         state.unsupported = state.unsupported + 1
         addDiagnostic(state, entry.name .. ": annual lifecycle requires invisible/dead states")
         return false
@@ -433,6 +498,17 @@ local function applyAnnualLifecycle(fruitType, entry, seasonal, state)
             return false
         end
         runtimePeriods[period] = runtimePeriod
+    end
+    local nativePath = deriveNativeStatePath(states, runtimePeriods)
+    if nativePath ~= nil then
+        states = nativePath
+        if #nativePath ~= #entry.stateChain then
+            addDiagnostic(state, entry.name .. ": native growth path omitted optional state(s)")
+        end
+    elseif missingConfiguredState then
+        state.unsupported = state.unsupported + 1
+        addDiagnostic(state, entry.name .. ": native growth path unavailable")
+        return false
     end
     local changed = false
     for period = 1, 12 do

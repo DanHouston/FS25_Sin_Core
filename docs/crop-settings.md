@@ -67,11 +67,15 @@ The policy windows are:
 | WHEAT | Oct-Nov | Apr-Jul |
 
 Annual crops use their validated native state names to rebuild only the seasonal
-state mappings needed for the requested window. Each period advances at most one
-stage; the terminal transition to `harvestReady` is withheld until the harvest
-window, then the ready state is held until the following period withers it. This
-preserves staggered maturity for fields planted at different points in a planting
-window and does not change `growthTime`.
+state mappings needed for the requested window. `stateChain` is an ordering hint,
+not a promise that every visual state is present or used by every map. Before the
+rewrite, the runtime derives the longest native path from the active descriptor;
+optional states are therefore omitted when the map uses a direct transition (for
+example `harvestReadyGreen -> harvestReady3`). Each period advances at most one
+native stage; the terminal transition to the final harvest-ready state is withheld
+until the harvest window, then the ready state is held until the following period
+withers it. This preserves staggered maturity without inventing map stages or
+changing `growthTime`.
 
 Grass, Poplar, Sugarcane, Grapes, Olives and Spinach are treated as native
 perennial/regrowth lifecycles: SiN changes their planting and harvest gates while

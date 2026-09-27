@@ -214,6 +214,64 @@ class CropSettingsTests(unittest.TestCase):
         self.assertEqual(periods["EARLY_AUTUMN"]["growthMapping"][4], 4)
         self.assertEqual(periods["MID_AUTUMN"]["growthMapping"], {4: 5})
 
+    def test_annual_lifecycle_uses_native_path_and_omits_optional_visual_states(self):
+        policy = parse_policy(__import__("pathlib").Path("mods/SiN_FS25_Crop_Settings/config/fruit-policy.xml"))
+        names = ("EARLY_SPRING", "MID_SPRING", "LATE_SPRING", "EARLY_SUMMER",
+                 "MID_SUMMER", "LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN",
+                 "LATE_AUTUMN", "EARLY_WINTER", "MID_WINTER", "LATE_WINTER")
+        # Native maps are allowed to skip visual states.  This is the native
+        # sunflower path used by the base regional definitions.
+        ids = {"INVISIBLE": 0, "GREENSMALL": 1, "GREENSMALL2": 2,
+               "GREENMIDDLE": 3, "GREENMIDDLE2": 4, "GREENBIG": 5,
+               "GREENBIG2": 6, "HARVESTREADY": 7, "DEAD": 8}
+        descriptor = {
+            "name": "SUNFLOWER",
+            "growthStateIds": ids,
+            "growthDataSeasonal": {"periods": {
+                name: {"plantingAllowed": False, "isHarvestable": False,
+                       "growthMapping": {}} for name in names
+            }},
+        }
+        descriptor["growthDataSeasonal"]["periods"]["LATE_SPRING"]["growthMapping"] = {1: 3}
+        descriptor["growthDataSeasonal"]["periods"]["EARLY_SUMMER"]["growthMapping"] = {3: 5}
+        descriptor["growthDataSeasonal"]["periods"]["MID_SUMMER"]["growthMapping"] = {5: 7}
+        descriptor["growthDataSeasonal"]["periods"]["MID_AUTUMN"]["growthMapping"] = {7: 8}
+        result = apply_policy(policy, [descriptor])
+        self.assertEqual(result.unsupported, 0)
+        periods = descriptor["growthDataSeasonal"]["periods"]
+        self.assertEqual(periods["MID_SUMMER"]["growthMapping"], {1: 3, 3: 5})
+        self.assertEqual(periods["LATE_SUMMER"]["growthMapping"], {1: 3, 3: 5, 5: 7, 7: 7})
+        self.assertNotIn(2, periods["MID_SUMMER"]["growthMapping"])
+        self.assertNotIn(4, periods["MID_SUMMER"]["growthMapping"])
+
+    def test_annual_lifecycle_accepts_map_without_optional_maize_state(self):
+        policy = parse_policy(__import__("pathlib").Path("mods/SiN_FS25_Crop_Settings/config/fruit-policy.xml"))
+        names = ("EARLY_SPRING", "MID_SPRING", "LATE_SPRING", "EARLY_SUMMER",
+                 "MID_SUMMER", "LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN",
+                 "LATE_AUTUMN", "EARLY_WINTER", "MID_WINTER", "LATE_WINTER")
+        # This map has no harvestReadyGreen2 state and uses the direct native
+        # harvestReadyGreen -> harvestReady3 transition.
+        ids = {"INVISIBLE": 0, "GREENSMALL": 1, "GREENMIDDLE": 2,
+               "GREENBIG": 3, "HARVESTREADYGREEN": 4, "HARVESTREADY3": 5,
+               "DEAD": 6}
+        descriptor = {
+            "name": "MAIZE",
+            "growthStateIds": ids,
+            "growthDataSeasonal": {"periods": {
+                name: {"plantingAllowed": False, "isHarvestable": False,
+                       "growthMapping": {}} for name in names
+            }},
+        }
+        descriptor["growthDataSeasonal"]["periods"]["LATE_SPRING"]["growthMapping"] = {1: 2}
+        descriptor["growthDataSeasonal"]["periods"]["EARLY_SUMMER"]["growthMapping"] = {2: 3}
+        descriptor["growthDataSeasonal"]["periods"]["MID_SUMMER"]["growthMapping"] = {3: 4}
+        descriptor["growthDataSeasonal"]["periods"]["LATE_SUMMER"]["growthMapping"] = {4: 5}
+        descriptor["growthDataSeasonal"]["periods"]["LATE_AUTUMN"]["growthMapping"] = {5: 6}
+        result = apply_policy(policy, [descriptor])
+        self.assertEqual(result.unsupported, 0)
+        periods = descriptor["growthDataSeasonal"]["periods"]
+        self.assertEqual(periods["EARLY_AUTUMN"]["growthMapping"], {1: 2, 2: 3, 3: 4, 4: 5, 5: 5})
+
     def test_annual_lifecycle_fails_closed_before_partial_mapping_mutation(self):
         policy = parse_policy('''
           <cropPolicy schemaVersion="1" policyVersion="lifecycle-unsupported"
