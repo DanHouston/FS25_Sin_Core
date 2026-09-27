@@ -202,6 +202,7 @@ function SiNContracts:observe(mission, eventName, finishState)
     record.missionId = id
     record.missionType = missionType(mission)
     record.status = statusName(mission)
+    record.completion = number(call(mission, "getCompletion"))
     record.finishState = finishName(finishState) or record.finishState
     record.field = field
     record.targetLocation = targetLocation
@@ -227,8 +228,8 @@ function SiNContracts:observe(mission, eventName, finishState)
         tostring(record.finishState or ""), tostring(record.lastEvent)}, "|")
     if self.fingerprints[id] ~= fingerprint or eventName == "generated" or eventName == "accepted" then
         self.fingerprints[id] = fingerprint
-        logInfo("mission=%s event=%s type=%s status=%s field=%s farmland=%s areaHa=%s location=%s x=%s y=%s z=%s reward=%s farm=%s player=%s estimateHours=%s nativeDollarsPerHour=%s equipment=%d equipmentSource=%s",
-            id, tostring(record.lastEvent), record.missionType, record.status,
+        logInfo("mission=%s event=%s type=%s status=%s completion=%s field=%s farmland=%s areaHa=%s location=%s x=%s y=%s z=%s reward=%s farm=%s player=%s estimateHours=%s nativeDollarsPerHour=%s equipment=%d equipmentSource=%s",
+            id, tostring(record.lastEvent), record.missionType, record.status, tostring(record.completion or "unavailable"),
             tostring(field and field.id or ""), tostring(field and field.farmlandId or ""),
             tostring(field and field.areaHa or ""), tostring(record.targetLocation or ""),
             tostring(record.targetX or ""), tostring(record.targetY or ""), tostring(record.targetZ or ""),
@@ -283,8 +284,8 @@ function SiNContracts:consoleCommandContracts()
     table.sort(ids)
     for _, id in ipairs(ids) do
         local r = self.records[id]
-        logInfo("diagnostic mission=%s type=%s status=%s field=%s farmland=%s areaHa=%s location=%s x=%s y=%s z=%s reward=%s farm=%s player=%s estimateHours=%s nativeDollarsPerHour=%s actualHours=%s equipment=%d",
-            id, tostring(r.missionType), tostring(r.status), tostring(r.field and r.field.id or ""),
+        logInfo("diagnostic mission=%s type=%s status=%s completion=%s field=%s farmland=%s areaHa=%s location=%s x=%s y=%s z=%s reward=%s farm=%s player=%s estimateHours=%s nativeDollarsPerHour=%s actualHours=%s equipment=%d",
+            id, tostring(r.missionType), tostring(r.status), tostring(r.completion or "unavailable"), tostring(r.field and r.field.id or ""),
             tostring(r.field and r.field.farmlandId or ""), tostring(r.field and r.field.areaHa or ""),
             tostring(r.targetLocation or ""), tostring(r.targetX or ""), tostring(r.targetY or ""), tostring(r.targetZ or ""),
             tostring(r.reward or ""), tostring(r.acceptingFarmId or ""), tostring(r.acceptingPlayer),
