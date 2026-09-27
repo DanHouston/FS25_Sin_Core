@@ -323,6 +323,18 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Compensation: Fixed - $1", message.edit.await_args.kwargs["content"])
         self.bot.add_view.assert_not_called()
 
+    async def test_startup_removes_cancelled_contract_card(self):
+        record = {"contract_id": "contract-cancelled", "status": "cancelled",
+                  "marketplace_channel_id": 123, "marketplace_message_id": 99}
+        message = SimpleNamespace(delete=AsyncMock())
+        channel = SimpleNamespace(fetch_message=AsyncMock(return_value=message))
+        self.bot.contracts.marketplace = MagicMock(return_value=[record])
+        self.bot.contracts.retire_marketplace_message = MagicMock()
+        self.bot.get_channel = MagicMock(return_value=channel)
+        await self.bot.restore_contract_views()
+        message.delete.assert_awaited_once()
+        self.bot.contracts.retire_marketplace_message.assert_called_once_with("contract-cancelled")
+
     async def test_bank_commands_resolve_authenticated_context_without_server_selector(self):
         for name in ("deposit", "withdraw"):
             command = self.bot.tree.get_command(name)

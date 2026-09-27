@@ -284,6 +284,13 @@ class ContractService:
                        "marketplace_message_id": str(message_id),
                        "marketplace_updated_at": _now()}})
 
+    def retire_marketplace_message(self, contract_id):
+        """Forget a removed marketplace card while retaining contract history."""
+        self.db.contracts.update_one(
+            {"contract_id": str(contract_id)},
+            {"$set": {"marketplace_retired_at": _now()},
+             "$unset": {"marketplace_channel_id": "", "marketplace_message_id": ""}})
+
     def accept(self, contract_id, actor_id, farm_id=None, actor_name=None):
         existing = self.get(contract_id)
         if existing and existing.get("world_id"):

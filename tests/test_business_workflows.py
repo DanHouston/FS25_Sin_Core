@@ -96,6 +96,14 @@ class BusinessWorkflowTests(unittest.TestCase):
         self.assertEqual(update["$set"]["marketplace_message_id"], "456")
         self.assertNotIn("status", update["$set"])
 
+    def test_retiring_marketplace_message_keeps_contract_state_and_clears_location(self):
+        service = ContractService(self.database)
+        service.retire_marketplace_message("contract-1")
+        update = self.db.contracts.update_one.call_args.args[1]
+        self.assertIn("marketplace_retired_at", update["$set"])
+        self.assertEqual(update["$unset"], {"marketplace_channel_id": "", "marketplace_message_id": ""})
+        self.assertNotIn("status", update["$set"])
+
     def test_invoice_payment_calls_idempotent_wallet_transfer(self):
         banking = MagicMock()
         banking.database = self.database

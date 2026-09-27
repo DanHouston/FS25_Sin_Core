@@ -67,6 +67,8 @@ job-card content in place during startup, so attribution is retained across
 card refreshes and bot restarts. Compensation is rendered as a
 currency amount (for example `Fixed - $1` or `Hourly - $250/hour`). Without
 that channel configuration, the durable slash commands remain available.
+Cancelled contracts have their public job cards removed during cancellation or
+the next JiN startup; the contract record remains available for history.
 
 The jobs channel is guild-level deployment configuration, not a server or
 business-logic constant. The checked-in `discord.json` carries the current

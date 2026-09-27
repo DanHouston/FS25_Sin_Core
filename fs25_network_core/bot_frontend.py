@@ -1159,6 +1159,7 @@ class NetworkBot(discord.Client):
         async def contract_cancel(interaction: discord.Interaction, contract_id: str, reason: str):
             record = await asyncio.to_thread(self.contracts.cancel, contract_id, str(interaction.user.id), reason)
             await interaction.response.send_message(f"Contract `{record['contract_id']}` cancelled.", ephemeral=True)
+            await self.retire_contract_card(record)
 
         @contract_cancel.autocomplete("contract_id")
         async def contract_cancel_autocomplete(interaction: discord.Interaction, current: str):
@@ -1630,6 +1631,9 @@ class NetworkBot(discord.Client):
             message_id = record.get("marketplace_message_id")
             if not channel_id or not message_id:
                 continue
+            if record.get("status") == "cancelled":
+                await self.retire_contract_card(record)
+                continue
             try:
                 channel = self.get_channel(int(channel_id))
                 if channel is None:
@@ -1644,6 +1648,27 @@ class NetworkBot(discord.Client):
             except (discord.DiscordException, TypeError, ValueError) as error:
                 logging.warning("Contract card startup refresh unavailable contract=%s: %s",
                                 record.get("contract_id"), error)
+
+    async def retire_contract_card(self, record):
+        """Delete a cancelled public card and retire its stored location."""
+        channel_id = record.get("marketplace_channel_id")
+        message_id = record.get("marketplace_message_id")
+        if not channel_id or not message_id:
+            return False
+        try:
+            channel = self.get_channel(int(channel_id))
+            if channel is None:
+                channel = await self.fetch_channel(int(channel_id))
+            message = await channel.fetch_message(int(message_id))
+            await message.delete()
+        except discord.NotFound:
+            pass
+        except (discord.DiscordException, TypeError, ValueError) as error:
+            logging.warning("Cancelled contract card could not be retired contract=%s: %s",
+                            record.get("contract_id"), error)
+            return False
+        await asyncio.to_thread(self.contracts.retire_marketplace_message, record["contract_id"])
+        return True
 
     def contract_view(self, record):
         """Build the persisted card view without re-enabling accepted cards."""
