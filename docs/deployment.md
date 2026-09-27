@@ -20,8 +20,8 @@ FS25_SiN_Server archive is rebuilt from `mods/FS25_SiN_Server` and verified
 to contain `modDesc.xml` and `NetworkLocal.lua` at its archive root.
 `SiN_FS25_Crop_Settings.zip` is a separate, map-independent multiplayer mod;
 install the exact release bytes on the server and all clients (normally via
-the approved modpack). Its production policy is currently an intentional
-no-op until a reviewed crop calendar is selected.
+the approved modpack). The current policy probe changes only Sorghum (plant
+April-May, harvest August-November); policy changes require a map/save reload.
 The release builder also validates every packaged Lua source against the FS25
 Lua runtime dialect (including rejection of Lua 5.2+ `goto`/label syntax) both
 before and after archive creation. A GIANTS runtime load test remains required,
