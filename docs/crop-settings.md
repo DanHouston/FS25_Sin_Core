@@ -17,20 +17,17 @@ or malformed descriptor fields are skipped with bounded diagnostics; the
 remaining policy continues fail-closed. A manager-local policy-version marker
 prevents repeated mutation during one map load.
 
-The runtime fields intentionally used by the policy are validated before any
-write:
-
-- `fruitType.growthDataSeasonal.periods[index].plantingAllowed`;
-- `fruitType.growthDataSeasonal.periods[index].harvestAllowed`, when that
-  native descriptor exposes it; and otherwise the fruit's native
-  `getIsHarvestableInPeriod(growthMode, seasonPeriod)` method is wrapped for
-  the configured fruit only. The wrapper changes the calendar-period gate but
-  leaves native growth states and `getIsHarvestReady` unchanged, so an
-  immature field cannot be harvested merely because the month is allowed.
-- `fruitType.growthDataSeasonal.periods[index].growthTime`, when the native
-  descriptor exposes a numeric timing value;
-- `fruitType.growthDataSeasonal.periods[index].growthMapping[fromState]`, when
-  that native mapping is present.
+The runtime uses the native `FruitTypeDesc:loadGrowth()` path rather than
+inventing a second calendar API. Before calling it, the script validates the
+active fruit descriptor and every configured state transition. The native
+loader applies `plantingAllowed`, `growthMapping`, and any other supported
+growth fields; the policy's `harvestAllowed` attribute is then projected onto
+the native
+`fruitType.growthDataSeasonal.periods[index].isHarvestable` field. Native
+growth states and maturity checks remain authoritative, so an immature field
+cannot be harvested merely because the month is allowed. A missing method,
+seasonal table, period, mapping, state, or native harvest flag fails closed for
+that fruit and is reported through bounded diagnostics.
 
 The Sorghum probe intentionally changes only planting and harvest periods:
 
@@ -58,16 +55,18 @@ Growth updates may use native state names (`startState`/`endState`) or validated
 numeric state IDs. Names are resolved against the active fruit descriptor and
 unresolved states fail closed.
 
-The reviewed schema for a future entry is:
+The reviewed schema for a future entry is the native `loadGrowth` shape:
 
 ```xml
 <fruit name="WHEAT" enabled="true">
-  <seasonal>
-    <period name="EARLY_SPRING" plantingAllowed="false"
-            harvestAllowed="true" growthTime="2.5">
-      <growth><update fromState="2" toState="4"/></growth>
-    </period>
-  </seasonal>
+  <growth>
+    <seasonal initialState="greenBig">
+      <period name="EARLY_SPRING" plantingAllowed="false"
+              harvestAllowed="true" growthTime="2.5">
+        <update startState="greenBig" endState="harvestReady"/>
+      </period>
+    </seasonal>
+  </growth>
 </fruit>
 ```
 
@@ -86,7 +85,7 @@ For the Sorghum live probe, build the ZIP, install the same bytes on server and
 every client, and restart/reload the save (policy application is map-load
 scoped). Verify one bounded log line like:
 
-`[SiN Crop Settings] policy=0.2.0-sorghum map=<map> applied=1 changed=1 skipped=0 unsupported=0 conflicts=0`
+`[SiN Crop Settings] policy=0.2.1-sorghum map=<map> applied=1 changed=1 skipped=0 unsupported=0 conflicts=0`
 
 Then inspect the in-game calendar: Sorghum must show Plant Apr-May and Harvest
 Aug-Nov, while Wheat (and another unchanged crop) must retain its existing

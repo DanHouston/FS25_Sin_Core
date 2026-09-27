@@ -93,7 +93,7 @@ local function parsePolicy()
         xmlFile:delete()
         return nil, "unsupported or incomplete policy header"
     end
-    local policy = { version = policyVersion, fruits = {} }
+    local policy = { version = policyVersion, fruits = {}, xmlFile = xmlFile }
     local seen = {}
     local index = 0
     while true do
@@ -105,12 +105,20 @@ local function parsePolicy()
         local enabled = parseBoolean(xmlFile:getString(key .. "#enabled"))
         if name ~= nil and seen[name] == nil then
             seen[name] = true
-            local entry = { name = name, enabled = enabled == true, periods = {} }
+            local growthKey = key .. ".growth"
+            local seasonalKey = growthKey .. ".seasonal"
+            if not xmlFile:hasProperty(seasonalKey .. ".period(0)#name") then
+                -- Keep parsing old probe fixtures; production policy uses the
+                -- native fruitType.loadGrowth XML shape.
+                growthKey = key
+                seasonalKey = key .. ".seasonal"
+            end
+            local entry = { name = name, enabled = enabled == true, periods = {}, growthKey = growthKey }
             local periodSeen = {}
             local periodIndex = 0
             while true do
-                local periodKey = key .. ".seasonal.period(" .. tostring(periodIndex) .. ")"
-                if not xmlFile:hasProperty(periodKey) then
+                local periodKey = seasonalKey .. ".period(" .. tostring(periodIndex) .. ")"
+                if not xmlFile:hasProperty(periodKey .. "#name") then
                     break
                 end
                 local periodName = normalizeName(xmlFile:getString(periodKey .. "#name"))
@@ -125,8 +133,13 @@ local function parsePolicy()
                     }
                     local updateIndex = 0
                     while true do
-                        local updateKey = periodKey .. ".growth.update(" .. tostring(updateIndex) .. ")"
-                        if not xmlFile:hasProperty(updateKey) then
+                        local updateKey = periodKey .. ".update(" .. tostring(updateIndex) .. ")"
+                        if not xmlFile:hasProperty(updateKey .. "#startState") and
+                           not xmlFile:hasProperty(updateKey .. "#fromState") then
+                            updateKey = periodKey .. ".growth.update(" .. tostring(updateIndex) .. ")"
+                        end
+                        if not xmlFile:hasProperty(updateKey .. "#startState") and
+                           not xmlFile:hasProperty(updateKey .. "#fromState") then
                             break
                         end
                         local fromState = parseState(xmlFile, updateKey, "fromState", "startState")
@@ -150,7 +163,6 @@ local function parsePolicy()
         end
         index = index + 1
     end
-    xmlFile:delete()
     return policy, nil
 end
 
@@ -203,88 +215,139 @@ local function resolveGrowthState(fruitType, value)
     return nil
 end
 
-local function applyFruit(fruitType, entry, state)
-    local seasonal = fruitType.growthDataSeasonal
+local function seasonalData(fruitType)
+    if type(fruitType.getSeasonalGrowthData) == "function" then
+        local ok, result = pcall(fruitType.getSeasonalGrowthData, fruitType)
+        if ok and type(result) == "table" then
+            return result
+        end
+    end
+    if type(fruitType.growthDataSeasonal) == "table" then
+        return fruitType.growthDataSeasonal
+    end
+    return nil
+end
+
+local function copyMapping(mapping)
+    local copy = {}
+    for fromState, toState in pairs(mapping or {}) do
+        copy[fromState] = toState
+    end
+    return copy
+end
+
+local function mappingsEqual(left, right)
+    for key, value in pairs(left or {}) do
+        if (right or {})[key] ~= value then
+            return false
+        end
+    end
+    for key, value in pairs(right or {}) do
+        if (left or {})[key] ~= value then
+            return false
+        end
+    end
+    return true
+end
+
+local function validateFruitDescriptor(fruitType, entry, state)
+    if type(fruitType.loadGrowth) ~= "function" then
+        state.unsupported = state.unsupported + 1
+        addDiagnostic(state, entry.name .. ": FruitTypeDesc:loadGrowth unavailable")
+        return nil
+    end
+    local seasonal = seasonalData(fruitType)
     if type(seasonal) ~= "table" or type(seasonal.periods) ~= "table" then
         state.unsupported = state.unsupported + 1
         addDiagnostic(state, entry.name .. ": seasonal descriptor unsupported")
-        return false
+        return nil
     end
-    local changed = false
-    local harvestPolicy = {}
-    local hasHarvestPolicy = false
     for _, period in ipairs(entry.periods) do
         local runtimePeriod = seasonal.periods[period.index]
         if type(runtimePeriod) ~= "table" then
             state.skipped = state.skipped + 1
             addDiagnostic(state, entry.name .. ": period " .. tostring(period.index) .. " unavailable")
-        else
-            if period.plantingAllowed ~= nil then
-                if type(runtimePeriod.plantingAllowed) ~= "boolean" then
-                    state.unsupported = state.unsupported + 1
-                    addDiagnostic(state, entry.name .. ": planting descriptor unsupported")
-                elseif runtimePeriod.plantingAllowed ~= period.plantingAllowed then
-                    runtimePeriod.plantingAllowed = period.plantingAllowed
-                    changed = true
-                end
+            return nil
+        end
+        if period.plantingAllowed ~= nil and type(runtimePeriod.plantingAllowed) ~= "boolean" then
+            state.unsupported = state.unsupported + 1
+            addDiagnostic(state, entry.name .. ": planting descriptor unsupported")
+            return nil
+        end
+        if period.harvestAllowed ~= nil and type(runtimePeriod.isHarvestable) ~= "boolean" then
+            state.unsupported = state.unsupported + 1
+            addDiagnostic(state, entry.name .. ": isHarvestable descriptor unsupported")
+            return nil
+        end
+        if #period.transitions > 0 then
+            if type(runtimePeriod.growthMapping) ~= "table" then
+                state.unsupported = state.unsupported + 1
+                addDiagnostic(state, entry.name .. ": growthMapping unsupported")
+                return nil
             end
-            if period.harvestAllowed ~= nil then
-                harvestPolicy[period.index] = period.harvestAllowed
-                hasHarvestPolicy = true
-                if type(runtimePeriod.harvestAllowed) == "boolean" and runtimePeriod.harvestAllowed ~= period.harvestAllowed then
-                    runtimePeriod.harvestAllowed = period.harvestAllowed
-                    changed = true
-                end
-            end
-            if period.growthTime ~= nil then
-                if type(runtimePeriod.growthTime) ~= "number" then
+            for _, transition in ipairs(period.transitions) do
+                if resolveGrowthState(fruitType, transition.fromState) == nil or
+                   resolveGrowthState(fruitType, transition.toState) == nil then
                     state.unsupported = state.unsupported + 1
-                    addDiagnostic(state, entry.name .. ": growthTime descriptor unsupported")
-                elseif runtimePeriod.growthTime ~= period.growthTime then
-                    runtimePeriod.growthTime = period.growthTime
-                    changed = true
-                end
-            end
-            if #period.transitions > 0 then
-                if type(runtimePeriod.growthMapping) ~= "table" then
-                    state.unsupported = state.unsupported + 1
-                    addDiagnostic(state, entry.name .. ": growthMapping unsupported")
-                else
-                    for _, transition in ipairs(period.transitions) do
-                        local fromState = resolveGrowthState(fruitType, transition.fromState)
-                        local toState = resolveGrowthState(fruitType, transition.toState)
-                        if fromState == nil or toState == nil then
-                            state.unsupported = state.unsupported + 1
-                            addDiagnostic(state, entry.name .. ": growth state name unresolved")
-                        elseif runtimePeriod.growthMapping[fromState] ~= toState then
-                            runtimePeriod.growthMapping[fromState] = toState
-                            changed = true
-                        end
-                    end
+                    addDiagnostic(state, entry.name .. ": growth state name unresolved")
+                    return nil
                 end
             end
         end
     end
-    -- FS25 normally derives harvestability from getIsHarvestableInPeriod(),
-    -- rather than exposing a period.harvestAllowed field.  Override only the
-    -- configured fruit's calendar gate; native growth state/readiness remains
-    -- authoritative, so an immature field is never made harvestable here.
-    if hasHarvestPolicy then
-        if type(fruitType.getIsHarvestableInPeriod) ~= "function" then
+    return seasonal
+end
+
+local function applyFruit(fruitType, entry, state, policyXmlFile)
+    local before = validateFruitDescriptor(fruitType, entry, state)
+    if before == nil then
+        return false
+    end
+    local beforePeriods = {}
+    for _, period in ipairs(entry.periods) do
+        local runtimePeriod = before.periods[period.index]
+        beforePeriods[period.index] = {
+            plantingAllowed = runtimePeriod.plantingAllowed,
+            isHarvestable = runtimePeriod.isHarvestable,
+            growthMapping = copyMapping(runtimePeriod.growthMapping)
+        }
+    end
+    local ok, result = pcall(fruitType.loadGrowth, fruitType, policyXmlFile, entry.growthKey)
+    if not ok or result == false then
+        state.unsupported = state.unsupported + 1
+        addDiagnostic(state, entry.name .. ": native loadGrowth rejected policy")
+        return false
+    end
+    local after = seasonalData(fruitType)
+    if type(after) ~= "table" or type(after.periods) ~= "table" then
+        state.unsupported = state.unsupported + 1
+        addDiagnostic(state, entry.name .. ": native loadGrowth removed seasonal descriptor")
+        return false
+    end
+    local changed = false
+    for _, period in ipairs(entry.periods) do
+        local runtimePeriod = after.periods[period.index]
+        local oldPeriod = beforePeriods[period.index]
+        if type(runtimePeriod) ~= "table" or oldPeriod == nil then
             state.unsupported = state.unsupported + 1
-            addDiagnostic(state, entry.name .. ": harvest period API unsupported")
-        elseif fruitType.__sinCropHarvestPolicyVersion ~= state.policyVersion then
-            local nativeHarvestableInPeriod = fruitType.getIsHarvestableInPeriod
-            fruitType.__sinCropNativeHarvestableInPeriod = nativeHarvestableInPeriod
-            fruitType.__sinCropHarvestPeriods = harvestPolicy
-            fruitType.__sinCropHarvestPolicyVersion = state.policyVersion
-            fruitType.getIsHarvestableInPeriod = function(self, growthMode, seasonPeriod)
-                local allowed = self.__sinCropHarvestPeriods[seasonPeriod]
-                if allowed ~= nil then
-                    return allowed
-                end
-                return self.__sinCropNativeHarvestableInPeriod(self, growthMode, seasonPeriod)
+            addDiagnostic(state, entry.name .. ": native period unavailable after loadGrowth")
+            return false
+        end
+        -- harvestAllowed is a SiN policy attribute; native FS25 stores the
+        -- resulting calendar gate as isHarvestable on each seasonal period.
+        if period.harvestAllowed ~= nil then
+            if type(runtimePeriod.isHarvestable) ~= "boolean" then
+                state.unsupported = state.unsupported + 1
+                addDiagnostic(state, entry.name .. ": isHarvestable missing after loadGrowth")
+                return false
             end
+            if runtimePeriod.isHarvestable ~= period.harvestAllowed then
+                runtimePeriod.isHarvestable = period.harvestAllowed
+            end
+        end
+        if runtimePeriod.plantingAllowed ~= oldPeriod.plantingAllowed or
+           runtimePeriod.isHarvestable ~= oldPeriod.isHarvestable or
+           not mappingsEqual(runtimePeriod.growthMapping, oldPeriod.growthMapping) then
             changed = true
         end
     end
@@ -307,6 +370,7 @@ function SiNCropSettings.apply(manager, missionInfo)
     local available = fruitTypes(manager)
     if available == nil then
         logWarning("fruit type registry unavailable; policy skipped")
+        policy.xmlFile:delete()
         manager.__sinCropSettingsApplied = policy.version
         return
     end
@@ -317,7 +381,7 @@ function SiNCropSettings.apply(manager, missionInfo)
                 state.skipped = state.skipped + 1
                 addDiagnostic(state, entry.name .. ": not registered by active map")
             else
-                local changed = applyFruit(fruitType, entry, state)
+                local changed = applyFruit(fruitType, entry, state, policy.xmlFile)
                 state.applied = state.applied + 1
                 if changed then
                     state.changed = state.changed + 1
@@ -325,6 +389,7 @@ function SiNCropSettings.apply(manager, missionInfo)
             end
         end
     end
+    policy.xmlFile:delete()
     manager.__sinCropSettingsApplied = policy.version
     local mapName = "unknown"
     if missionInfo ~= nil and missionInfo.mapId ~= nil then

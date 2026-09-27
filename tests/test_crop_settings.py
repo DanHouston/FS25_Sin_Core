@@ -103,6 +103,34 @@ class CropSettingsTests(unittest.TestCase):
                             if name not in {"MID_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN",
                                             "LATE_AUTUMN", "EARLY_WINTER"}))
 
+    def test_shipped_policy_uses_native_growth_shape_and_harvest_flags(self):
+        policy = parse_policy(__import__("pathlib").Path("mods/SiN_FS25_Crop_Settings/config/fruit-policy.xml"))
+        periods = ("EARLY_SPRING", "MID_SPRING", "LATE_SPRING", "EARLY_SUMMER",
+                   "MID_SUMMER", "LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN",
+                   "LATE_AUTUMN", "EARLY_WINTER", "MID_WINTER", "LATE_WINTER")
+        descriptor = {
+            "name": "SORGHUM",
+            "nameToGrowthState": {"GREENBIG": 3, "HARVESTREADY": 4, "DEAD": 5},
+            "growthDataSeasonal": {"periods": {
+                name: {"plantingAllowed": False, "isHarvestable": False,
+                       "growthMapping": {3: 4, 4: 5}}
+                for name in periods
+            }},
+        }
+        result = apply_policy(policy, [descriptor])
+        self.assertEqual((result.applied, result.unsupported), (1, 0))
+        native_periods = descriptor["growthDataSeasonal"]["periods"]
+        self.assertEqual(
+            {name for name, value in native_periods.items() if value["plantingAllowed"]},
+            {"MID_SPRING", "LATE_SPRING"},
+        )
+        self.assertEqual(
+            {name for name, value in native_periods.items() if value["isHarvestable"]},
+            {"LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN", "LATE_AUTUMN"},
+        )
+        self.assertEqual(native_periods["MID_SUMMER"]["growthMapping"][3], 3)
+        self.assertEqual(native_periods["EARLY_WINTER"]["growthMapping"][4], 5)
+
     def test_sorghum_harvest_gate_and_required_wither_transition(self):
         policy = parse_policy(__import__("pathlib").Path("mods/SiN_FS25_Crop_Settings/config/fruit-policy.xml"))
         descriptor = {

@@ -3,35 +3,37 @@
 <cropPolicy schemaVersion="1" policyVersion="0.2.1-sorghum">
     <fruits>
         <fruit name="SORGHUM" enabled="true">
-            <seasonal>
+            <growth>
+                <seasonal initialState="greenBig">
                 <period name="EARLY_SPRING" plantingAllowed="false" harvestAllowed="false"/>
                 <period name="MID_SPRING" plantingAllowed="true" harvestAllowed="false"/>
                 <period name="LATE_SPRING" plantingAllowed="true" harvestAllowed="false"/>
                 <period name="EARLY_SUMMER" plantingAllowed="false" harvestAllowed="false"/>
                 <period name="MID_SUMMER" plantingAllowed="false" harvestAllowed="false">
                     <!-- Hold mature vegetation until the August harvest window. -->
-                    <growth><update startState="greenBig" endState="greenBig"/></growth>
+                    <update startState="greenBig" endState="greenBig"/>
                 </period>
                 <period name="LATE_SUMMER" plantingAllowed="false" harvestAllowed="true"/>
                 <period name="EARLY_AUTUMN" plantingAllowed="false" harvestAllowed="true">
                     <!-- Keep harvest-ready Sorghum through the September window. -->
-                    <growth><update startState="harvestReady" endState="harvestReady"/></growth>
+                    <update startState="harvestReady" endState="harvestReady"/>
                 </period>
                 <period name="MID_AUTUMN" plantingAllowed="false" harvestAllowed="true">
                     <!-- Keep harvest-ready Sorghum through October. -->
-                    <growth><update startState="harvestReady" endState="harvestReady"/></growth>
+                    <update startState="harvestReady" endState="harvestReady"/>
                 </period>
                 <period name="LATE_AUTUMN" plantingAllowed="false" harvestAllowed="true">
                     <!-- Keep harvest-ready Sorghum through November. -->
-                    <growth><update startState="harvestReady" endState="harvestReady"/></growth>
+                    <update startState="harvestReady" endState="harvestReady"/>
                 </period>
                 <period name="EARLY_WINTER" plantingAllowed="false" harvestAllowed="false">
                     <!-- End the harvest window after November. -->
-                    <growth><update startState="harvestReady" endState="dead"/></growth>
+                    <update startState="harvestReady" endState="dead"/>
                 </period>
                 <period name="MID_WINTER" plantingAllowed="false" harvestAllowed="false"/>
                 <period name="LATE_WINTER" plantingAllowed="false" harvestAllowed="false"/>
-            </seasonal>
+                </seasonal>
+            </growth>
         </fruit>
     </fruits>
 </cropPolicy>
