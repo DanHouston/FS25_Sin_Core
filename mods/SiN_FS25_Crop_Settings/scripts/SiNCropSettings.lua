@@ -125,7 +125,10 @@ local function parsePolicy()
             seen[name] = true
             local growthKey = key .. ".growth"
             local seasonalKey = growthKey .. ".seasonal"
-            if not xmlFile:hasProperty(seasonalKey) then
+            -- The production policy deliberately uses an empty seasonal node
+            -- for entries that preserve native transitions.  Test whether the
+            -- growth node exists, not whether that node has child periods.
+            if not xmlFile:hasProperty(growthKey) then
                 -- Keep parsing old probe fixtures; production policy uses the
                 -- native fruitType.loadGrowth XML shape.
                 growthKey = key
