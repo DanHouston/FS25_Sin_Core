@@ -3,7 +3,7 @@
 `SiN_FS25_Crop_Settings.zip` is a standalone multiplayer mod. It is deliberately
 separate from `FS25_SiN_Server` and from every map. The shipped
 `config/fruit-policy.xml` contains the first deliberately narrow production
-probe: only the native `SORGHUM` fruit is enabled (`policyVersion="0.2.0-sorghum"`).
+probe: only the native `SORGHUM` fruit is enabled (`policyVersion="0.2.1-sorghum"`).
 No other crop has an entry, so every other map fruit remains untouched.
 
 ## Runtime boundary
@@ -38,10 +38,16 @@ The Sorghum probe intentionally changes only planting and harvest periods:
 - harvest: `LATE_SUMMER`, `EARLY_AUTUMN`, `MID_AUTUMN`, `LATE_AUTUMN`
   (August-November).
 
-- The native `EARLY_AUTUMN` `harvestReady -> dead` transition is replaced with
-  `harvestReady -> harvestReady`; otherwise the crop would wither before the
-  requested November end date.
-- No `growthTime` is changed, and no other Sorghum transition is changed.
+- The native `MID_SUMMER` `greenBig -> harvestReady` transition is replaced
+  with `greenBig -> greenBig`; otherwise the crop can visibly become
+  harvest-ready in July, before the August window begins.
+- The native `EARLY_AUTUMN` withering transition is replaced, and explicit
+  holds are added for `MID_AUTUMN` and `LATE_AUTUMN`, so the crop remains
+  `harvestReady` and harvestable through November.
+- `EARLY_WINTER` transitions `harvestReady -> dead`, ending the window after
+  November rather than leaving an unharvested crop ready indefinitely.
+- No `growthTime` is changed, and all other native Sorghum transitions remain
+  unchanged.
 
 Native Sorghum transitions still determine when a field reaches a harvest-ready
 state; the policy only holds that state through the requested window and gates

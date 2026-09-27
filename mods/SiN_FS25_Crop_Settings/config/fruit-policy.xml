@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- The first production probe is deliberately limited to the native SORGHUM fruit. -->
-<cropPolicy schemaVersion="1" policyVersion="0.2.0-sorghum">
+<cropPolicy schemaVersion="1" policyVersion="0.2.1-sorghum">
     <fruits>
         <fruit name="SORGHUM" enabled="true">
             <seasonal>
@@ -8,15 +8,27 @@
                 <period name="MID_SPRING" plantingAllowed="true" harvestAllowed="false"/>
                 <period name="LATE_SPRING" plantingAllowed="true" harvestAllowed="false"/>
                 <period name="EARLY_SUMMER" plantingAllowed="false" harvestAllowed="false"/>
-                <period name="MID_SUMMER" plantingAllowed="false" harvestAllowed="false"/>
+                <period name="MID_SUMMER" plantingAllowed="false" harvestAllowed="false">
+                    <!-- Hold mature vegetation until the August harvest window. -->
+                    <growth><update startState="greenBig" endState="greenBig"/></growth>
+                </period>
                 <period name="LATE_SUMMER" plantingAllowed="false" harvestAllowed="true"/>
                 <period name="EARLY_AUTUMN" plantingAllowed="false" harvestAllowed="true">
-                    <!-- Keep native harvest-ready Sorghum from withering before November. -->
+                    <!-- Keep harvest-ready Sorghum through the September window. -->
                     <growth><update startState="harvestReady" endState="harvestReady"/></growth>
                 </period>
-                <period name="MID_AUTUMN" plantingAllowed="false" harvestAllowed="true"/>
-                <period name="LATE_AUTUMN" plantingAllowed="false" harvestAllowed="true"/>
-                <period name="EARLY_WINTER" plantingAllowed="false" harvestAllowed="false"/>
+                <period name="MID_AUTUMN" plantingAllowed="false" harvestAllowed="true">
+                    <!-- Keep harvest-ready Sorghum through October. -->
+                    <growth><update startState="harvestReady" endState="harvestReady"/></growth>
+                </period>
+                <period name="LATE_AUTUMN" plantingAllowed="false" harvestAllowed="true">
+                    <!-- Keep harvest-ready Sorghum through November. -->
+                    <growth><update startState="harvestReady" endState="harvestReady"/></growth>
+                </period>
+                <period name="EARLY_WINTER" plantingAllowed="false" harvestAllowed="false">
+                    <!-- End the harvest window after November. -->
+                    <growth><update startState="harvestReady" endState="dead"/></growth>
+                </period>
                 <period name="MID_WINTER" plantingAllowed="false" harvestAllowed="false"/>
                 <period name="LATE_WINTER" plantingAllowed="false" harvestAllowed="false"/>
             </seasonal>
