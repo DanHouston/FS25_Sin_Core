@@ -266,3 +266,17 @@ class CropLuaTests(unittest.TestCase):
             mapping = period["growthMapping"]
             self.assertEqual(set(mapping), set(desc["nameToGrowthState"].values()))
             self.assertTrue(all(isinstance(value, int) for value in mapping.values()))
+
+    def test_lua_rejects_non_integer_native_mapping_without_partial_gate_change(self):
+        entry = next(x for x in parse_policy(POLICY).fruits if x.name == "WHEAT")
+        desc, _ = descriptor(entry)
+        desc["growthDataSeasonal"]["periods"]["MID_SUMMER"]["growthMapping"]["bad"] = 4
+        original = copy.deepcopy(desc["growthDataSeasonal"]["periods"])
+        harness = Harness([desc])
+        harness.apply()
+        self.assertIn("unsupported=1", harness.logs[-1])
+        actual = harness.periods("WHEAT")
+        for period in PERIODS:
+            self.assertEqual(actual[period]["plantingAllowed"], original[period]["plantingAllowed"])
+            self.assertEqual(actual[period]["isHarvestable"], original[period]["isHarvestable"])
+            self.assertEqual(actual[period]["growthMapping"], original[period]["growthMapping"])
