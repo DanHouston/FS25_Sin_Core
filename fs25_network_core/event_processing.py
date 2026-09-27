@@ -276,7 +276,6 @@ class CentralEventProcessor:
             summary = session_summary if isinstance(session_summary, dict) else {}
             server_name = server.get("display_name") or server.get("server_key") or "the server"
             return (f"{icon} {name} has left {server_name}.{suffix}\n"
-                    f"Duration: {int(summary.get('duration_minutes', summary.get('total_counted_minutes', 0)) or 0)} min\n"
                     f"Session: {int(summary.get('total_counted_minutes', 0) or 0)} min\n"
                     f"Active: {int(summary.get('active_minutes', 0) or 0)} min\n"
                     f"Idle: {int(summary.get('idle_minutes', 0) or 0)} min\n"

@@ -1102,7 +1102,8 @@ def _authoritative_activity_disconnect(root: Path) -> Mapping[str, object]:
             or {key: duplicate_session.get(key) for key in expected_totals} != expected_totals:
         raise AssertionError("duplicate disconnect changed completed session totals")
     message = final_outbox[0].get("message", "")
-    if not all(label in message for label in ("Duration:", "Session:", "Active:", "Idle:", "AFK:")):
+    if not all(label in message for label in ("Session:", "Active:", "Idle:", "AFK:")) \
+            or "Duration:" in message:
         raise AssertionError("completed session capture was not NetworkBot-compatible")
 
     # Use the real durable publisher with a narrow deterministic Discord

@@ -61,8 +61,11 @@ structured work type, numeric field list, and fixed/hourly compensation while
 retaining the durable value/rate fields. A creator cannot accept their own
 contract. When `channels.jobs` is configured, creation posts a persistent
 Accept card; the button calls the same atomic central acceptance path and open
-cards are restored after restart. Without that channel configuration, the
-durable slash commands remain available.
+cards are restored after restart. Accepted cards render the persisted acceptor
+identity and Discord timestamp from the contract record, so attribution is
+retained across card refreshes and bot restarts. Compensation is rendered as a
+currency amount (for example `Fixed - $1` or `Hourly - $250/hour`). Without
+that channel configuration, the durable slash commands remain available.
 
 The jobs channel is guild-level deployment configuration, not a server or
 business-logic constant. The checked-in `discord.json` carries the current

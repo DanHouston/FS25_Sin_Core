@@ -42,6 +42,22 @@ class BusinessWorkflowTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             service.complete(record["contract_id"], "unrelated")
 
+    def test_contract_acceptance_persists_attribution_for_card_refresh(self):
+        service = ContractService(self.database)
+        self.db.contracts.find_one.side_effect = [
+            {"contract_id": "contract-1", "creator_discord_id": "creator", "status": "open"},
+            {"contract_id": "contract-1", "creator_discord_id": "creator", "status": "accepted",
+             "acceptor_discord_id": "acceptor", "acceptor_display_name": "Matt70",
+             "accepted_at": "2026-09-27T12:00:00+00:00"},
+        ]
+        self.db.contracts.update_one.return_value.modified_count = 1
+        accepted = service.accept("contract-1", "acceptor", actor_name="Matt70")
+        update = self.db.contracts.update_one.call_args.args[1]["$set"]
+        self.assertEqual(update["acceptor_discord_id"], "acceptor")
+        self.assertEqual(update["acceptor_display_name"], "Matt70")
+        self.assertIn("accepted_at", update)
+        self.assertEqual(accepted["acceptor_display_name"], "Matt70")
+
     def test_contract_creator_gets_explicit_self_acceptance_error(self):
         service = ContractService(self.database)
         self.db.contracts.find_one.return_value = {

@@ -9,7 +9,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from discord import app_commands
 
 from fs25_network_core.bot_frontend import (CommunityEventView, ContractView, FarmRequestView,
-                                            NetworkBot, format_farm_roster, player_choice_label)
+                                            NetworkBot, format_compensation, format_farm_roster,
+                                            player_choice_label)
 from fs25_network_core.channel_policy import COMMAND_CHANNELS
 from fs25_network_core.map_service import MapUnavailable
 from tests.test_map_service import rgba_base, synthetic_model
@@ -285,6 +286,21 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(contract_view.children[0].custom_id, "sin:contract:accept:contract-1")
         self.assertEqual(event_view.children[0].custom_id, "sin:event:join:event-1")
         self.assertEqual(event_view.children[1].custom_id, "sin:event:leave:event-1")
+
+    async def test_contract_card_renders_persisted_acceptance_and_currency(self):
+        record = {
+            "contract_id": "contract-1", "title": "Harvest Field 44", "description": "Sorghum",
+            "work_type": "harvesting", "fields": "44", "server_name": "Hobo",
+            "compensation_type": "fixed", "rate": 1, "creator_discord_id": "creator",
+            "status": "accepted", "acceptor_discord_id": "42", "acceptor_display_name": "Matt70",
+            "accepted_at": __import__("datetime").datetime(2026, 9, 27, 12, tzinfo=__import__("datetime").timezone.utc),
+        }
+        text = NetworkBot.contract_card_text(record)
+        self.assertIn("Compensation: Fixed - $1", text)
+        self.assertIn("Accepted by: Matt70 (<@42>)", text)
+        self.assertIn("Accepted: <t:1790510400:F>", text)
+        self.assertEqual(format_compensation(dict(record, compensation_type="hourly", rate=250)),
+                         "Hourly - $250/hour")
 
     async def test_bank_commands_resolve_authenticated_context_without_server_selector(self):
         for name in ("deposit", "withdraw"):

@@ -205,6 +205,9 @@ On a remote client, `sinSelfTest` reports server-authoritative telemetry as
 unavailable; run it on the dedicated server for the tracker count. Normal
 Discord usage is `/activity_status`. Staff may use
 `/activity_status member:@Player` without copying a raw FS25 identity.
+Disconnect activity cards show one `Session` total: the sum of counted active,
+idle, and AFK minutes. The separate `Duration` label was redundant and is not
+published.
 
 ### Map discovery probe
 

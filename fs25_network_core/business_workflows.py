@@ -278,17 +278,20 @@ class ContractService:
                        "marketplace_message_id": str(message_id),
                        "marketplace_updated_at": _now()}})
 
-    def accept(self, contract_id, actor_id, farm_id=None):
+    def accept(self, contract_id, actor_id, farm_id=None, actor_name=None):
         existing = self.get(contract_id)
         if existing and existing.get("world_id"):
             self._world(existing["server_key"], existing["save_key"], existing["world_id"])
         if existing and existing.get("creator_discord_id") == str(actor_id):
             raise ValueError("You can't accept a contract posted by your own farm")
+        acceptance = {"status": "accepted", "acceptor_discord_id": str(actor_id),
+                      "acceptor_farm_id": farm_id, "accepted_at": _now()}
+        if actor_name:
+            acceptance["acceptor_display_name"] = _text(actor_name, "Acceptor display name", 80)
         result = self.db.contracts.update_one(
             {"contract_id": str(contract_id), "status": "open",
              "creator_discord_id": {"$ne": str(actor_id)}},
-            {"$set": {"status": "accepted", "acceptor_discord_id": str(actor_id),
-                      "acceptor_farm_id": farm_id, "accepted_at": _now()}})
+            {"$set": acceptance})
         if result.modified_count != 1:
             raise ValueError("Contract is unavailable or cannot be accepted by this actor")
         return self.get(contract_id)

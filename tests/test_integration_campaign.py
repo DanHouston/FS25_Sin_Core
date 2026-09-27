@@ -105,9 +105,10 @@ class IntegrationCampaignTests(unittest.TestCase):
         self.assertEqual(evidence["outbox_published"], {
             "count": 1, "status": "published", "captured_messages": 1})
         message = evidence["networkbot_completed_session"]["message"]
-        for line in ("Duration: 12 min", "Session: 12 min", "Active: 1 min",
+        for line in ("Session: 12 min", "Active: 1 min",
                      "Idle: 10 min", "AFK: 1 min"):
             self.assertIn(line, message)
+        self.assertNotIn("Duration:", message)
 
     def test_composed_backlog_and_central_map_boundaries(self):
         backlog = run_named_scenario("control_plane_backlog")

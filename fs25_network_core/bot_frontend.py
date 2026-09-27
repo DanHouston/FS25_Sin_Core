@@ -136,6 +136,37 @@ def discord_timestamp(value):
     return str(value or "time unavailable")
 
 
+def format_currency(value):
+    """Format a contract amount as a readable dollar value."""
+    try:
+        numeric = float(value or 0)
+    except (TypeError, ValueError):
+        return "$0"
+    if numeric.is_integer():
+        return f"${int(numeric):,}"
+    return f"${numeric:,.2f}"
+
+
+def format_compensation(record):
+    """Render every supported compensation type consistently."""
+    compensation_type = str(record.get("compensation_type", "fixed") or "fixed").strip().lower()
+    amount = format_currency(record.get("rate", record.get("value", 0)))
+    labels = {"fixed": "Fixed", "hourly": "Hourly"}
+    label = labels.get(compensation_type, compensation_type.replace("_", " ").title() or "Other")
+    suffix = "/hour" if compensation_type == "hourly" else ""
+    return f"{label} - {amount}{suffix}"
+
+
+def contract_acceptor_text(record):
+    """Render the persisted acceptance identity, with a durable mention fallback."""
+    discord_id = record.get("acceptor_discord_id")
+    if not discord_id:
+        return "Unknown SiN member"
+    display_name = str(record.get("acceptor_display_name") or "").strip()
+    mention = f"<@{discord_id}>"
+    return f"{display_name} ({mention})" if display_name else mention
+
+
 class ContractView(discord.ui.View):
     """Persistent marketplace action backed by the durable contract state."""
 
@@ -151,7 +182,9 @@ class ContractView(discord.ui.View):
     async def accept_contract(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             record = await asyncio.to_thread(self.bot.contracts.accept, self.contract_id,
-                                             str(interaction.user.id))
+                                             str(interaction.user.id),
+                                             actor_name=(getattr(interaction.user, "display_name", None)
+                                                         or getattr(interaction.user, "name", None)))
         except ValueError as error:
             await interaction.response.send_message(str(error), ephemeral=True)
             return
@@ -1075,7 +1108,7 @@ class NetworkBot(discord.Client):
                                              server_name=context.get("server_name"))
             published = await self.publish_contract_card(record)
             await interaction.response.send_message(
-                f"**{record['title']}** is open. {compensation.name}: {rate:,}."
+                f"**{record['title']}** is open. Compensation: {format_compensation(record)}."
                 + (" Posted in the jobs channel." if published else
                    " The jobs channel is not configured, so use `/contract_list` to find it."), ephemeral=True)
 
@@ -1087,7 +1120,7 @@ class NetworkBot(discord.Client):
         @app_commands.check(channel_check)
         async def contract_list(interaction: discord.Interaction):
             records = await asyncio.to_thread(self.contracts.open)
-            text = "\n".join(f"**{r['title']}** — {r.get('compensation_type', 'fixed').title()}: {r.get('rate', r.get('value', 0)):,}" for r in records)
+            text = "\n".join(f"**{r['title']}** — {format_compensation(r)}" for r in records)
             await interaction.response.send_message(text or "No open contracts.", ephemeral=True)
 
         @self.tree.command(name="contract_view", description="View a SiN contract")
@@ -1099,7 +1132,10 @@ class NetworkBot(discord.Client):
             await interaction.response.send_message(
                 f"**{record['title']}**\n{record['description']}\nStatus: {record['status']}\n"
                 f"Work: {record.get('work_type', 'general').title()}\nFields: {record.get('fields') or 'unspecified'}\n"
-                f"Compensation: {record.get('compensation_type', 'fixed').title()} {record.get('rate', record['value']):,}", ephemeral=True)
+                f"Compensation: {format_compensation(record)}\n"
+                + (f"Accepted by: {contract_acceptor_text(record)}\n"
+                   f"Accepted: {discord_timestamp(record.get('accepted_at'))}"
+                   if record.get('acceptor_discord_id') and record.get('accepted_at') else ""), ephemeral=True)
 
         @contract_view.autocomplete("contract_id")
         async def contract_view_autocomplete(interaction: discord.Interaction, current: str):
@@ -1108,7 +1144,10 @@ class NetworkBot(discord.Client):
         @self.tree.command(name="contract_accept", description="Accept an open SiN contract")
         @app_commands.check(channel_check)
         async def contract_accept(interaction: discord.Interaction, contract_id: str):
-            record = await asyncio.to_thread(self.contracts.accept, contract_id, str(interaction.user.id))
+            record = await asyncio.to_thread(
+                self.contracts.accept, contract_id, str(interaction.user.id),
+                actor_name=(getattr(interaction.user, "display_name", None)
+                            or getattr(interaction.user, "name", None)))
             await interaction.response.send_message(f"Contract `{record['contract_id']}` accepted.", ephemeral=True)
 
         @contract_accept.autocomplete("contract_id")
@@ -1426,20 +1465,22 @@ class NetworkBot(discord.Client):
 
     @staticmethod
     def contract_card_text(record):
-        compensation = record.get("compensation_type", "fixed").title()
-        rate = record.get("rate", record.get("value", 0))
         fields = record.get("fields") or "unspecified"
         creator = record.get("creator_discord_id")
         creator_text = f"<@{creator}>" if creator else "SiN member"
         status = str(record.get("status", "open")).replace("_", " ").title()
         server = record.get("server_name") or record.get("server_key")
         server_line = f"Server: {server}\n" if server else ""
-        return (f"**{record.get('title', 'Farm work')}**\n"
+        text = (f"**{record.get('title', 'Farm work')}**\n"
                 f"{record.get('description', '')}\n"
                 f"Work: {str(record.get('work_type', 'general')).title()} | Fields: {fields}\n"
                 f"{server_line}"
-                f"Compensation: {compensation} {rate:,}\n"
+                f"Compensation: {format_compensation(record)}\n"
                 f"Posted by: {creator_text} | Status: {status}")
+        if record.get("acceptor_discord_id") and record.get("accepted_at"):
+            text += (f"\nAccepted by: {contract_acceptor_text(record)}"
+                     f"\nAccepted: {discord_timestamp(record.get('accepted_at'))}")
+        return text
 
     @staticmethod
     def event_card_text(record):

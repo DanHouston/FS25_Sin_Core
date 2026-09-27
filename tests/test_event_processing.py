@@ -160,6 +160,7 @@ class EventProcessingTests(unittest.TestCase):
         self.processor.process(event)
         message = self.database.db.activity_outbox.insert_one.call_args.args[0]["message"]
         self.assertIn("Session: 14 min", message)
+        self.assertNotIn("Duration:", message)
         self.assertIn("Active: 1 min", message)
         self.assertIn("AFK: 2 min", message)
 
