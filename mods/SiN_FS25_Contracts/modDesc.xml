@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<modDesc descVersion="92">
+    <author>SiN (SimNet)</author>
+    <version>0.1.0.0</version>
+    <iconFilename>icon_contracts.dds</iconFilename>
+    <title>
+        <en>SiN FS25 Contracts</en>
+    </title>
+    <description>
+        <en>Read-only diagnostics for native FS25 contracts.</en>
+    </description>
+    <multiplayer supported="true"/>
+    <extraSourceFiles>
+        <sourceFile filename="scripts/SiNContracts.lua"/>
+    </extraSourceFiles>
+</modDesc>

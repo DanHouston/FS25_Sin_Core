@@ -22,6 +22,7 @@ RELEASE_ASSETS = frozenset({
     "build-manifest.json",
     "FS25_SiN_Server.zip",
     "SiN_FS25_Crop_Settings.zip",
+    "SiN_FS25_Contracts.zip",
     "integration-campaign.json",
     "live-validation-manifest.json",
     "Restart-SiN-Agent.ps1",
@@ -34,6 +35,7 @@ CHECKSUM_ASSETS = frozenset({
     "sin-agent.zip",
     "FS25_SiN_Server.zip",
     "SiN_FS25_Crop_Settings.zip",
+    "SiN_FS25_Contracts.zip",
     "Update-SiN.ps1",
     "Update-SiN-Client.ps1",
     "Restart-SiN-Agent.ps1",
@@ -152,6 +154,30 @@ def _validate_crop_archive(path: Path) -> None:
         raise ReleaseValidationError("SiN_FS25_Crop_Settings.zip is not a valid ZIP archive") from error
 
 
+def _validate_contracts_archive(path: Path) -> None:
+    expected_required = {"modDesc.xml", "scripts/SiNContracts.lua", "icon_contracts.dds"}
+    try:
+        with ZipFile(path) as archive:
+            names = set(_safe_archive_names(archive, path.name))
+            if names != expected_required:
+                raise ReleaseValidationError("SiN_FS25_Contracts.zip has an unexpected layout")
+            try:
+                descriptor = ElementTree.fromstring(archive.read("modDesc.xml"))
+            except (ValueError, ElementTree.ParseError) as error:
+                raise ReleaseValidationError("SiN_FS25_Contracts.zip has invalid modDesc.xml") from error
+            if descriptor.get("descVersion") != "92":
+                raise ReleaseValidationError("SiN_FS25_Contracts.zip has an unexpected descVersion")
+            source_names = [node.get("filename") for node in descriptor.findall("./extraSourceFiles/sourceFile")]
+            if source_names != ["scripts/SiNContracts.lua"]:
+                raise ReleaseValidationError("SiN_FS25_Contracts.zip has unexpected source files")
+            icon_name = descriptor.findtext("iconFilename")
+            if icon_name != "icon_contracts.dds":
+                raise ReleaseValidationError("SiN_FS25_Contracts.zip has an invalid iconFilename")
+            validate_fs25_lua_source(archive.read("scripts/SiNContracts.lua"), "scripts/SiNContracts.lua")
+    except BadZipFile as error:
+        raise ReleaseValidationError("SiN_FS25_Contracts.zip is not a valid ZIP archive") from error
+
+
 def validate_release_directory(root: str | Path, *, expected_version: str | None = None,
                                require_clean: bool = False) -> dict:
     """Validate the complete release output, including packaged Lua bytes."""
@@ -186,6 +212,7 @@ def validate_release_directory(root: str | Path, *, expected_version: str | None
         "sin-agent.zip": "agent_sha256",
         "FS25_SiN_Server.zip": "server_sha256",
         "SiN_FS25_Crop_Settings.zip": "crop_settings_sha256",
+        "SiN_FS25_Contracts.zip": "contracts_sha256",
         "Update-SiN.ps1": "updater_sha256",
         "Update-SiN-Client.ps1": "client_updater_sha256",
         "Restart-SiN-Agent.ps1": "agent_restart_sha256",
@@ -208,4 +235,5 @@ def validate_release_directory(root: str | Path, *, expected_version: str | None
     _validate_agent_archive(root / "sin-agent.zip")
     _validate_server_archive(root / "FS25_SiN_Server.zip")
     _validate_crop_archive(root / "SiN_FS25_Crop_Settings.zip")
+    _validate_contracts_archive(root / "SiN_FS25_Contracts.zip")
     return manifest
