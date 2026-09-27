@@ -171,6 +171,8 @@ local function applyFruit(fruitType, entry, state)
         return false
     end
     local changed = false
+    local harvestPolicy = {}
+    local hasHarvestPolicy = false
     for _, period in ipairs(entry.periods) do
         local runtimePeriod = seasonal.periods[period.index]
         if type(runtimePeriod) ~= "table" then
@@ -187,10 +189,9 @@ local function applyFruit(fruitType, entry, state)
                 end
             end
             if period.harvestAllowed ~= nil then
-                if type(runtimePeriod.harvestAllowed) ~= "boolean" then
-                    state.unsupported = state.unsupported + 1
-                    addDiagnostic(state, entry.name .. ": harvest descriptor unsupported")
-                elseif runtimePeriod.harvestAllowed ~= period.harvestAllowed then
+                harvestPolicy[period.index] = period.harvestAllowed
+                hasHarvestPolicy = true
+                if type(runtimePeriod.harvestAllowed) == "boolean" and runtimePeriod.harvestAllowed ~= period.harvestAllowed then
                     runtimePeriod.harvestAllowed = period.harvestAllowed
                     changed = true
                 end
@@ -219,6 +220,29 @@ local function applyFruit(fruitType, entry, state)
             end
         end
     end
+    -- FS25 normally derives harvestability from getIsHarvestableInPeriod(),
+    -- rather than exposing a period.harvestAllowed field.  Override only the
+    -- configured fruit's calendar gate; native growth state/readiness remains
+    -- authoritative, so an immature field is never made harvestable here.
+    if hasHarvestPolicy then
+        if type(fruitType.getIsHarvestableInPeriod) ~= "function" then
+            state.unsupported = state.unsupported + 1
+            addDiagnostic(state, entry.name .. ": harvest period API unsupported")
+        elseif fruitType.__sinCropHarvestPolicyVersion ~= state.policyVersion then
+            local nativeHarvestableInPeriod = fruitType.getIsHarvestableInPeriod
+            fruitType.__sinCropNativeHarvestableInPeriod = nativeHarvestableInPeriod
+            fruitType.__sinCropHarvestPeriods = harvestPolicy
+            fruitType.__sinCropHarvestPolicyVersion = state.policyVersion
+            fruitType.getIsHarvestableInPeriod = function(self, growthMode, seasonPeriod)
+                local allowed = self.__sinCropHarvestPeriods[seasonPeriod]
+                if allowed ~= nil then
+                    return allowed
+                end
+                return self.__sinCropNativeHarvestableInPeriod(self, growthMode, seasonPeriod)
+            end
+            changed = true
+        end
+    end
     return changed
 end
 
@@ -233,6 +257,7 @@ function SiNCropSettings.apply(manager, missionInfo)
         return
     end
     local state = { applied = 0, changed = 0, skipped = 0, unsupported = 0,
+        policyVersion = policy.version,
         conflicts = policy.conflicts or 0, diagnosticCount = 0 }
     local available = fruitTypes(manager)
     if available == nil then

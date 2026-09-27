@@ -2,8 +2,9 @@
 
 `SiN_FS25_Crop_Settings.zip` is a standalone multiplayer mod. It is deliberately
 separate from `FS25_SiN_Server` and from every map. The shipped
-`config/fruit-policy.xml` is an empty, versioned policy (`schemaVersion="1"`,
-`policyVersion="0.1.0"`), so the initial package does not change crop behavior.
+`config/fruit-policy.xml` contains the first deliberately narrow production
+probe: only the native `SORGHUM` fruit is enabled (`policyVersion="0.2.0-sorghum"`).
+No other crop has an entry, so every other map fruit remains untouched.
 
 ## Runtime boundary
 
@@ -21,14 +22,27 @@ write:
 
 - `fruitType.growthDataSeasonal.periods[index].plantingAllowed`;
 - `fruitType.growthDataSeasonal.periods[index].harvestAllowed`, when that
-  native descriptor exposes it;
+  native descriptor exposes it; and otherwise the fruit's native
+  `getIsHarvestableInPeriod(growthMode, seasonPeriod)` method is wrapped for
+  the configured fruit only. The wrapper changes the calendar-period gate but
+  leaves native growth states and `getIsHarvestReady` unchanged, so an
+  immature field cannot be harvested merely because the month is allowed.
 - `fruitType.growthDataSeasonal.periods[index].growthTime`, when the native
   descriptor exposes a numeric timing value;
 - `fruitType.growthDataSeasonal.periods[index].growthMapping[fromState]`, when
   that native mapping is present.
 
-The final crop calendar is not selected yet. A policy change requires a normal
-map/save reload; the script does not continuously overwrite native state.
+The Sorghum probe intentionally changes only planting and harvest periods:
+
+- planting: `MID_SPRING`, `LATE_SPRING` (April-May);
+- harvest: `LATE_SUMMER`, `EARLY_AUTUMN`, `MID_AUTUMN`, `LATE_AUTUMN`
+  (August-November).
+
+No `growthTime` or `growthMapping` entries are shipped. Native Sorghum
+transitions still determine when a field reaches a harvest-ready state; the
+policy only permits that state to be harvested in the requested window. A
+policy change requires a normal map/save reload; the script does not
+continuously overwrite native state.
 
 The reviewed schema for a future entry is:
 
@@ -43,7 +57,8 @@ The reviewed schema for a future entry is:
 </fruit>
 ```
 
-This is documentation only; the shipped policy contains no enabled fruit.
+The shipped policy is the Sorghum probe above. Future entries must be added
+deliberately and reviewed against the active map's native fruit descriptor.
 
 ## Deployment and verification
 
@@ -53,18 +68,17 @@ release build publishes `SiN_FS25_Crop_Settings.zip` and records its SHA-256 in
 alongside the server ZIP, then publish the pack through the normal modpack
 workflow. Do not edit a map ZIP to apply this policy.
 
-For the first live probe, use a disposable policy entry in a staging copy of
-`config/fruit-policy.xml` for a fruit known to exist on the target map (for
-example, one `plantingAllowed` period). Build one test ZIP, install the same
-bytes on server and client, restart/reload the save, and verify one bounded log
-line like:
+For the Sorghum live probe, build the ZIP, install the same bytes on server and
+every client, and restart/reload the save (policy application is map-load
+scoped). Verify one bounded log line like:
 
-`[SiN Crop Settings] policy=test-1 map=<map> applied=1 changed=1 skipped=0 unsupported=0 conflicts=0`
+`[SiN Crop Settings] policy=0.2.0-sorghum map=<map> applied=1 changed=1 skipped=0 unsupported=0 conflicts=0`
 
-Then inspect the in-game calendar and planting behavior. Restore the empty
-production policy before publishing the normal release. Existing crop density
-states are not rewritten; changing future calendar transitions should therefore
-be validated against a backup of the save.
+Then inspect the in-game calendar: Sorghum must show Plant Apr-May and Harvest
+Aug-Nov, while Wheat (and another unchanged crop) must retain its existing
+calendar. Existing crop density states are not rewritten; changing future
+calendar transitions should therefore be validated against a backup of the
+save.
 
 This layer cannot supply missing fruits, foliage layers, density maps, map
 terrain, productions, sell points, or map-specific scripts. Those remain map

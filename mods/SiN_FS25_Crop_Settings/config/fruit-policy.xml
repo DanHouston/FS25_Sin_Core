@@ -1,5 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Intentionally empty: no production crop behavior is selected yet. -->
-<cropPolicy schemaVersion="1" policyVersion="0.1.0">
-    <fruits/>
+<!-- The first production probe is deliberately limited to the native SORGHUM fruit. -->
+<cropPolicy schemaVersion="1" policyVersion="0.2.0-sorghum">
+    <fruits>
+        <fruit name="SORGHUM" enabled="true">
+            <seasonal>
+                <period name="EARLY_SPRING" plantingAllowed="false" harvestAllowed="false"/>
+                <period name="MID_SPRING" plantingAllowed="true" harvestAllowed="false"/>
+                <period name="LATE_SPRING" plantingAllowed="true" harvestAllowed="false"/>
+                <period name="EARLY_SUMMER" plantingAllowed="false" harvestAllowed="false"/>
+                <period name="MID_SUMMER" plantingAllowed="false" harvestAllowed="false"/>
+                <period name="LATE_SUMMER" plantingAllowed="false" harvestAllowed="true"/>
+                <period name="EARLY_AUTUMN" plantingAllowed="false" harvestAllowed="true"/>
+                <period name="MID_AUTUMN" plantingAllowed="false" harvestAllowed="true"/>
+                <period name="LATE_AUTUMN" plantingAllowed="false" harvestAllowed="true"/>
+                <period name="EARLY_WINTER" plantingAllowed="false" harvestAllowed="false"/>
+                <period name="MID_WINTER" plantingAllowed="false" harvestAllowed="false"/>
+                <period name="LATE_WINTER" plantingAllowed="false" harvestAllowed="false"/>
+            </seasonal>
+        </fruit>
+    </fruits>
 </cropPolicy>

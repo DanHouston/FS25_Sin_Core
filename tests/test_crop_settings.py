@@ -77,3 +77,78 @@ class CropSettingsTests(unittest.TestCase):
         first = apply_policy(policy, [descriptor])
         second = apply_policy(policy, [descriptor])
         self.assertEqual((first.changed, second.changed, second.applied), (1, 0, 0))
+
+    def test_shipped_sorghum_policy_is_only_enabled_crop_and_has_exact_windows(self):
+        policy = parse_policy(__import__("pathlib").Path("mods/SiN_FS25_Crop_Settings/config/fruit-policy.xml"))
+        self.assertEqual([fruit.name for fruit in policy.fruits], ["SORGHUM"])
+        self.assertTrue(policy.fruits[0].enabled)
+        periods = {period.name: period for period in policy.fruits[0].periods}
+        self.assertEqual(
+            {name for name, period in periods.items() if period.planting_allowed},
+            {"MID_SPRING", "LATE_SPRING"},
+        )
+        self.assertEqual(
+            {name for name, period in periods.items() if period.harvest_allowed},
+            {"LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN", "LATE_AUTUMN"},
+        )
+        self.assertTrue(all(period.growth_time is None and not period.transitions for period in periods.values()))
+
+    def test_sorghum_harvest_gate_extends_calendar_without_growth_changes(self):
+        policy = parse_policy(__import__("pathlib").Path("mods/SiN_FS25_Crop_Settings/config/fruit-policy.xml"))
+        descriptor = {
+            "name": "sorghum",
+            "growthDataSeasonal": {"periods": {
+                name: {"plantingAllowed": name in {"MID_SPRING", "LATE_SPRING"},
+                       "growthMapping": {2: 3, 3: 4}}
+                for name in ("EARLY_SPRING", "MID_SPRING", "LATE_SPRING", "EARLY_SUMMER",
+                             "MID_SUMMER", "LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN",
+                             "LATE_AUTUMN", "EARLY_WINTER", "MID_WINTER", "LATE_WINTER")
+            }},
+            "harvestableInPeriod": {name: name in {"LATE_SUMMER", "EARLY_AUTUMN"}
+                                    for name in ("EARLY_SPRING", "MID_SPRING", "LATE_SPRING", "EARLY_SUMMER",
+                                                 "MID_SUMMER", "LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN",
+                                                 "LATE_AUTUMN", "EARLY_WINTER", "MID_WINTER", "LATE_WINTER")},
+        }
+        original_mapping = {name: dict(period["growthMapping"])
+                             for name, period in descriptor["growthDataSeasonal"]["periods"].items()}
+        result = apply_policy(policy, [descriptor])
+        self.assertEqual((result.applied, result.unsupported), (1, 0))
+        self.assertEqual(
+            {name for name, allowed in descriptor["harvestableInPeriod"].items() if allowed},
+            {"LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN", "LATE_AUTUMN"},
+        )
+        self.assertEqual(
+            {name for name, period in descriptor["growthDataSeasonal"]["periods"].items()
+             if period["plantingAllowed"]},
+            {"MID_SPRING", "LATE_SPRING"},
+        )
+        self.assertEqual(original_mapping,
+                         {name: dict(period["growthMapping"])
+                          for name, period in descriptor["growthDataSeasonal"]["periods"].items()})
+
+    def test_harvest_method_policy_keeps_native_readiness_boundary(self):
+        policy = parse_policy(__import__("pathlib").Path("mods/SiN_FS25_Crop_Settings/config/fruit-policy.xml"))
+        native = lambda _growth_mode, period: period == "LATE_SUMMER"
+        descriptor = {"name": "SORGHUM", "growthDataSeasonal": {"periods": {
+            name: {"plantingAllowed": False} for name in (
+                "EARLY_SPRING", "MID_SPRING", "LATE_SPRING", "EARLY_SUMMER",
+                "MID_SUMMER", "LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN",
+                "LATE_AUTUMN", "EARLY_WINTER", "MID_WINTER", "LATE_WINTER")
+        }}, "getIsHarvestableInPeriod": native}
+        result = apply_policy(policy, [descriptor])
+        self.assertEqual(result.unsupported, 0)
+        self.assertEqual(descriptor["_sin_crop_harvest_policy"]["LATE_AUTUMN"], True)
+        # The policy changes the period gate; native maturity/readiness remains
+        # a separate runtime check and is not rewritten by this layer.
+        self.assertTrue(native(0, "LATE_SUMMER"))
+        self.assertFalse(native(0, "LATE_AUTUMN"))
+
+    def test_other_fruit_is_unchanged_by_sorghum_policy(self):
+        policy = parse_policy(__import__("pathlib").Path("mods/SiN_FS25_Crop_Settings/config/fruit-policy.xml"))
+        wheat = {"name": "WHEAT", "growthDataSeasonal": {"periods": {
+            "MID_SPRING": {"plantingAllowed": False, "growthMapping": {2: 3}}
+        }}}
+        before = repr(wheat)
+        result = apply_policy(policy, [wheat])
+        self.assertEqual(result.applied, 0)
+        self.assertEqual(repr(wheat), before)

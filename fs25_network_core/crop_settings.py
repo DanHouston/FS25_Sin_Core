@@ -195,6 +195,7 @@ def apply_policy(policy: CropPolicy, descriptors: list[dict[str, Any]]) -> Apply
             result.diagnostics.append(f"{name}: seasonal descriptor unsupported")
             continue
         fruit_changed = False
+        harvest_policy: dict[str, bool] = {}
         for period in entry.periods:
             runtime = period_map.get(period.name) or period_map.get(period.name.lower())
             if not isinstance(runtime, dict):
@@ -209,10 +210,8 @@ def apply_policy(policy: CropPolicy, descriptors: list[dict[str, Any]]) -> Apply
                     runtime["plantingAllowed"] = period.planting_allowed
                     fruit_changed = True
             if period.harvest_allowed is not None:
-                if not isinstance(runtime.get("harvestAllowed"), bool):
-                    result.unsupported += 1
-                    result.diagnostics.append(f"{name}/{period.name}: harvest field unsupported")
-                elif runtime["harvestAllowed"] != period.harvest_allowed:
+                harvest_policy[period.name] = period.harvest_allowed
+                if isinstance(runtime.get("harvestAllowed"), bool) and runtime["harvestAllowed"] != period.harvest_allowed:
                     runtime["harvestAllowed"] = period.harvest_allowed
                     fruit_changed = True
             if period.growth_time is not None:
@@ -232,6 +231,25 @@ def apply_policy(policy: CropPolicy, descriptors: list[dict[str, Any]]) -> Apply
                         if mapping.get(from_state) != to_state:
                             mapping[from_state] = to_state
                             fruit_changed = True
+        if harvest_policy:
+            # The native FS25 descriptor commonly exposes harvestability as
+            # getIsHarvestableInPeriod(), not period.harvestAllowed.  The
+            # deterministic mirror represents that method's policy gate with
+            # this mapping; maturity/readiness remains outside the policy.
+            harvest_api = descriptor.get("harvestableInPeriod")
+            if isinstance(harvest_api, dict):
+                for period_name, allowed in harvest_policy.items():
+                    if harvest_api.get(period_name) != allowed:
+                        harvest_api[period_name] = allowed
+                        fruit_changed = True
+            elif callable(descriptor.get("getIsHarvestableInPeriod")):
+                descriptor["_sin_crop_harvest_policy"] = dict(harvest_policy)
+                fruit_changed = True
+            elif not any(isinstance((_periods(descriptor) or {}).get(p), dict)
+                         and isinstance((_periods(descriptor) or {}).get(p, {}).get("harvestAllowed"), bool)
+                         for p in harvest_policy):
+                result.unsupported += 1
+                result.diagnostics.append(f"{name}: harvest period API unsupported")
         descriptor["_sin_crop_policy_version"] = policy.policy_version
         result.applied += 1
         if fruit_changed:
