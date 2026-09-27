@@ -270,6 +270,12 @@ class ContractService:
                 query["world_id"] = {"$exists": False}
         return list(self.db.contracts.find(query).sort("created_at", 1).limit(50))
 
+    def marketplace(self):
+        """Return contracts whose Discord card location is durably known."""
+        query = {"marketplace_channel_id": {"$exists": True},
+                 "marketplace_message_id": {"$exists": True}}
+        return list(self.db.contracts.find(query).sort("created_at", 1).limit(200))
+
     def set_marketplace_message(self, contract_id, channel_id, message_id):
         """Record the public card location without changing contract state."""
         self.db.contracts.update_one(

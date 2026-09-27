@@ -1589,7 +1589,7 @@ class NetworkBot(discord.Client):
             except Exception as error:
                 logging.info("Contract map rendering unavailable; posting text-only card: %s", error)
             send_kwargs = {"content": self.contract_card_text(record),
-                           "view": ContractView(self, record["contract_id"])}
+                           "view": self.contract_view(record)}
             if attachment is not None:
                 send_kwargs["file"] = attachment
             message = await channel.send(**send_kwargs)
@@ -1624,12 +1624,35 @@ class NetworkBot(discord.Client):
         if self._contract_views_restored:
             return
         self._contract_views_restored = True
-        records = await asyncio.to_thread(self.contracts.open)
+        records = await asyncio.to_thread(self.contracts.marketplace)
         for record in records:
             channel_id = record.get("marketplace_channel_id")
             message_id = record.get("marketplace_message_id")
-            if channel_id and message_id:
-                self.add_view(ContractView(self, record["contract_id"]), message_id=int(message_id))
+            if not channel_id or not message_id:
+                continue
+            try:
+                channel = self.get_channel(int(channel_id))
+                if channel is None:
+                    channel = await self.fetch_channel(int(channel_id))
+                message = await channel.fetch_message(int(message_id))
+                view = self.contract_view(record)
+                if record.get("status") == "open":
+                    self.add_view(view, message_id=int(message_id))
+                content = self.contract_card_text(record)
+                if getattr(message, "content", None) != content:
+                    await message.edit(content=content, view=view)
+            except (discord.DiscordException, TypeError, ValueError) as error:
+                logging.warning("Contract card startup refresh unavailable contract=%s: %s",
+                                record.get("contract_id"), error)
+
+    def contract_view(self, record):
+        """Build the persisted card view without re-enabling accepted cards."""
+        view = ContractView(self, record["contract_id"])
+        if record.get("status") != "open":
+            button = view.children[0]
+            button.disabled = True
+            button.label = "Accepted" if record.get("status") == "accepted" else str(record.get("status", "closed")).title()
+        return view
 
     async def restore_event_views(self):
         records = await asyncio.to_thread(self.community_events.list)

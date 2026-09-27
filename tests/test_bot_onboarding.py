@@ -302,6 +302,27 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(format_compensation(dict(record, compensation_type="hourly", rate=250)),
                          "Hourly - $250/hour")
 
+    async def test_startup_refreshes_existing_contract_card_from_durable_record(self):
+        record = {
+            "contract_id": "contract-1", "title": "Harvest Field 44", "description": "Sorghum",
+            "work_type": "harvesting", "fields": "44", "server_name": "Hobo",
+            "compensation_type": "fixed", "rate": 1, "creator_discord_id": "creator",
+            "status": "accepted", "acceptor_discord_id": "42", "acceptor_display_name": "Matt70",
+            "accepted_at": __import__("datetime").datetime(2026, 9, 27, 12,
+                                                               tzinfo=__import__("datetime").timezone.utc),
+            "marketplace_channel_id": 123, "marketplace_message_id": 99,
+        }
+        message = SimpleNamespace(content="old card", edit=AsyncMock())
+        channel = SimpleNamespace(fetch_message=AsyncMock(return_value=message))
+        self.bot.contracts.marketplace = MagicMock(return_value=[record])
+        self.bot.get_channel = MagicMock(return_value=channel)
+        self.bot.add_view = MagicMock()
+        await self.bot.restore_contract_views()
+        message.edit.assert_awaited_once()
+        self.assertIn("Accepted by: Matt70 (<@42>)", message.edit.await_args.kwargs["content"])
+        self.assertIn("Compensation: Fixed - $1", message.edit.await_args.kwargs["content"])
+        self.bot.add_view.assert_not_called()
+
     async def test_bank_commands_resolve_authenticated_context_without_server_selector(self):
         for name in ("deposit", "withdraw"):
             command = self.bot.tree.get_command(name)
