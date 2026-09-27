@@ -1,50 +1,124 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The first production probe is deliberately limited to the native SORGHUM fruit. -->
-<cropPolicy schemaVersion="1" policyVersion="0.2.1-sorghum">
+<!-- Canonical SiN crop calendar. Period names follow FS25's twelve seasonal periods. -->
+<cropPolicy schemaVersion="1" policyVersion="0.3.0-full-calendar"
+    defaultPlantingAllowed="false" defaultHarvestAllowed="false">
     <fruits>
+        <fruit name="BARLEY" enabled="true" plantPeriods="EARLY_AUTUMN,MID_AUTUMN"
+               harvestPeriods="EARLY_SPRING,MID_SPRING,LATE_SPRING,EARLY_SUMMER">
+            <growth preserveNative="true" lifecycle="annual"
+                    stateChain="greenSmall,greenSmall2,greenMiddle,greenBig,greenBig2,harvestReady"><seasonal/></growth>
+        </fruit>
+        <fruit name="CANOLA" enabled="true" plantPeriods="LATE_SUMMER,EARLY_AUTUMN"
+               harvestPeriods="EARLY_SPRING,MID_SPRING,LATE_SPRING,EARLY_SUMMER">
+            <growth preserveNative="true" lifecycle="annual"
+                    stateChain="greenSmall,greenSmall2,greenSmall3,greenMiddle,greenMiddle2,greenBig,greenBig2,harvestReady"><seasonal/></growth>
+        </fruit>
+        <fruit name="CARROT" enabled="true" plantPeriods="MID_SPRING,LATE_SPRING"
+               harvestPeriods="LATE_SUMMER,EARLY_AUTUMN,MID_AUTUMN,LATE_AUTUMN">
+            <growth preserveNative="true" lifecycle="annual" stateChain="greenSmall,greenMiddle,greenBig,harvestReady"><seasonal/></growth>
+        </fruit>
+        <fruit name="MAIZE" enabled="true" plantPeriods="MID_SPRING,LATE_SPRING"
+               harvestPeriods="EARLY_AUTUMN,MID_AUTUMN,LATE_AUTUMN,EARLY_WINTER">
+            <growth preserveNative="true" lifecycle="annual"
+                    stateChain="greenSmall,greenMiddle,greenBig,harvestReadyGreen,harvestReadyGreen2,harvestReady3"><seasonal/></growth>
+        </fruit>
+        <fruit name="COTTON" enabled="true" plantPeriods="EARLY_SPRING,MID_SPRING"
+               harvestPeriods="EARLY_AUTUMN,MID_AUTUMN,LATE_AUTUMN,EARLY_WINTER">
+            <growth preserveNative="true" lifecycle="annual"
+                    stateChain="greenSmall,greenSmall2,greenMiddle,greenMiddle2,greenMiddle3,greenBig,greenBig2,harvestReady"><seasonal/></growth>
+        </fruit>
+        <fruit name="GRAPE" enabled="true" plantPeriods="EARLY_SPRING,MID_SPRING"
+               harvestPeriods="LATE_SUMMER,EARLY_AUTUMN,MID_AUTUMN,LATE_AUTUMN">
+            <growth preserveNative="true" lifecycle="perennial"><seasonal/></growth>
+        </fruit>
+        <fruit name="GRASS" enabled="true" plantPeriods="EARLY_SPRING,MID_SPRING,LATE_SPRING,EARLY_SUMMER,MID_SUMMER,LATE_SUMMER,EARLY_AUTUMN,MID_AUTUMN,LATE_AUTUMN"
+               harvestPeriods="EARLY_SPRING,MID_SPRING,LATE_SPRING,EARLY_SUMMER,MID_SUMMER,LATE_SUMMER,EARLY_AUTUMN,MID_AUTUMN,LATE_AUTUMN,EARLY_WINTER">
+            <growth preserveNative="true" lifecycle="perennial"><seasonal/></growth>
+        </fruit>
+        <fruit name="GREENBEAN" enabled="true" plantPeriods="MID_SPRING,LATE_SPRING"
+               harvestPeriods="MID_SUMMER,LATE_SUMMER,EARLY_AUTUMN,MID_AUTUMN">
+            <growth preserveNative="true" lifecycle="annual" stateChain="greenSmall,greenMiddle,greenBig,harvestReady"><seasonal/></growth>
+        </fruit>
+        <fruit name="RICELONGGRAIN" enabled="true" plantPeriods="MID_SPRING,LATE_SPRING"
+               harvestPeriods="LATE_SUMMER,EARLY_AUTUMN,MID_AUTUMN,LATE_AUTUMN">
+            <growth preserveNative="true" lifecycle="annual" stateChain="greenSmall,greenMiddle,greenMiddle2,greenBig,harvestReady"><seasonal/></growth>
+        </fruit>
+        <fruit name="OAT" enabled="true" plantPeriods="EARLY_SPRING,MID_SPRING"
+               harvestPeriods="MID_SUMMER,LATE_SUMMER,EARLY_AUTUMN,MID_AUTUMN">
+            <growth preserveNative="true" lifecycle="annual" stateChain="greenSmall,greenMiddle,greenBig,harvestReady"><seasonal/></growth>
+        </fruit>
+        <fruit name="OILSEEDRADISH" enabled="true" plantPeriods="EARLY_SPRING,MID_SPRING,LATE_SPRING,EARLY_SUMMER,MID_SUMMER,LATE_SUMMER,EARLY_AUTUMN,MID_AUTUMN">
+            <growth preserveNative="true" lifecycle="native"><seasonal/></growth>
+        </fruit>
+        <fruit name="OLIVE" enabled="true" plantPeriods="EARLY_SPRING,MID_SPRING"
+               harvestPeriods="EARLY_AUTUMN,MID_AUTUMN,LATE_AUTUMN,EARLY_WINTER">
+            <growth preserveNative="true" lifecycle="perennial"><seasonal/></growth>
+        </fruit>
+        <fruit name="PARSNIP" enabled="true" plantPeriods="MID_SPRING,LATE_SPRING"
+               harvestPeriods="LATE_SUMMER,EARLY_AUTUMN,MID_AUTUMN,LATE_AUTUMN">
+            <growth preserveNative="true" lifecycle="annual" stateChain="greenSmall,greenMiddle,greenBig,harvestReady"><seasonal/></growth>
+        </fruit>
+        <fruit name="PEA" enabled="true" plantPeriods="EARLY_SPRING,MID_SPRING"
+               harvestPeriods="EARLY_SUMMER,MID_SUMMER,LATE_SUMMER,EARLY_AUTUMN">
+            <growth preserveNative="true" lifecycle="annual" stateChain="greenSmall,greenMiddle,greenBig,harvestReady"><seasonal/></growth>
+        </fruit>
+        <fruit name="POPLAR" enabled="true" plantPeriods="EARLY_SPRING,MID_SPRING,LATE_SPRING,EARLY_SUMMER,MID_SUMMER,LATE_SUMMER,EARLY_AUTUMN,MID_AUTUMN"
+               harvestPeriods="EARLY_SPRING,MID_SPRING,LATE_SPRING,EARLY_SUMMER,MID_SUMMER,LATE_SUMMER,EARLY_AUTUMN,MID_AUTUMN,LATE_AUTUMN,EARLY_WINTER">
+            <growth preserveNative="true" lifecycle="perennial"><seasonal/></growth>
+        </fruit>
+        <fruit name="POTATO" enabled="true" plantPeriods="EARLY_SPRING,MID_SPRING"
+               harvestPeriods="MID_SUMMER,LATE_SUMMER,EARLY_AUTUMN,MID_AUTUMN">
+            <growth preserveNative="true" lifecycle="annual" stateChain="greenSmall,greenSmall2,greenMiddle,greenBig,harvestReady"><seasonal/></growth>
+        </fruit>
+        <fruit name="BEETROOT" enabled="true" plantPeriods="MID_SPRING,LATE_SPRING"
+               harvestPeriods="LATE_SUMMER,EARLY_AUTUMN,MID_AUTUMN,LATE_AUTUMN">
+            <growth preserveNative="true" lifecycle="annual" stateChain="greenSmall,greenMiddle,greenBig,harvestReady"><seasonal/></growth>
+        </fruit>
+        <fruit name="RICE" enabled="true" plantPeriods="MID_SPRING,LATE_SPRING"
+               harvestPeriods="LATE_SUMMER,EARLY_AUTUMN,MID_AUTUMN,LATE_AUTUMN">
+            <growth preserveNative="true" lifecycle="annual" stateChain="greenSmall,greenMiddle,greenMiddle2,greenBig,harvestReady"><seasonal/></growth>
+        </fruit>
         <fruit name="SORGHUM" enabled="true">
             <growth>
                 <seasonal initialState="greenBig">
-                <period name="EARLY_SPRING" plantingAllowed="false" harvestAllowed="false"/>
-                <period name="MID_SPRING" plantingAllowed="true" harvestAllowed="false">
-                    <update startState="invisible" endState="greenSmall"/>
-                </period>
-                <period name="LATE_SPRING" plantingAllowed="true" harvestAllowed="false">
-                    <update startState="invisible" endState="greenSmall"/>
-                    <update startState="greenSmall" endState="greenMiddle"/>
-                </period>
-                <period name="EARLY_SUMMER" plantingAllowed="false" harvestAllowed="false">
-                    <update startState="greenSmall" endState="greenMiddle"/>
-                    <update startState="greenMiddle" endState="greenBig"/>
-                </period>
-                <period name="MID_SUMMER" plantingAllowed="false" harvestAllowed="false">
-                    <update startState="greenMiddle" endState="greenBig"/>
-                    <!-- Replace the base July readiness transition. -->
-                    <update startState="greenBig" endState="greenBig"/>
-                </period>
-                <period name="LATE_SUMMER" plantingAllowed="false" harvestAllowed="true">
-                    <update startState="greenBig" endState="harvestReady"/>
-                </period>
-                <period name="EARLY_AUTUMN" plantingAllowed="false" harvestAllowed="true">
-                    <!-- Keep harvest-ready Sorghum through the September window. -->
-                    <update startState="harvestReady" endState="harvestReady"/>
-                </period>
-                <period name="MID_AUTUMN" plantingAllowed="false" harvestAllowed="true">
-                    <!-- Keep harvest-ready Sorghum through October. -->
-                    <update startState="harvestReady" endState="harvestReady"/>
-                </period>
-                <period name="LATE_AUTUMN" plantingAllowed="false" harvestAllowed="true">
-                    <!-- Keep harvest-ready Sorghum through November. -->
-                    <update startState="harvestReady" endState="harvestReady"/>
-                </period>
-                <period name="EARLY_WINTER" plantingAllowed="false" harvestAllowed="false">
-                    <!-- End the harvest window after November. -->
-                    <update startState="harvestReady" endState="dead"/>
-                </period>
-                <period name="MID_WINTER" plantingAllowed="false" harvestAllowed="false"/>
-                <period name="LATE_WINTER" plantingAllowed="false" harvestAllowed="false"/>
+                    <period name="EARLY_SPRING" plantingAllowed="false" harvestAllowed="false"/>
+                    <period name="MID_SPRING" plantingAllowed="true" harvestAllowed="false"><update startState="invisible" endState="greenSmall"/></period>
+                    <period name="LATE_SPRING" plantingAllowed="true" harvestAllowed="false"><update startState="invisible" endState="greenSmall"/><update startState="greenSmall" endState="greenMiddle"/></period>
+                    <period name="EARLY_SUMMER" plantingAllowed="false" harvestAllowed="false"><update startState="greenSmall" endState="greenMiddle"/><update startState="greenMiddle" endState="greenBig"/></period>
+                    <period name="MID_SUMMER" plantingAllowed="false" harvestAllowed="false"><update startState="greenMiddle" endState="greenBig"/><update startState="greenBig" endState="greenBig"/></period>
+                    <period name="LATE_SUMMER" plantingAllowed="false" harvestAllowed="true"><update startState="greenBig" endState="harvestReady"/></period>
+                    <period name="EARLY_AUTUMN" plantingAllowed="false" harvestAllowed="true"><update startState="harvestReady" endState="harvestReady"/></period>
+                    <period name="MID_AUTUMN" plantingAllowed="false" harvestAllowed="true"><update startState="harvestReady" endState="harvestReady"/></period>
+                    <period name="LATE_AUTUMN" plantingAllowed="false" harvestAllowed="true"><update startState="harvestReady" endState="harvestReady"/></period>
+                    <period name="EARLY_WINTER" plantingAllowed="false" harvestAllowed="false"><update startState="harvestReady" endState="dead"/></period>
+                    <period name="MID_WINTER" plantingAllowed="false" harvestAllowed="false"/>
+                    <period name="LATE_WINTER" plantingAllowed="false" harvestAllowed="false"/>
                 </seasonal>
             </growth>
+        </fruit>
+        <fruit name="SOYBEAN" enabled="true" plantPeriods="MID_SPRING,LATE_SPRING"
+               harvestPeriods="EARLY_AUTUMN,MID_AUTUMN,LATE_AUTUMN,EARLY_WINTER">
+            <growth preserveNative="true" lifecycle="annual" stateChain="greenSmall,greenMiddle,greenMiddle2,greenBig,greenBig2,harvestReady"><seasonal/></growth>
+        </fruit>
+        <fruit name="SPINACH" enabled="true" plantPeriods="EARLY_SPRING,MID_SPRING"
+               harvestPeriods="EARLY_SUMMER,MID_SUMMER,LATE_SUMMER,EARLY_AUTUMN">
+            <growth preserveNative="true" lifecycle="perennial"><seasonal/></growth>
+        </fruit>
+        <fruit name="SUGARBEET" enabled="true" plantPeriods="EARLY_SPRING,MID_SPRING"
+               harvestPeriods="EARLY_AUTUMN,MID_AUTUMN,LATE_AUTUMN,EARLY_WINTER">
+            <growth preserveNative="true" lifecycle="annual" stateChain="greenSmall,greenSmall2,greenMiddle,greenMiddle2,greenBig,greenBig2,harvestReady"><seasonal/></growth>
+        </fruit>
+        <fruit name="SUGARCANE" enabled="true" plantPeriods="EARLY_SPRING,MID_SPRING"
+               harvestPeriods="EARLY_SPRING,MID_SPRING,LATE_SPRING,EARLY_SUMMER,MID_SUMMER,LATE_SUMMER,EARLY_AUTUMN,MID_AUTUMN,LATE_AUTUMN,EARLY_WINTER">
+            <growth preserveNative="true" lifecycle="perennial"><seasonal/></growth>
+        </fruit>
+        <fruit name="SUNFLOWER" enabled="true" plantPeriods="MID_SPRING,LATE_SPRING"
+               harvestPeriods="LATE_SUMMER,EARLY_AUTUMN,MID_AUTUMN,LATE_AUTUMN">
+            <growth preserveNative="true" lifecycle="annual" stateChain="greenSmall,greenSmall2,greenMiddle,greenMiddle2,greenBig,greenBig2,harvestReady"><seasonal/></growth>
+        </fruit>
+        <fruit name="WHEAT" enabled="true" plantPeriods="MID_AUTUMN,LATE_AUTUMN"
+               harvestPeriods="MID_SPRING,LATE_SPRING,EARLY_SUMMER,MID_SUMMER">
+            <growth preserveNative="true" lifecycle="annual" stateChain="greenSmall,greenSmall2,greenMiddle,greenMiddle2,greenBig,greenBig2,harvestReady"><seasonal/></growth>
         </fruit>
     </fruits>
 </cropPolicy>

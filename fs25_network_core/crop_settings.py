@@ -77,6 +77,18 @@ def _growth_time(value: str | None) -> float | None:
     return result
 
 
+def _period_list(value: str | None) -> set[str]:
+    if not value:
+        return set()
+    names = set()
+    for token in value.split(","):
+        name = token.strip().upper()
+        if name not in _PERIOD_NAMES:
+            raise CropPolicyError(f"invalid period name: {name!r}")
+        names.add(name)
+    return names
+
+
 @dataclass(frozen=True)
 class PeriodPolicy:
     name: str
@@ -91,6 +103,9 @@ class FruitPolicy:
     name: str
     enabled: bool
     periods: tuple[PeriodPolicy, ...] = ()
+    lifecycle: str | None = None
+    state_chain: tuple[str, ...] = ()
+    preserve_native: bool = False
 
 
 @dataclass(frozen=True)
@@ -98,6 +113,8 @@ class CropPolicy:
     schema_version: int
     policy_version: str
     fruits: tuple[FruitPolicy, ...]
+    default_planting_allowed: bool | None = None
+    default_harvest_allowed: bool | None = None
 
 
 @dataclass
@@ -130,6 +147,8 @@ def parse_policy(source: str | bytes | Path) -> CropPolicy:
     policy_version = (root.get("policyVersion") or "").strip()
     if not policy_version:
         raise CropPolicyError("policyVersion is required")
+    default_planting = _boolean(root.get("defaultPlantingAllowed"))
+    default_harvest = _boolean(root.get("defaultHarvestAllowed"))
     fruits: list[FruitPolicy] = []
     seen: set[str] = set()
     for node in root.findall("./fruits/fruit"):
@@ -138,6 +157,19 @@ def parse_policy(source: str | bytes | Path) -> CropPolicy:
             raise CropPolicyError(f"duplicate fruit policy: {name}")
         seen.add(name)
         enabled = _boolean(node.get("enabled"), default=False)
+        planting_periods = _period_list(node.get("plantPeriods"))
+        harvest_periods = _period_list(node.get("harvestPeriods"))
+        growth_node = node.find("./growth")
+        lifecycle = None
+        state_chain: tuple[str, ...] = ()
+        preserve_native = False
+        if growth_node is not None:
+            lifecycle_value = (growth_node.get("lifecycle") or "").strip().upper()
+            lifecycle = lifecycle_value or None
+            chain_value = (growth_node.get("stateChain") or "").strip()
+            if chain_value:
+                state_chain = tuple(normalize_fruit_name(token) for token in chain_value.split(","))
+            preserve_native = _boolean(growth_node.get("preserveNative"), default=False) is True
         periods: list[PeriodPolicy] = []
         period_seen: set[str] = set()
         # Production policy follows the native FruitTypeDesc XML shape:
@@ -175,8 +207,24 @@ def parse_policy(source: str | bytes | Path) -> CropPolicy:
                 _growth_time(period.get("growthTime")),
                 tuple(transitions),
             ))
-        fruits.append(FruitPolicy(name, bool(enabled), tuple(periods)))
-    return CropPolicy(schema, policy_version, tuple(fruits))
+        if (default_planting is not None or default_harvest is not None or
+                planting_periods or harvest_periods):
+            explicit = {period.name: period for period in periods}
+            periods = []
+            for period_name in _PERIOD_ORDER:
+                prior = explicit.get(period_name)
+                periods.append(PeriodPolicy(
+                    period_name,
+                    (prior.planting_allowed if prior and prior.planting_allowed is not None
+                     else period_name in planting_periods or default_planting),
+                    (prior.harvest_allowed if prior and prior.harvest_allowed is not None
+                     else period_name in harvest_periods or default_harvest),
+                    prior.growth_time if prior else None,
+                    prior.transitions if prior else (),
+                ))
+        fruits.append(FruitPolicy(name, bool(enabled), tuple(periods), lifecycle,
+                                  state_chain, preserve_native))
+    return CropPolicy(schema, policy_version, tuple(fruits), default_planting, default_harvest)
 
 
 def _periods(descriptor: dict[str, Any]) -> dict[str, dict[str, Any]] | None:
@@ -203,6 +251,77 @@ def _resolve_state(descriptor: dict[str, Any], token: int | str) -> int | None:
     return None
 
 
+def _annual_lifecycle_plan(entry: FruitPolicy, period_map: dict[str, dict[str, Any]],
+                           descriptor: dict[str, Any], result: ApplyResult) -> dict[str, dict[int, int]] | None:
+    """Validate and build annual mappings without mutating the descriptor."""
+    if entry.lifecycle != "ANNUAL" or not entry.state_chain:
+        return {}
+    planting = {period.name for period in entry.periods if period.planting_allowed is True}
+    harvest = {period.name for period in entry.periods if period.harvest_allowed is True}
+    if not planting or not harvest:
+        result.unsupported += 1
+        result.diagnostics.append(f"{entry.name}: annual lifecycle windows unsupported")
+        return None
+    states = [_resolve_state(descriptor, token) for token in entry.state_chain]
+    invisible = _resolve_state(descriptor, "INVISIBLE")
+    dead = _resolve_state(descriptor, "DEAD")
+    if invisible is None or dead is None or any(state is None for state in states) or len(states) < 2:
+        result.unsupported += 1
+        result.diagnostics.append(f"{entry.name}: annual lifecycle state chain unsupported")
+        return None
+    first_plant = min(_PERIOD_ORDER.index(name) + 1 for name in planting)
+    harvest_indices = [_PERIOD_ORDER.index(name) + 1 for name in harvest]
+    offsets = [((index - first_plant) % 12) for index in harvest_indices]
+    last_harvest_offset = max(offsets)
+    runtimes: dict[str, dict[str, Any]] = {}
+    for period_name in _PERIOD_ORDER:
+        runtime = period_map.get(period_name) or period_map.get(period_name.lower())
+        if not isinstance(runtime, dict):
+            result.unsupported += 1
+            result.diagnostics.append(f"{entry.name}/{period_name}: period unavailable")
+            return None
+        if not isinstance(runtime.get("growthMapping"), dict):
+            result.unsupported += 1
+            result.diagnostics.append(f"{entry.name}/{period_name}: growthMapping unsupported")
+            return None
+        runtimes[period_name] = runtime
+    replacements: dict[str, dict[int, int]] = {}
+    for index, period_name in enumerate(_PERIOD_ORDER, start=1):
+        offset = (index - first_plant) % 12
+        replacement: dict[int, int] = {}
+        if period_name in planting:
+            replacement[invisible] = states[0]
+        if offset <= last_harvest_offset:
+            for state_index in range(len(states) - 2):
+                replacement[states[state_index]] = states[state_index + 1]
+            if period_name in harvest:
+                replacement[states[-2]] = states[-1]
+                replacement[states[-1]] = states[-1]
+        elif offset == last_harvest_offset + 1:
+            replacement[states[-1]] = dead
+        replacements[period_name] = replacement
+    return replacements
+
+
+def _apply_annual_lifecycle(entry: FruitPolicy, period_map: dict[str, dict[str, Any]],
+                            descriptor: dict[str, Any], result: ApplyResult,
+                            plan: dict[str, dict[int, int]] | None = None) -> bool:
+    """Apply a prevalidated annual state-chain plan."""
+    if plan is None:
+        plan = _annual_lifecycle_plan(entry, period_map, descriptor, result)
+    if plan is None:
+        return False
+    changed = False
+    for period_name, replacement in plan.items():
+        runtime = period_map.get(period_name) or period_map.get(period_name.lower())
+        mapping = runtime["growthMapping"]
+        if mapping != replacement:
+            mapping.clear()
+            mapping.update(replacement)
+            changed = True
+    return changed
+
+
 def apply_policy(policy: CropPolicy, descriptors: list[dict[str, Any]]) -> ApplyResult:
     """Apply a policy to test descriptors, preserving fail-closed semantics."""
     result = ApplyResult()
@@ -220,6 +339,11 @@ def apply_policy(policy: CropPolicy, descriptors: list[dict[str, Any]]) -> Apply
         if period_map is None:
             result.unsupported += 1
             result.diagnostics.append(f"{name}: seasonal descriptor unsupported")
+            continue
+        annual_plan = _annual_lifecycle_plan(entry, period_map, descriptor, result)
+        if entry.lifecycle == "ANNUAL" and entry.state_chain and annual_plan is None:
+            # Do not partially apply period gates when the complete annual
+            # descriptor cannot be validated.
             continue
         fruit_changed = False
         harvest_policy: dict[str, bool] = {}
@@ -274,6 +398,8 @@ def apply_policy(policy: CropPolicy, descriptors: list[dict[str, Any]]) -> Apply
                         if mapping.get(resolved_from) != resolved_to:
                             mapping[resolved_from] = resolved_to
                             fruit_changed = True
+        if _apply_annual_lifecycle(entry, period_map, descriptor, result, annual_plan):
+            fruit_changed = True
         if harvest_policy:
             # The native FS25 descriptor commonly exposes harvestability as
             # getIsHarvestableInPeriod(), not period.harvestAllowed.  The

@@ -80,9 +80,16 @@ class CropSettingsTests(unittest.TestCase):
 
     def test_shipped_sorghum_policy_is_only_enabled_crop_and_has_exact_windows(self):
         policy = parse_policy(__import__("pathlib").Path("mods/SiN_FS25_Crop_Settings/config/fruit-policy.xml"))
-        self.assertEqual([fruit.name for fruit in policy.fruits], ["SORGHUM"])
-        self.assertTrue(policy.fruits[0].enabled)
-        periods = {period.name: period for period in policy.fruits[0].periods}
+        self.assertEqual(len(policy.fruits), 25)
+        self.assertEqual({fruit.name for fruit in policy.fruits}, {
+            "BARLEY", "CANOLA", "CARROT", "MAIZE", "COTTON", "GRAPE", "GRASS",
+            "GREENBEAN", "RICELONGGRAIN", "OAT", "OILSEEDRADISH", "OLIVE", "PARSNIP",
+            "PEA", "POPLAR", "POTATO", "BEETROOT", "RICE", "SORGHUM", "SOYBEAN",
+            "SPINACH", "SUGARBEET", "SUGARCANE", "SUNFLOWER", "WHEAT",
+        })
+        sorghum = next(fruit for fruit in policy.fruits if fruit.name == "SORGHUM")
+        self.assertTrue(sorghum.enabled)
+        periods = {period.name: period for period in sorghum.periods}
         self.assertEqual(
             {name for name, period in periods.items() if period.planting_allowed},
             {"MID_SPRING", "LATE_SPRING"},
@@ -109,6 +116,142 @@ class CropSettingsTests(unittest.TestCase):
         self.assertTrue(all(period.growth_time is None for period in periods.values()))
         self.assertTrue(all(not period.transitions for name, period in periods.items()
                             if name in {"EARLY_SPRING", "MID_WINTER", "LATE_WINTER"}))
+
+    def test_full_policy_has_requested_windows_and_runtime_names(self):
+        policy = parse_policy(__import__("pathlib").Path("mods/SiN_FS25_Crop_Settings/config/fruit-policy.xml"))
+        expected = {
+            "BARLEY": ({"EARLY_AUTUMN", "MID_AUTUMN"}, {"EARLY_SPRING", "MID_SPRING", "LATE_SPRING", "EARLY_SUMMER"}),
+            "CANOLA": ({"LATE_SUMMER", "EARLY_AUTUMN"}, {"EARLY_SPRING", "MID_SPRING", "LATE_SPRING", "EARLY_SUMMER"}),
+            "CARROT": ({"MID_SPRING", "LATE_SPRING"}, {"LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN", "LATE_AUTUMN"}),
+            "MAIZE": ({"MID_SPRING", "LATE_SPRING"}, {"EARLY_AUTUMN", "MID_AUTUMN", "LATE_AUTUMN", "EARLY_WINTER"}),
+            "COTTON": ({"EARLY_SPRING", "MID_SPRING"}, {"EARLY_AUTUMN", "MID_AUTUMN", "LATE_AUTUMN", "EARLY_WINTER"}),
+            "GRAPE": ({"EARLY_SPRING", "MID_SPRING"}, {"LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN", "LATE_AUTUMN"}),
+            "GRASS": ({"EARLY_SPRING", "MID_SPRING", "LATE_SPRING", "EARLY_SUMMER", "MID_SUMMER", "LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN", "LATE_AUTUMN"}, {"EARLY_SPRING", "MID_SPRING", "LATE_SPRING", "EARLY_SUMMER", "MID_SUMMER", "LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN", "LATE_AUTUMN", "EARLY_WINTER"}),
+            "GREENBEAN": ({"MID_SPRING", "LATE_SPRING"}, {"MID_SUMMER", "LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN"}),
+            "RICELONGGRAIN": ({"MID_SPRING", "LATE_SPRING"}, {"LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN", "LATE_AUTUMN"}),
+            "OAT": ({"EARLY_SPRING", "MID_SPRING"}, {"MID_SUMMER", "LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN"}),
+            "OILSEEDRADISH": ({"EARLY_SPRING", "MID_SPRING", "LATE_SPRING", "EARLY_SUMMER", "MID_SUMMER", "LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN"}, set()),
+            "OLIVE": ({"EARLY_SPRING", "MID_SPRING"}, {"EARLY_AUTUMN", "MID_AUTUMN", "LATE_AUTUMN", "EARLY_WINTER"}),
+            "PARSNIP": ({"MID_SPRING", "LATE_SPRING"}, {"LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN", "LATE_AUTUMN"}),
+            "PEA": ({"EARLY_SPRING", "MID_SPRING"}, {"EARLY_SUMMER", "MID_SUMMER", "LATE_SUMMER", "EARLY_AUTUMN"}),
+            "POPLAR": ({"EARLY_SPRING", "MID_SPRING", "LATE_SPRING", "EARLY_SUMMER", "MID_SUMMER", "LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN"}, {"EARLY_SPRING", "MID_SPRING", "LATE_SPRING", "EARLY_SUMMER", "MID_SUMMER", "LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN", "LATE_AUTUMN", "EARLY_WINTER"}),
+            "POTATO": ({"EARLY_SPRING", "MID_SPRING"}, {"MID_SUMMER", "LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN"}),
+            "BEETROOT": ({"MID_SPRING", "LATE_SPRING"}, {"LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN", "LATE_AUTUMN"}),
+            "RICE": ({"MID_SPRING", "LATE_SPRING"}, {"LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN", "LATE_AUTUMN"}),
+            "SORGHUM": ({"MID_SPRING", "LATE_SPRING"}, {"LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN", "LATE_AUTUMN"}),
+            "SOYBEAN": ({"MID_SPRING", "LATE_SPRING"}, {"EARLY_AUTUMN", "MID_AUTUMN", "LATE_AUTUMN", "EARLY_WINTER"}),
+            "SPINACH": ({"EARLY_SPRING", "MID_SPRING"}, {"EARLY_SUMMER", "MID_SUMMER", "LATE_SUMMER", "EARLY_AUTUMN"}),
+            "SUGARBEET": ({"EARLY_SPRING", "MID_SPRING"}, {"EARLY_AUTUMN", "MID_AUTUMN", "LATE_AUTUMN", "EARLY_WINTER"}),
+            "SUGARCANE": ({"EARLY_SPRING", "MID_SPRING"}, {"EARLY_SPRING", "MID_SPRING", "LATE_SPRING", "EARLY_SUMMER", "MID_SUMMER", "LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN", "LATE_AUTUMN", "EARLY_WINTER"}),
+            "SUNFLOWER": ({"MID_SPRING", "LATE_SPRING"}, {"LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN", "LATE_AUTUMN"}),
+            "WHEAT": ({"MID_AUTUMN", "LATE_AUTUMN"}, {"MID_SPRING", "LATE_SPRING", "EARLY_SUMMER", "MID_SUMMER"}),
+        }
+        for fruit in policy.fruits:
+            periods = {period.name: period for period in fruit.periods}
+            self.assertEqual(
+                {name for name, period in periods.items() if period.planting_allowed}, expected[fruit.name][0], fruit.name)
+            self.assertEqual(
+                {name for name, period in periods.items() if period.harvest_allowed}, expected[fruit.name][1], fruit.name)
+
+    def test_all_annual_crops_reach_ready_only_in_their_harvest_window(self):
+        policy = parse_policy(__import__("pathlib").Path("mods/SiN_FS25_Crop_Settings/config/fruit-policy.xml"))
+        period_names = ("EARLY_SPRING", "MID_SPRING", "LATE_SPRING", "EARLY_SUMMER",
+                        "MID_SUMMER", "LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN",
+                        "LATE_AUTUMN", "EARLY_WINTER", "MID_WINTER", "LATE_WINTER")
+        for fruit in policy.fruits:
+            if fruit.lifecycle != "ANNUAL":
+                continue
+            tokens = ("INVISIBLE", *fruit.state_chain, "DEAD")
+            state_ids = {token: index for index, token in enumerate(tokens)}
+            descriptor = {
+                "name": fruit.name,
+                "nameToGrowthState": state_ids,
+                "growthDataSeasonal": {"periods": {
+                    name: {"plantingAllowed": False, "isHarvestable": False,
+                           "growthMapping": {99: 98}} for name in period_names
+                }},
+            }
+            result = apply_policy(policy, [descriptor])
+            self.assertEqual(result.unsupported, 0, fruit.name)
+            periods = descriptor["growthDataSeasonal"]["periods"]
+            terminal = state_ids[fruit.state_chain[-1]]
+            preterminal = state_ids[fruit.state_chain[-2]]
+            harvest_names = {period.name for period in fruit.periods if period.harvest_allowed}
+            self.assertTrue(harvest_names, fruit.name)
+            for name in period_names:
+                mapping = periods[name]["growthMapping"]
+                if name in harvest_names:
+                    self.assertEqual(mapping.get(preterminal), terminal, fruit.name)
+                    self.assertEqual(mapping.get(terminal), terminal, fruit.name)
+                else:
+                    self.assertNotEqual(mapping.get(preterminal), terminal, fruit.name)
+
+    def test_annual_lifecycle_withholds_maturity_until_harvest_window(self):
+        policy = parse_policy('''
+          <cropPolicy schemaVersion="1" policyVersion="lifecycle-1"
+              defaultPlantingAllowed="false" defaultHarvestAllowed="false"><fruits>
+            <fruit name="WHEAT" enabled="true" plantPeriods="MID_SPRING,LATE_SPRING"
+                harvestPeriods="LATE_SUMMER,EARLY_AUTUMN">
+              <growth preserveNative="true" lifecycle="annual"
+                  stateChain="greenSmall,greenMiddle,greenBig,harvestReady"><seasonal/></growth>
+            </fruit></fruits></cropPolicy>''')
+        names = ("EARLY_SPRING", "MID_SPRING", "LATE_SPRING", "EARLY_SUMMER",
+                 "MID_SUMMER", "LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN",
+                 "LATE_AUTUMN", "EARLY_WINTER", "MID_WINTER", "LATE_WINTER")
+        descriptor = {
+            "name": "WHEAT",
+            "growthStateIds": {"INVISIBLE": 0, "GREENSMALL": 1, "GREENMIDDLE": 2,
+                                "GREENBIG": 3, "HARVESTREADY": 4, "DEAD": 5},
+            "growthDataSeasonal": {"periods": {
+                name: {"plantingAllowed": False, "isHarvestable": False,
+                       "growthMapping": {99: 98}} for name in names}},
+        }
+        result = apply_policy(policy, [descriptor])
+        self.assertEqual(result.unsupported, 0)
+        periods = descriptor["growthDataSeasonal"]["periods"]
+        self.assertNotIn(4, periods["MID_SUMMER"]["growthMapping"])
+        self.assertEqual(periods["LATE_SUMMER"]["growthMapping"][3], 4)
+        self.assertEqual(periods["EARLY_AUTUMN"]["growthMapping"][4], 4)
+        self.assertEqual(periods["MID_AUTUMN"]["growthMapping"], {4: 5})
+
+    def test_annual_lifecycle_fails_closed_before_partial_mapping_mutation(self):
+        policy = parse_policy('''
+          <cropPolicy schemaVersion="1" policyVersion="lifecycle-unsupported"
+              defaultPlantingAllowed="false" defaultHarvestAllowed="false"><fruits>
+            <fruit name="WHEAT" enabled="true" plantPeriods="MID_SPRING"
+                harvestPeriods="LATE_SUMMER">
+              <growth preserveNative="true" lifecycle="annual"
+                  stateChain="greenSmall,greenMiddle,greenBig,harvestReady"><seasonal/></growth>
+            </fruit></fruits></cropPolicy>''')
+        names = ("EARLY_SPRING", "MID_SPRING", "LATE_SPRING", "EARLY_SUMMER",
+                 "MID_SUMMER", "LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN",
+                 "LATE_AUTUMN", "EARLY_WINTER", "MID_WINTER", "LATE_WINTER")
+        descriptor = {
+            "name": "WHEAT",
+            "growthStateIds": {"INVISIBLE": 0, "GREENSMALL": 1, "GREENMIDDLE": 2,
+                                "GREENBIG": 3, "HARVESTREADY": 4, "DEAD": 5},
+            "growthDataSeasonal": {"periods": {
+                name: {"plantingAllowed": False, "isHarvestable": False,
+                       "growthMapping": {99: 98}} for name in names
+            }},
+        }
+        del descriptor["growthDataSeasonal"]["periods"]["LATE_WINTER"]["growthMapping"]
+        before = repr(descriptor)
+        result = apply_policy(policy, [descriptor])
+        self.assertGreaterEqual(result.unsupported, 1)
+        self.assertEqual(repr(descriptor), before)
+
+    def test_perennial_and_oilseed_entries_preserve_native_growth_mapping(self):
+        policy = parse_policy(__import__("pathlib").Path("mods/SiN_FS25_Crop_Settings/config/fruit-policy.xml"))
+        for name in ("GRASS", "POPLAR", "SUGARCANE", "OILSEEDRADISH"):
+            fruit = next(item for item in policy.fruits if item.name == name)
+            descriptor = {"name": name, "growthDataSeasonal": {"periods": {
+                period.name: {"plantingAllowed": False, "isHarvestable": False,
+                              "growthMapping": {1: 2}} for period in fruit.periods}}}
+            result = apply_policy(policy, [descriptor])
+            self.assertEqual(result.unsupported, 0)
+            self.assertTrue(all(period["growthMapping"] == {1: 2}
+                                for period in descriptor["growthDataSeasonal"]["periods"].values()))
 
     def test_shipped_policy_uses_native_growth_shape_and_harvest_flags(self):
         policy = parse_policy(__import__("pathlib").Path("mods/SiN_FS25_Crop_Settings/config/fruit-policy.xml"))
@@ -260,7 +403,7 @@ class CropSettingsTests(unittest.TestCase):
 
     def test_other_fruit_is_unchanged_by_sorghum_policy(self):
         policy = parse_policy(__import__("pathlib").Path("mods/SiN_FS25_Crop_Settings/config/fruit-policy.xml"))
-        wheat = {"name": "WHEAT", "growthDataSeasonal": {"periods": {
+        wheat = {"name": "ONION", "growthDataSeasonal": {"periods": {
             "MID_SPRING": {"plantingAllowed": False, "growthMapping": {2: 3}}
         }}}
         before = repr(wheat)
