@@ -211,10 +211,12 @@ class CropSettingsTests(unittest.TestCase):
         result = apply_policy(policy, [descriptor])
         self.assertEqual(result.unsupported, 0)
         periods = descriptor["growthDataSeasonal"]["periods"]
-        self.assertNotIn(4, periods["MID_SUMMER"]["growthMapping"])
+        self.assertEqual(periods["MID_SUMMER"]["growthMapping"][4], 4)
         self.assertEqual(periods["LATE_SUMMER"]["growthMapping"][3], 4)
         self.assertEqual(periods["EARLY_AUTUMN"]["growthMapping"][4], 4)
-        self.assertEqual(periods["MID_AUTUMN"]["growthMapping"], {4: 5})
+        self.assertEqual(periods["MID_AUTUMN"]["growthMapping"][4], 5)
+        self.assertTrue(all(isinstance(value, int)
+                            for value in periods["MID_AUTUMN"]["growthMapping"].values()))
 
     def test_annual_lifecycle_uses_native_path_and_omits_optional_visual_states(self):
         policy = parse_policy(__import__("pathlib").Path("mods/SiN_FS25_Crop_Settings/config/fruit-policy.xml"))
@@ -241,10 +243,14 @@ class CropSettingsTests(unittest.TestCase):
         result = apply_policy(policy, [descriptor])
         self.assertEqual(result.unsupported, 0)
         periods = descriptor["growthDataSeasonal"]["periods"]
-        self.assertEqual(periods["MID_SUMMER"]["growthMapping"], {1: 3, 3: 5})
-        self.assertEqual(periods["LATE_SUMMER"]["growthMapping"], {1: 3, 3: 5, 5: 7, 7: 7})
-        self.assertNotIn(2, periods["MID_SUMMER"]["growthMapping"])
-        self.assertNotIn(4, periods["MID_SUMMER"]["growthMapping"])
+        self.assertEqual(periods["MID_SUMMER"]["growthMapping"][1], 3)
+        self.assertEqual(periods["MID_SUMMER"]["growthMapping"][3], 5)
+        self.assertEqual(periods["MID_SUMMER"]["growthMapping"][2], 2)
+        self.assertEqual(periods["MID_SUMMER"]["growthMapping"][4], 4)
+        self.assertEqual(periods["LATE_SUMMER"]["growthMapping"][5], 7)
+        self.assertEqual(periods["LATE_SUMMER"]["growthMapping"][7], 7)
+        self.assertTrue(all(isinstance(value, int)
+                            for value in periods["MID_SUMMER"]["growthMapping"].values()))
 
     def test_annual_lifecycle_accepts_map_without_optional_maize_state(self):
         policy = parse_policy(__import__("pathlib").Path("mods/SiN_FS25_Crop_Settings/config/fruit-policy.xml"))
@@ -272,7 +278,14 @@ class CropSettingsTests(unittest.TestCase):
         result = apply_policy(policy, [descriptor])
         self.assertEqual(result.unsupported, 0)
         periods = descriptor["growthDataSeasonal"]["periods"]
-        self.assertEqual(periods["EARLY_AUTUMN"]["growthMapping"], {1: 2, 2: 3, 3: 4, 4: 5, 5: 5})
+        mapping = periods["EARLY_AUTUMN"]["growthMapping"]
+        self.assertEqual(mapping[1], 2)
+        self.assertEqual(mapping[2], 3)
+        self.assertEqual(mapping[3], 4)
+        self.assertEqual(mapping[4], 5)
+        self.assertEqual(mapping[5], 5)
+        self.assertEqual(mapping[0], 0)
+        self.assertEqual(mapping[6], 6)
 
     def test_annual_lifecycle_fails_closed_before_partial_mapping_mutation(self):
         policy = parse_policy('''
@@ -296,6 +309,63 @@ class CropSettingsTests(unittest.TestCase):
             }},
         }
         del descriptor["growthDataSeasonal"]["periods"]["LATE_WINTER"]["growthMapping"]
+        before = repr(descriptor)
+        result = apply_policy(policy, [descriptor])
+        self.assertGreaterEqual(result.unsupported, 1)
+        self.assertEqual(repr(descriptor), before)
+
+    def test_annual_mapping_is_total_integer_contract_and_idempotent(self):
+        policy = parse_policy(__import__("pathlib").Path(
+            "mods/SiN_FS25_Crop_Settings/config/fruit-policy.xml"
+        ))
+        fruit = next(item for item in policy.fruits if item.name == "WHEAT")
+        ids = {"INVISIBLE": 0, "GREENSMALL": 1, "GREENMIDDLE": 2,
+               "GREENBIG": 3, "HARVESTREADY": 4, "DEAD": 5}
+        periods = ("EARLY_SPRING", "MID_SPRING", "LATE_SPRING", "EARLY_SUMMER",
+                   "MID_SUMMER", "LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN",
+                   "LATE_AUTUMN", "EARLY_WINTER", "MID_WINTER", "LATE_WINTER")
+        descriptor = {
+            "name": "WHEAT", "growthStateIds": ids,
+            "growthDataSeasonal": {"periods": {
+                name: {"plantingAllowed": False, "isHarvestable": False,
+                       # Deliberately sparse native mappings: the runtime
+                       # policy must fill every known state with an integer.
+                       "growthMapping": {1: 2, 2: 3, 3: 4}}
+                for name in periods
+            }},
+        }
+        first = apply_policy(policy, [descriptor])
+        self.assertEqual(first.unsupported, 0)
+        for runtime in descriptor["growthDataSeasonal"]["periods"].values():
+            mapping = runtime["growthMapping"]
+            self.assertEqual(set(mapping), set(ids.values()))
+            self.assertTrue(all(type(value) is int for value in mapping.values()))
+        self.assertEqual(
+            descriptor["growthDataSeasonal"]["periods"]["MID_SUMMER"]["growthMapping"][4],
+            4,
+        )
+        second = apply_policy(policy, [descriptor])
+        self.assertEqual((second.applied, second.changed), (0, 0))
+
+    def test_non_integer_native_mapping_fails_closed_before_totalization(self):
+        policy = parse_policy(__import__("pathlib").Path(
+            "mods/SiN_FS25_Crop_Settings/config/fruit-policy.xml"
+        ))
+        periods = ("EARLY_SPRING", "MID_SPRING", "LATE_SPRING", "EARLY_SUMMER",
+                   "MID_SUMMER", "LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN",
+                   "LATE_AUTUMN", "EARLY_WINTER", "MID_WINTER", "LATE_WINTER")
+        descriptor = {
+            "name": "WHEAT",
+            "growthStateIds": {"INVISIBLE": 0, "GREENSMALL": 1,
+                                "GREENMIDDLE": 2, "GREENBIG": 3,
+                                "HARVESTREADY": 4, "DEAD": 5},
+            "growthDataSeasonal": {"periods": {
+                name: {"plantingAllowed": False, "isHarvestable": False,
+                       "growthMapping": {1: 2, 2: 3, 3: 4}}
+                for name in periods
+            }},
+        }
+        descriptor["growthDataSeasonal"]["periods"]["MID_SUMMER"]["growthMapping"]["bad"] = 4
         before = repr(descriptor)
         result = apply_policy(policy, [descriptor])
         self.assertGreaterEqual(result.unsupported, 1)
@@ -362,8 +432,6 @@ class CropSettingsTests(unittest.TestCase):
                                                  "MID_SUMMER", "LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN",
                                                  "LATE_AUTUMN", "EARLY_WINTER", "MID_WINTER", "LATE_WINTER")},
         }
-        original_mapping = {name: dict(period["growthMapping"])
-                             for name, period in descriptor["growthDataSeasonal"]["periods"].items()}
         result = apply_policy(policy, [descriptor])
         self.assertEqual((result.applied, result.unsupported), (1, 0))
         self.assertEqual(
@@ -377,19 +445,24 @@ class CropSettingsTests(unittest.TestCase):
         )
         actual_mapping = {name: dict(period["growthMapping"])
                           for name, period in descriptor["growthDataSeasonal"]["periods"].items()}
-        expected_mapping = {name: dict(mapping) for name, mapping in original_mapping.items()}
-        expected_mapping["MID_SPRING"][0] = 1
-        expected_mapping["LATE_SPRING"][0] = 1
-        expected_mapping["LATE_SPRING"][1] = 2
-        expected_mapping["EARLY_SUMMER"][1] = 2
-        expected_mapping["EARLY_SUMMER"][2] = 3
-        expected_mapping["MID_SUMMER"][2] = 3
-        expected_mapping["MID_SUMMER"][3] = 3
-        expected_mapping["EARLY_AUTUMN"][4] = 4
-        expected_mapping["MID_AUTUMN"][4] = 4
-        expected_mapping["LATE_AUTUMN"][4] = 4
-        expected_mapping["EARLY_WINTER"][4] = 5
-        self.assertEqual(expected_mapping, actual_mapping)
+        # Every native state is now totalized with a safe hold transition;
+        # policy transitions then override those holds for the intended month.
+        for mapping in actual_mapping.values():
+            self.assertEqual(set(mapping), set(range(6)))
+            self.assertTrue(all(isinstance(value, int) for value in mapping.values()))
+        expected_transitions = {
+            "MID_SPRING": {0: 1},
+            "LATE_SPRING": {0: 1, 1: 2},
+            "EARLY_SUMMER": {1: 2, 2: 3},
+            "MID_SUMMER": {2: 3, 3: 3},
+            "EARLY_AUTUMN": {4: 4},
+            "MID_AUTUMN": {4: 4},
+            "LATE_AUTUMN": {4: 4},
+            "EARLY_WINTER": {4: 5},
+        }
+        for period, transitions in expected_transitions.items():
+            for from_state, to_state in transitions.items():
+                self.assertEqual(actual_mapping[period][from_state], to_state)
 
     def test_sorghum_growth_transitions_align_ready_window_and_winter_withering(self):
         policy = parse_policy(__import__("pathlib").Path("mods/SiN_FS25_Crop_Settings/config/fruit-policy.xml"))

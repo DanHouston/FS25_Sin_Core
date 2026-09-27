@@ -77,6 +77,14 @@ until the harvest window, then the ready state is held until the following perio
 withers it. This preserves staggered maturity without inventing map stages or
 changing `growthTime`.
 
+Every policy-owned seasonal descriptor is also totalized before it is handed
+back to `GrowthSystem`: each numeric state exposed by the native descriptor
+gets an integer self-transition unless the policy supplies a transition for
+that period. This prevents FS25's `setCropsGrowthNextState` call from receiving
+`nil` for an optional/map-specific foliage state while preserving native
+states that the policy does not control. A non-integer native mapping fails
+closed for that fruit before any gate or mapping is changed.
+
 For an `annual` entry, `preserveNative="true"` means **skip calling
 `FruitTypeDesc:loadGrowth` on the empty policy `<seasonal/>`**. It does not mean
 keep the original seasonal transitions. `buildAnnualLifecycle` prepares all

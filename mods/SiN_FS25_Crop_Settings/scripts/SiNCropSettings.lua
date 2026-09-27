@@ -310,6 +310,102 @@ local function mappingsEqual(left, right)
     return true
 end
 
+local function isIntegerState(value)
+    return type(value) == "number" and value >= 0 and value % 1 == 0
+end
+
+-- FS25's GrowthSystem calls setCropsGrowthNextState for the current foliage
+-- state on every period change.  A missing mapping is passed as nil and the
+-- engine rejects it ("Argument 3 ... Expected: Int").  Gather every numeric
+-- state exposed by the native descriptor, including map-specific states that
+-- are not in SiN's configured chain.
+local function collectStateIds(fruitType, runtimePeriods)
+    local result = {}
+    local seen = {}
+    local function add(value)
+        if isIntegerState(value) and not seen[value] then
+            seen[value] = true
+            table.insert(result, value)
+        end
+    end
+    for _, mappingName in ipairs({"growthStateIds", "nameToGrowthState"}) do
+        local mapping = fruitType[mappingName]
+        if type(mapping) == "table" then
+            for name, state in pairs(mapping) do
+                add(name)
+                add(state)
+            end
+        end
+    end
+    for _, runtimePeriod in ipairs(runtimePeriods) do
+        for fromState, toState in pairs(runtimePeriod.growthMapping or {}) do
+            add(fromState)
+            add(toState)
+        end
+    end
+    table.sort(result)
+    return result
+end
+
+local function collectControlledStates(fruitType, entry)
+    local result = {}
+    local seen = {}
+    local function add(value)
+        local resolved = resolveGrowthState(fruitType, value)
+        if isIntegerState(resolved) and not seen[resolved] then
+            seen[resolved] = true
+            table.insert(result, resolved)
+        end
+    end
+    if entry.lifecycle == "ANNUAL" then
+        for _, token in ipairs(entry.stateChain) do
+            add(token)
+        end
+        add("INVISIBLE")
+        add("DEAD")
+    end
+    for _, period in ipairs(entry.periods) do
+        for _, transition in ipairs(period.transitions) do
+            add(transition.fromState)
+            add(transition.toState)
+        end
+    end
+    return result
+end
+
+local function completeMapping(runtimeMapping, replacement, knownStates, controlledStates,
+                              entryName, periodName, state)
+    local completed = {}
+    for fromState, toState in pairs(runtimeMapping or {}) do
+        if not isIntegerState(fromState) or not isIntegerState(toState) then
+            state.unsupported = state.unsupported + 1
+            addDiagnostic(state, entryName .. "/" .. periodName .. ": non-integer growth mapping")
+            return nil
+        end
+        completed[fromState] = toState
+    end
+    for _, growthState in ipairs(knownStates) do
+        if completed[growthState] == nil then
+            completed[growthState] = growthState
+        end
+    end
+    -- Once a crop is under a SiN lifecycle policy, configured states hold by
+    -- default.  Explicit/annual transitions below are the only state changes
+    -- introduced by the policy for that period.
+    for _, growthState in ipairs(controlledStates) do
+        completed[growthState] = growthState
+    end
+    for fromState, toState in pairs(replacement or {}) do
+        if not isIntegerState(fromState) or not isIntegerState(toState) then
+            state.unsupported = state.unsupported + 1
+            addDiagnostic(state, entryName .. "/" .. periodName .. ": policy mapping is not integer")
+            return nil
+        end
+        completed[fromState] = toState
+    end
+    return completed
+end
+
 local function validateFruitDescriptor(fruitType, entry, state)
     if not entry.preserveNative and type(fruitType.loadGrowth) ~= "function" then
         state.unsupported = state.unsupported + 1
@@ -516,7 +612,13 @@ local function buildAnnualLifecycle(fruitType, entry, seasonal, state)
     local plan = {}
     for period = 1, 12 do
         local offset = periodOffset(firstPlant, period)
-        local replacement = {}
+        -- GrowthSystem requires an integer successor for every state it
+        -- evaluates.  Hold all policy states by default, then overlay the
+        -- intentional lifecycle transitions for this period.
+        local replacement = {[invisible] = invisible, [dead] = dead}
+        for _, growthState in ipairs(states) do
+            replacement[growthState] = growthState
+        end
         if planting[period] then
             replacement[invisible] = states[1]
         end
@@ -600,6 +702,64 @@ local function applyFruit(fruitType, entry, state, policyXmlFile)
         addDiagnostic(state, entry.name .. ": native loadGrowth removed seasonal descriptor")
         return false
     end
+    local hasExplicitTransitions = false
+    for _, period in ipairs(entry.periods) do
+        if #period.transitions > 0 then
+            hasExplicitTransitions = true
+            break
+        end
+    end
+    local totalizeMappings = entry.lifecycle == "ANNUAL" or
+        (hasExplicitTransitions and #entry.periods == 12)
+    local mappingPlan = nil
+    if totalizeMappings then
+        local runtimePeriods = {}
+        for period = 1, 12 do
+            local runtimePeriod = after.periods[period]
+            if type(runtimePeriod) ~= "table" or type(runtimePeriod.growthMapping) ~= "table" then
+                state.unsupported = state.unsupported + 1
+                addDiagnostic(state, entry.name .. ": growthMapping unavailable after loadGrowth")
+                return false
+            end
+            runtimePeriods[period] = runtimePeriod
+        end
+        local replacements = annualPlan
+        if entry.lifecycle ~= "ANNUAL" then
+            replacements = {}
+            for _, period in ipairs(entry.periods) do
+                local replacement = {}
+                for _, transition in ipairs(period.transitions) do
+                    local fromState = resolveGrowthState(fruitType, transition.fromState)
+                    local toState = resolveGrowthState(fruitType, transition.toState)
+                    if fromState == nil or toState == nil then
+                        state.unsupported = state.unsupported + 1
+                        addDiagnostic(state, entry.name .. "/" .. tostring(period.index) .. ": growth state name unresolved")
+                        return false
+                    end
+                    replacement[fromState] = toState
+                end
+                replacements[period.index] = replacement
+            end
+        end
+        local knownStates = collectStateIds(fruitType, runtimePeriods)
+        local controlledStates = collectControlledStates(fruitType, entry)
+        mappingPlan = {}
+        for period = 1, 12 do
+            local completed = completeMapping(
+                runtimePeriods[period].growthMapping,
+                replacements[period] or {},
+                knownStates,
+                controlledStates,
+                entry.name,
+                tostring(period),
+                state
+            )
+            if completed == nil then
+                return false
+            end
+            mappingPlan[period] = completed
+        end
+    end
     local changed = false
     for _, period in ipairs(entry.periods) do
         local runtimePeriod = after.periods[period.index]
@@ -630,11 +790,21 @@ local function applyFruit(fruitType, entry, state, policyXmlFile)
             changed = true
         end
     end
-    for period, replacement in pairs(annualPlan) do
-        local mapping = after.periods[period].growthMapping
-        if not mappingsEqual(mapping, replacement) then
-            replaceMappingContents(mapping, replacement)
-            changed = true
+    if mappingPlan ~= nil then
+        for period, replacement in pairs(mappingPlan) do
+            local mapping = after.periods[period].growthMapping
+            if not mappingsEqual(mapping, replacement) then
+                replaceMappingContents(mapping, replacement)
+                changed = true
+            end
+        end
+    else
+        for period, replacement in pairs(annualPlan) do
+            local mapping = after.periods[period].growthMapping
+            if not mappingsEqual(mapping, replacement) then
+                replaceMappingContents(mapping, replacement)
+                changed = true
+            end
         end
     end
     return changed

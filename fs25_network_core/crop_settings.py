@@ -354,7 +354,17 @@ def _annual_lifecycle_plan(entry: FruitPolicy, period_map: dict[str, dict[str, A
     replacements: dict[str, dict[int, int]] = {}
     for index, period_name in enumerate(_PERIOD_ORDER, start=1):
         offset = (index - first_plant) % 12
-        replacement: dict[int, int] = {}
+        # Every state must have an integer successor.  FS25 calls the native
+        # setCropsGrowthNextState API for the current state on every period
+        # change; an omitted entry becomes nil and is rejected by the engine.
+        # Hold all policy states by default, then overlay the intentional
+        # transitions below.  The runtime totalizer also adds map-specific
+        # states that are not present in the configured chain.
+        replacement: dict[int, int] = {
+            invisible: invisible,
+            dead: dead,
+            **{state: state for state in states},
+        }
         if period_name in planting:
             replacement[invisible] = states[0]
         if offset <= last_harvest_offset:
@@ -388,6 +398,84 @@ def _annual_lifecycle_plan(entry: FruitPolicy, period_map: dict[str, dict[str, A
     return replacements
 
 
+def _state_ids(descriptor: dict[str, Any], period_map: dict[str, dict[str, Any]]) -> set[int]:
+    """Return numeric state IDs exposed by the active native descriptor."""
+    result: set[int] = set()
+    for mapping_name in ("growthStateIds", "nameToGrowthState"):
+        mapping = descriptor.get(mapping_name)
+        if not isinstance(mapping, dict):
+            continue
+        for key, value in mapping.items():
+            if type(key) is int and key >= 0:
+                result.add(key)
+            if type(value) is int and value >= 0:
+                result.add(value)
+    for runtime in period_map.values():
+        mapping = runtime.get("growthMapping") if isinstance(runtime, dict) else None
+        if not isinstance(mapping, dict):
+            continue
+        for key, value in mapping.items():
+            if type(key) is int and key >= 0:
+                result.add(key)
+            if type(value) is int and value >= 0:
+                result.add(value)
+    return result
+
+
+def _controlled_state_ids(entry: FruitPolicy, descriptor: dict[str, Any]) -> set[int]:
+    """Return states whose native transitions are owned by this policy."""
+    result: set[int] = set()
+    if entry.lifecycle == "ANNUAL":
+        for token in (*entry.state_chain, "INVISIBLE", "DEAD"):
+            state = _resolve_state(descriptor, token)
+            if state is not None:
+                result.add(state)
+    for period in entry.periods:
+        for from_state, to_state in period.transitions:
+            for token in (from_state, to_state):
+                state = _resolve_state(descriptor, token)
+                if state is not None:
+                    result.add(state)
+    return result
+
+
+def _totalized_mapping_plan(entry: FruitPolicy, period_map: dict[str, dict[str, Any]],
+                            descriptor: dict[str, Any], result: ApplyResult,
+                            replacements: dict[str, dict[int, int]]) -> dict[str, dict[int, int]] | None:
+    """Complete policy mappings before mutating the live descriptor.
+
+    Native map-specific states are retained, but every known state receives an
+    integer self-transition unless the policy explicitly supplies another
+    transition.  This is the contract required by GrowthSystem's native
+    ``setCropsGrowthNextState`` call.
+    """
+    known = _state_ids(descriptor, period_map)
+    controlled = _controlled_state_ids(entry, descriptor)
+    completed: dict[str, dict[int, int]] = {}
+    for period_name in _PERIOD_ORDER:
+        runtime = period_map.get(period_name) or period_map.get(period_name.lower())
+        if not isinstance(runtime, dict) or not isinstance(runtime.get("growthMapping"), dict):
+            result.unsupported += 1
+            result.diagnostics.append(f"{entry.name}/{period_name}: growthMapping unsupported")
+            return None
+        native = runtime["growthMapping"]
+        mapping: dict[int, int] = {}
+        for from_state, to_state in native.items():
+            if (type(from_state) is not int or from_state < 0 or
+                    type(to_state) is not int or to_state < 0):
+                result.unsupported += 1
+                result.diagnostics.append(f"{entry.name}/{period_name}: non-integer growth mapping")
+                return None
+            mapping[from_state] = to_state
+        for state in known:
+            mapping.setdefault(state, state)
+        for state in controlled:
+            mapping[state] = state
+        mapping.update(replacements.get(period_name, {}))
+        completed[period_name] = mapping
+    return completed
+
+
 def _apply_annual_lifecycle(entry: FruitPolicy, period_map: dict[str, dict[str, Any]],
                             descriptor: dict[str, Any], result: ApplyResult,
                             plan: dict[str, dict[int, int]] | None = None) -> bool:
@@ -397,12 +485,16 @@ def _apply_annual_lifecycle(entry: FruitPolicy, period_map: dict[str, dict[str, 
     if plan is None:
         return False
     changed = False
+    totalized = _totalized_mapping_plan(entry, period_map, descriptor, result, plan)
+    if totalized is None:
+        return False
     for period_name, replacement in plan.items():
         runtime = period_map.get(period_name) or period_map.get(period_name.lower())
         mapping = runtime["growthMapping"]
-        if mapping != replacement:
+        completed = totalized[period_name]
+        if mapping != completed:
             mapping.clear()
-            mapping.update(replacement)
+            mapping.update(completed)
             changed = True
     return changed
 
@@ -430,6 +522,44 @@ def apply_policy(policy: CropPolicy, descriptors: list[dict[str, Any]]) -> Apply
             # Do not partially apply period gates when the complete annual
             # descriptor cannot be validated.
             continue
+        # Full native seasonal descriptors (including explicit policies such
+        # as Sorghum) must also satisfy the engine's total integer mapping
+        # contract.  Build this before changing gates so malformed structures
+        # fail closed without a partially applied crop.
+        totalized_plan = None
+        has_explicit_transitions = any(period.transitions for period in entry.periods)
+        has_all_periods = all(
+            isinstance(period_map.get(period), dict) or
+            isinstance(period_map.get(period.lower()), dict)
+            for period in _PERIOD_ORDER
+        )
+        if (entry.lifecycle == "ANNUAL" or
+                (has_explicit_transitions and len(entry.periods) == len(_PERIOD_ORDER)
+                 and has_all_periods)):
+            replacements = annual_plan or {period.name: {} for period in entry.periods}
+            for period in entry.periods:
+                if period.transitions:
+                    replacement = replacements.setdefault(period.name, {})
+                    for from_state, to_state in period.transitions:
+                        resolved_from = _resolve_state(descriptor, from_state)
+                        resolved_to = _resolve_state(descriptor, to_state)
+                        if resolved_from is None or resolved_to is None:
+                            result.unsupported += 1
+                            result.diagnostics.append(
+                                f"{name}/{period.name}: growth state name unresolved"
+                            )
+                            totalized_plan = None
+                            break
+                        replacement[resolved_from] = resolved_to
+                    else:
+                        continue
+                    break
+            else:
+                totalized_plan = _totalized_mapping_plan(
+                    entry, period_map, descriptor, result, replacements
+                )
+            if totalized_plan is None:
+                continue
         fruit_changed = False
         harvest_policy: dict[str, bool] = {}
         for period in entry.periods:
@@ -483,7 +613,16 @@ def apply_policy(policy: CropPolicy, descriptors: list[dict[str, Any]]) -> Apply
                         if mapping.get(resolved_from) != resolved_to:
                             mapping[resolved_from] = resolved_to
                             fruit_changed = True
-        if _apply_annual_lifecycle(entry, period_map, descriptor, result, annual_plan):
+        if totalized_plan is not None:
+            for period_name, completed in totalized_plan.items():
+                runtime = period_map.get(period_name) or period_map.get(period_name.lower())
+                mapping = runtime["growthMapping"]
+                if mapping != completed:
+                    mapping.clear()
+                    mapping.update(completed)
+                    fruit_changed = True
+        elif entry.lifecycle == "ANNUAL" and _apply_annual_lifecycle(
+                entry, period_map, descriptor, result, annual_plan):
             fruit_changed = True
         if harvest_policy:
             # The native FS25 descriptor commonly exposes harvestability as

@@ -235,7 +235,13 @@ class CropLuaTests(unittest.TestCase):
         self.assertEqual(h.lua.globals().native_loads, 1)
         actual = h.periods("SORGHUM")
         for i, p in enumerate(PERIODS, 1):
-            self.assertEqual(actual[p]["growthMapping"], native_loaded[i]["growthMapping"])
+            mapping = actual[p]["growthMapping"]
+            self.assertEqual(set(mapping), set(ids.values()))
+            self.assertTrue(all(isinstance(value, int) for value in mapping.values()))
+        self.assertEqual(actual["MID_SPRING"]["growthMapping"][0], 1)
+        self.assertEqual(actual["LATE_SPRING"]["growthMapping"][1], 2)
+        self.assertEqual(actual["EARLY_AUTUMN"]["growthMapping"][4], 4)
+        self.assertEqual(actual["EARLY_WINTER"]["growthMapping"][4], 5)
         for start in (1, 2):  # April / May
             state = 0
             for month in range(start, 10):  # through December
@@ -249,3 +255,14 @@ class CropLuaTests(unittest.TestCase):
                     self.assertEqual(state, 5)
         h.apply()
         self.assertEqual(h.lua.globals().native_loads, 1)
+
+    def test_annual_mapping_has_integer_fallback_for_every_registered_state(self):
+        entry = next(x for x in parse_policy(POLICY).fruits if x.name == "WHEAT")
+        desc, _ = descriptor(entry)
+        harness = Harness([desc])
+        harness.apply()
+        self.assertIn("unsupported=0", harness.logs[-1])
+        for period in harness.periods("WHEAT").values():
+            mapping = period["growthMapping"]
+            self.assertEqual(set(mapping), set(desc["nameToGrowthState"].values()))
+            self.assertTrue(all(isinstance(value, int) for value in mapping.values()))
