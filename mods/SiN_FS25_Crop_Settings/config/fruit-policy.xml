@@ -6,14 +6,25 @@
             <growth>
                 <seasonal initialState="greenBig">
                 <period name="EARLY_SPRING" plantingAllowed="false" harvestAllowed="false"/>
-                <period name="MID_SPRING" plantingAllowed="true" harvestAllowed="false"/>
-                <period name="LATE_SPRING" plantingAllowed="true" harvestAllowed="false"/>
-                <period name="EARLY_SUMMER" plantingAllowed="false" harvestAllowed="false"/>
+                <period name="MID_SPRING" plantingAllowed="true" harvestAllowed="false">
+                    <update startState="invisible" endState="greenSmall"/>
+                </period>
+                <period name="LATE_SPRING" plantingAllowed="true" harvestAllowed="false">
+                    <update startState="invisible" endState="greenSmall"/>
+                    <update startState="greenSmall" endState="greenMiddle"/>
+                </period>
+                <period name="EARLY_SUMMER" plantingAllowed="false" harvestAllowed="false">
+                    <update startState="greenSmall" endState="greenMiddle"/>
+                    <update startState="greenMiddle" endState="greenBig"/>
+                </period>
                 <period name="MID_SUMMER" plantingAllowed="false" harvestAllowed="false">
-                    <!-- Hold mature vegetation until the August harvest window. -->
+                    <update startState="greenMiddle" endState="greenBig"/>
+                    <!-- Replace the base July readiness transition. -->
                     <update startState="greenBig" endState="greenBig"/>
                 </period>
-                <period name="LATE_SUMMER" plantingAllowed="false" harvestAllowed="true"/>
+                <period name="LATE_SUMMER" plantingAllowed="false" harvestAllowed="true">
+                    <update startState="greenBig" endState="harvestReady"/>
+                </period>
                 <period name="EARLY_AUTUMN" plantingAllowed="false" harvestAllowed="true">
                     <!-- Keep harvest-ready Sorghum through the September window. -->
                     <update startState="harvestReady" endState="harvestReady"/>

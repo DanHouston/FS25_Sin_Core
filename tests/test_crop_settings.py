@@ -91,8 +91,16 @@ class CropSettingsTests(unittest.TestCase):
             {name for name, period in periods.items() if period.harvest_allowed},
             {"LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN", "LATE_AUTUMN"},
         )
+        self.assertEqual(periods["MID_SPRING"].transitions,
+                         (("INVISIBLE", "GREENSMALL"),))
+        self.assertEqual(periods["LATE_SPRING"].transitions,
+                         (("INVISIBLE", "GREENSMALL"), ("GREENSMALL", "GREENMIDDLE")))
+        self.assertEqual(periods["EARLY_SUMMER"].transitions,
+                         (("GREENSMALL", "GREENMIDDLE"), ("GREENMIDDLE", "GREENBIG")))
         self.assertEqual(periods["MID_SUMMER"].transitions,
-                         (("GREENBIG", "GREENBIG"),))
+                         (("GREENMIDDLE", "GREENBIG"), ("GREENBIG", "GREENBIG")))
+        self.assertEqual(periods["LATE_SUMMER"].transitions,
+                         (("GREENBIG", "HARVESTREADY"),))
         for name in ("EARLY_AUTUMN", "MID_AUTUMN", "LATE_AUTUMN"):
             self.assertEqual(periods[name].transitions,
                              (("HARVESTREADY", "HARVESTREADY"),))
@@ -100,8 +108,7 @@ class CropSettingsTests(unittest.TestCase):
                          (("HARVESTREADY", "DEAD"),))
         self.assertTrue(all(period.growth_time is None for period in periods.values()))
         self.assertTrue(all(not period.transitions for name, period in periods.items()
-                            if name not in {"MID_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN",
-                                            "LATE_AUTUMN", "EARLY_WINTER"}))
+                            if name in {"EARLY_SPRING", "MID_WINTER", "LATE_WINTER"}))
 
     def test_shipped_policy_uses_native_growth_shape_and_harvest_flags(self):
         policy = parse_policy(__import__("pathlib").Path("mods/SiN_FS25_Crop_Settings/config/fruit-policy.xml"))
@@ -110,7 +117,9 @@ class CropSettingsTests(unittest.TestCase):
                    "LATE_AUTUMN", "EARLY_WINTER", "MID_WINTER", "LATE_WINTER")
         descriptor = {
             "name": "SORGHUM",
-            "nameToGrowthState": {"GREENBIG": 3, "HARVESTREADY": 4, "DEAD": 5},
+            "nameToGrowthState": {"INVISIBLE": 0, "GREENSMALL": 1,
+                                   "GREENMIDDLE": 2, "GREENBIG": 3,
+                                   "HARVESTREADY": 4, "DEAD": 5},
             "growthDataSeasonal": {"periods": {
                 name: {"plantingAllowed": False, "isHarvestable": False,
                        "growthMapping": {3: 4, 4: 5}}
@@ -135,7 +144,9 @@ class CropSettingsTests(unittest.TestCase):
         policy = parse_policy(__import__("pathlib").Path("mods/SiN_FS25_Crop_Settings/config/fruit-policy.xml"))
         descriptor = {
             "name": "sorghum",
-            "growthStateIds": {"GREENBIG": 3, "HARVESTREADY": 4, "DEAD": 5},
+            "growthStateIds": {"INVISIBLE": 0, "GREENSMALL": 1,
+                                "GREENMIDDLE": 2, "GREENBIG": 3,
+                                "HARVESTREADY": 4, "DEAD": 5},
             "growthDataSeasonal": {"periods": {
                 name: {"plantingAllowed": name in {"MID_SPRING", "LATE_SPRING"},
                        "growthMapping": {2: 3, 3: 4}}
@@ -164,6 +175,12 @@ class CropSettingsTests(unittest.TestCase):
         actual_mapping = {name: dict(period["growthMapping"])
                           for name, period in descriptor["growthDataSeasonal"]["periods"].items()}
         expected_mapping = {name: dict(mapping) for name, mapping in original_mapping.items()}
+        expected_mapping["MID_SPRING"][0] = 1
+        expected_mapping["LATE_SPRING"][0] = 1
+        expected_mapping["LATE_SPRING"][1] = 2
+        expected_mapping["EARLY_SUMMER"][1] = 2
+        expected_mapping["EARLY_SUMMER"][2] = 3
+        expected_mapping["MID_SUMMER"][2] = 3
         expected_mapping["MID_SUMMER"][3] = 3
         expected_mapping["EARLY_AUTUMN"][4] = 4
         expected_mapping["MID_AUTUMN"][4] = 4
@@ -175,7 +192,9 @@ class CropSettingsTests(unittest.TestCase):
         policy = parse_policy(__import__("pathlib").Path("mods/SiN_FS25_Crop_Settings/config/fruit-policy.xml"))
         descriptor = {
             "name": "SORGHUM",
-            "growthStateIds": {"GREENBIG": 3, "HARVESTREADY": 4, "DEAD": 5},
+            "growthStateIds": {"INVISIBLE": 0, "GREENSMALL": 1,
+                                "GREENMIDDLE": 2, "GREENBIG": 3,
+                                "HARVESTREADY": 4, "DEAD": 5},
             "growthDataSeasonal": {"periods": {
                 "MID_SUMMER": {
                     "plantingAllowed": False,
@@ -193,7 +212,7 @@ class CropSettingsTests(unittest.TestCase):
         }
         result = apply_policy(policy, [descriptor])
         self.assertEqual(result.unsupported, 0)
-        self.assertEqual(descriptor["growthDataSeasonal"]["periods"]["MID_SUMMER"]["growthMapping"], {3: 3})
+        self.assertEqual(descriptor["growthDataSeasonal"]["periods"]["MID_SUMMER"]["growthMapping"], {2: 3, 3: 3})
         self.assertEqual(descriptor["growthDataSeasonal"]["periods"]["EARLY_AUTUMN"]["growthMapping"], {4: 4})
         self.assertEqual(descriptor["growthDataSeasonal"]["periods"]["MID_AUTUMN"]["growthMapping"], {4: 4})
         self.assertEqual(descriptor["growthDataSeasonal"]["periods"]["LATE_AUTUMN"]["growthMapping"], {4: 4})
@@ -226,7 +245,9 @@ class CropSettingsTests(unittest.TestCase):
                 "EARLY_SPRING", "MID_SPRING", "LATE_SPRING", "EARLY_SUMMER",
                 "MID_SUMMER", "LATE_SUMMER", "EARLY_AUTUMN", "MID_AUTUMN",
                 "LATE_AUTUMN", "EARLY_WINTER", "MID_WINTER", "LATE_WINTER")
-        }}, "growthStateIds": {"GREENBIG": 3, "HARVESTREADY": 4, "DEAD": 5},
+        }}, "growthStateIds": {"INVISIBLE": 0, "GREENSMALL": 1,
+                                 "GREENMIDDLE": 2, "GREENBIG": 3,
+                                 "HARVESTREADY": 4, "DEAD": 5},
         "getIsHarvestableInPeriod": native}
         descriptor["growthDataSeasonal"]["periods"]["EARLY_AUTUMN"]["growthMapping"] = {4: 5}
         result = apply_policy(policy, [descriptor])
