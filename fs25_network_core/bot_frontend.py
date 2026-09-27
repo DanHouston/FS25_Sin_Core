@@ -1661,8 +1661,11 @@ class NetworkBot(discord.Client):
                 if record.get("status") not in {"cancelled", "completed"}:
                     self.add_view(view, message_id=int(message_id))
                 content = self.contract_card_text(record)
-                if getattr(message, "content", None) != content:
-                    await message.edit(content=content, view=view)
+                # Startup is a bounded reconciliation point.  Reapply the
+                # durable view even when text is unchanged so cards created by
+                # an older JiN build gain newly-added controls (for example
+                # Cancel Contract) without requiring a new contract post.
+                await message.edit(content=content, view=view)
             except (discord.DiscordException, TypeError, ValueError) as error:
                 logging.warning("Contract card startup refresh unavailable contract=%s: %s",
                                 record.get("contract_id"), error)

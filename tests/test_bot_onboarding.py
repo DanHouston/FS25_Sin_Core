@@ -324,6 +324,25 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Compensation: Fixed - $1", message.edit.await_args.kwargs["content"])
         self.bot.add_view.assert_called_once()
 
+    async def test_startup_reapplies_contract_view_when_card_text_is_unchanged(self):
+        record = {
+            "contract_id": "contract-open", "title": "Harvest Field 44", "description": "Sorghum",
+            "work_type": "harvesting", "fields": "44", "server_name": "Hobo",
+            "compensation_type": "fixed", "rate": 1, "creator_discord_id": "creator",
+            "status": "open", "marketplace_channel_id": 123, "marketplace_message_id": 99,
+        }
+        message = SimpleNamespace(content=NetworkBot.contract_card_text(record), edit=AsyncMock())
+        channel = SimpleNamespace(fetch_message=AsyncMock(return_value=message))
+        self.bot.contracts.marketplace = MagicMock(return_value=[record])
+        self.bot.get_channel = MagicMock(return_value=channel)
+        self.bot.add_view = MagicMock()
+
+        await self.bot.restore_contract_views()
+
+        message.edit.assert_awaited_once()
+        self.assertIsNotNone(message.edit.await_args.kwargs["view"])
+        self.bot.add_view.assert_called_once()
+
     async def test_startup_refreshes_cancelled_contract_card_and_disables_controls(self):
         record = {
             "contract_id": "contract-cancelled", "title": "Harvest Field 44", "description": "Sorghum",
