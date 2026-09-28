@@ -402,6 +402,17 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(payload["day_time_minutes"], 615)
         self.assertEqual(payload["time_scale"], 5.0)
 
+    def test_snapshot_payload_preserves_authoritative_farm_balances(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "snapshot.xml").write_text(
+                '<networkLocal source="game" savegameIndex="3" worldId="hobo-world">'
+                '<farms><farm farmId="2" name="Player Farm" balance="602651.5"/></farms>'
+                '</networkLocal>', encoding="utf-8")
+            payload = PairingAgent(root, "https://central", MagicMock())._snapshot_payload()
+        self.assertEqual(payload["farms"], {"2": "Player Farm"})
+        self.assertEqual(payload["farm_balances"], {"2": 602651.5})
+
     def test_agent_materializes_central_farm_operation_without_mongo(self):
         class OperationResponse:
             status = 200

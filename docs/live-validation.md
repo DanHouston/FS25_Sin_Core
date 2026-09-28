@@ -303,11 +303,14 @@ The two chat directions are tested independently at the mailbox and workflow
 layers. Runtime API presence, Discord Message Content intent, and actual
 dedicated-server display remain live-only evidence.
 
-`/balance` reports the central SiN wallet and pending operation amounts. The
-game balance is explicitly unavailable until the snapshot contains a verified
-farm-money field. `/deposit amount` resolves an unambiguous registered
-server/save automatically. Withdrawals remain disabled unless a server
-explicitly enables a verified FS25 money-delivery adapter.
+`/balance` reports the central SiN wallet and pending operation amounts. Once
+the deployed server mod has emitted a current snapshot containing native farm
+balances, it also reports the selected user's authoritative FS25 farm balance.
+That read is scoped to the active world and an active, mod-confirmed manager
+mapping; it remains unavailable rather than guessing when either proof is
+missing. `/deposit amount` resolves an unambiguous registered server/save
+automatically. Withdrawals remain disabled unless a server explicitly enables
+a verified FS25 money-delivery adapter.
 
 `/contract_create` uses work type, comma-separated numeric fields, and fixed or
 hourly compensation. Its server selector must resolve the creator's registered

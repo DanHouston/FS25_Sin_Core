@@ -1,6 +1,7 @@
 """Offline telemetry harness. Never connects to MongoDB or acknowledges game jobs."""
 import argparse
 import json
+import math
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -27,6 +28,7 @@ def read_snapshot(path, max_age=30):
     if sequence < 1:
         raise ValueError("Invalid snapshot sequence")
     farms = {}
+    farm_balances = {}
     for index, node in enumerate(root.findall("./farms/farm"), start=1):
         raw_id = node.get("farmId")
         try:
@@ -40,6 +42,15 @@ def read_snapshot(path, max_age=30):
         if "name" not in node.attrib:
             raise ValueError(f"Farm record {index}: farmId {farm_id} is missing its name attribute")
         farms[farm_id] = node.attrib["name"]
+        raw_balance = node.get("balance")
+        if raw_balance is not None and raw_balance.strip() != "":
+            try:
+                balance = float(raw_balance)
+            except (TypeError, ValueError):
+                raise ValueError(f"Farm record {index}: invalid balance") from None
+            if not math.isfinite(balance):
+                raise ValueError(f"Farm record {index}: invalid balance")
+            farm_balances[farm_id] = balance
     players = {}
     observed_users = []
     for node in root.findall("./players/player"):
@@ -53,7 +64,8 @@ def read_snapshot(path, max_age=30):
     return dict(source=source, session=root.attrib["session"], sequence=sequence, players=players,
                 observed_users=observed_users,
                 savegame_index=int(root.attrib["savegameIndex"]), farms=farms,
-                unnamed_farm_ids=[farm_id for farm_id, name in farms.items() if not name.strip()])
+                unnamed_farm_ids=[farm_id for farm_id, name in farms.items() if not name.strip()],
+                farm_balances=farm_balances)
 
 
 def simulate(path):

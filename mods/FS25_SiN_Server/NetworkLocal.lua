@@ -3160,6 +3160,18 @@ function FS25SiNServer:exportSnapshot()
             local key = string.format("networkLocal.farms.farm(%d)", index)
             xml:setInt(key .. "#farmId", farmId)
             xml:setString(key .. "#name", farm.name)
+            -- Farm:getBalance() is the authoritative native money read.  Keep
+            -- it alongside the name in the game snapshot so Central can show
+            -- a read-only balance without inferring money from wallet
+            -- operations.  Omit the optional field when this GIANTS runtime
+            -- does not expose a valid numeric balance.
+            if type(farm.getBalance) == "function" then
+                local balanceOk, balance = pcall(farm.getBalance, farm)
+                if balanceOk and type(balance) == "number"
+                        and balance == balance and balance ~= math.huge and balance ~= -math.huge then
+                    xml:setString(key .. "#balance", tostring(balance))
+                end
+            end
             index = index + 1
         end
     end

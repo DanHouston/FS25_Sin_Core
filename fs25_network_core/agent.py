@@ -4,6 +4,7 @@ import errno
 import hashlib
 import json
 import logging
+import math
 import os
 import time
 from pathlib import Path
@@ -234,9 +235,19 @@ class PairingAgent:
         if root.tag != "networkLocal" or root.get("source") != "game":
             raise ValueError("invalid game snapshot")
         farms = {}
+        farm_balances = {}
         for node in root.findall("./farms/farm"):
             if node.get("farmId") is not None:
-                farms[node.get("farmId")] = node.get("name", "")
+                farm_id = node.get("farmId")
+                farms[farm_id] = node.get("name", "")
+                raw_balance = node.get("balance")
+                if raw_balance is not None and str(raw_balance).strip() != "":
+                    try:
+                        balance = float(raw_balance)
+                    except (TypeError, ValueError):
+                        balance = None
+                    if balance is not None and math.isfinite(balance):
+                        farm_balances[farm_id] = balance
         players = {}
         for node in root.findall("./players/player"):
             unique = node.get("uniqueId")
@@ -252,7 +263,8 @@ class PairingAgent:
                 "sequence": int(root.get("sequence", "0")),
                 "savegame_index": int(root.get("savegameIndex", "0")),
                 "world_id": root.get("worldId", ""), "map_id": root.get("mapId", ""),
-                "farms": farms, "players": players, "farmlands": farmlands}
+                "farms": farms, "farm_balances": farm_balances,
+                "players": players, "farmlands": farmlands}
         optional_numbers = (("currentMonth", "current_month", int),
                             ("currentDay", "current_day", int),
                             ("dayTimeMinutes", "day_time_minutes", int),

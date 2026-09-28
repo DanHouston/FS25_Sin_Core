@@ -1031,13 +1031,33 @@ class NetworkBot(discord.Client):
         async def farm_assign_server_autocomplete(interaction: discord.Interaction, current: str):
             return await server_choices(interaction, current, "reconcile")
 
-        @self.tree.command(name="balance", description="View your central available balance")
+        @self.tree.command(name="balance", description="View your FS25 and SiN balances")
         @app_commands.check(channel_check)
         async def balance(interaction: discord.Interaction):
             await interaction.response.defer(ephemeral=True)
-            summary = await asyncio.to_thread(self.bank.account_summary, str(interaction.user.id))
-            game_balance = ("unavailable (the current FS25 snapshot does not expose authoritative farm money)"
-                            if summary["game_balance"] is None else f"${summary['game_balance']:,}")
+            context = None
+            try:
+                # Identity resolution is intentionally best-effort for this
+                # read-only command: wallet balances remain visible even when
+                # a game context is not currently available.  When it is
+                # available, BankingEngine applies the authoritative manager,
+                # world, and snapshot checks before exposing native money.
+                context = await asyncio.to_thread(
+                    self.resolve_identity_context, str(interaction.user.id), None, "reconcile")
+            except ValueError:
+                context = None
+            summary_kwargs = {}
+            if context:
+                summary_kwargs = {"server_id": context.get("server_key"),
+                                  "save_id": context.get("save_key"),
+                                  "world_id": context.get("world_id")}
+            summary = await asyncio.to_thread(
+                self.bank.account_summary, str(interaction.user.id), **summary_kwargs)
+            if summary["game_balance"] is None:
+                reason = summary.get("game_balance_reason") or "no authoritative FS25 farm balance"
+                game_balance = f"unavailable ({reason})"
+            else:
+                game_balance = f"${summary['game_balance']:,.0f}"
             await interaction.followup.send(
                 f"Game balance: {game_balance}\n"
                 f"SiN bank balance: ${summary['available_balance']:,}\n"

@@ -1,6 +1,7 @@
 """Atomic integer-unit ledger. Adapter callbacks are trusted operator interfaces."""
 from datetime import datetime, timezone
 import hashlib
+import math
 
 from .admin_manager import AdminManager
 from .world_generation import WorldGenerationRegistry
@@ -31,17 +32,66 @@ class BankingEngine:
         wallet = self.db.wallets.find_one({"_id": str(discord_id)}) or {}
         return wallet.get("balance", 0)
 
-    def account_summary(self, discord_id):
-        """Return central wallet state without pretending it is game money."""
+    def _authoritative_game_balance(self, discord_id, server_id, save_id, world_id=None):
+        """Read one user's native FS25 farm balance from the current snapshot.
+
+        The snapshot is the only central-side source accepted here.  We first
+        require the active, mod-confirmed manager relationship, then scope the
+        read to the active world generation and the exact farm in that
+        relationship.  Wallet activity and pending operations are never used
+        as a balance proxy.
+        """
+        active_world = self._world_id(server_id, save_id, world_id)
+        link = self.admin.lookup(str(discord_id), server_id, save_id, world_id=active_world)
+        query = {"server_key": str(server_id), "save_key": str(save_id), "source": "game"}
+        if active_world:
+            query["world_id"] = str(active_world)
+        snapshot = self.db.server_snapshots.find_one(query, sort=[("received_at", -1)])
+        if not isinstance(snapshot, dict):
+            return None
+        farms = snapshot.get("farms")
+        farm_id = link.get("farm_id")
+        if not isinstance(farms, dict) or (str(farm_id) not in farms and farm_id not in farms):
+            return None
+        balances = snapshot.get("farm_balances")
+        if not isinstance(balances, dict):
+            return None
+        raw = balances.get(str(farm_id), balances.get(farm_id))
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(value):
+            return None
+        return value
+
+    def account_summary(self, discord_id, server_id=None, save_id=None, world_id=None):
+        """Return central wallet state and, when proven, native FS25 money."""
         user_id = str(discord_id)
         wallet = self.db.wallets.find_one({"_id": user_id}) or {}
         deposits = list(self.db.deposit_requests.find({"discord_id": user_id, "state": "pending"}))
         withdrawals = list(self.db.withdrawals.find({"discord_id": user_id, "state": "pending"}))
+        game_balance = None
+        game_balance_reason = "no game context selected"
+        if server_id and save_id:
+            game_balance_reason = "no active, mod-confirmed farm manager mapping"
+            mapping_verified = False
+            try:
+                game_balance = self._authoritative_game_balance(
+                    user_id, server_id, save_id, world_id=world_id)
+                mapping_verified = True
+            except ValueError:
+                game_balance = None
+            if mapping_verified:
+                game_balance_reason = (
+                    "the current FS25 snapshot has no authoritative balance for this farm"
+                    if game_balance is None else None)
         return {
             "available_balance": int(wallet.get("balance", 0) or 0),
             "pending_deposits": sum(int(row.get("amount", 0) or 0) for row in deposits),
             "pending_withdrawals": sum(int(row.get("amount", 0) or 0) for row in withdrawals),
-            "game_balance": None,
+            "game_balance": game_balance,
+            "game_balance_reason": game_balance_reason,
         }
 
     @staticmethod

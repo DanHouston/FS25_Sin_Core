@@ -31,4 +31,54 @@ class EconomyTests(unittest.TestCase):
             "pending_deposits": 150,
             "pending_withdrawals": 10,
             "game_balance": None,
+            "game_balance_reason": "no game context selected",
         })
+
+    def test_account_summary_reads_only_scoped_authoritative_farm_balance(self):
+        database = MagicMock()
+        database.db.wallets.find_one.return_value = {"_id": "player", "balance": 1}
+        database.db.deposit_requests.find.return_value = []
+        database.db.withdrawals.find.return_value = []
+        database.db.server_snapshots.find_one.return_value = {
+            "source": "game", "server_key": "server", "save_key": "save",
+            "world_id": "world", "farms": {"2": "Player Farm"},
+            "farm_balances": {"2": 602651.5},
+        }
+        engine = BankingEngine(database)
+        engine._world_id = lambda server, save, world: "world"
+        engine.admin = MagicMock()
+        engine.admin.lookup.return_value = {"farm_id": 2}
+        summary = engine.account_summary("player", "server", "save", "world")
+        self.assertEqual(summary["game_balance"], 602651.5)
+        self.assertIsNone(summary["game_balance_reason"])
+        query = database.db.server_snapshots.find_one.call_args.args[0]
+        self.assertEqual(query["world_id"], "world")
+        self.assertEqual(query["source"], "game")
+
+    def test_account_summary_keeps_native_balance_unavailable_without_snapshot_field(self):
+        database = MagicMock()
+        database.db.wallets.find_one.return_value = {"_id": "player", "balance": 1}
+        database.db.deposit_requests.find.return_value = []
+        database.db.withdrawals.find.return_value = []
+        database.db.server_snapshots.find_one.return_value = {
+            "source": "game", "world_id": "world", "farms": {"2": "Player Farm"}}
+        engine = BankingEngine(database)
+        engine._world_id = lambda server, save, world: "world"
+        engine.admin = MagicMock()
+        engine.admin.lookup.return_value = {"farm_id": 2}
+        summary = engine.account_summary("player", "server", "save", "world")
+        self.assertIsNone(summary["game_balance"])
+        self.assertIn("no authoritative balance", summary["game_balance_reason"])
+
+    def test_account_summary_fails_closed_without_active_manager_mapping(self):
+        database = MagicMock()
+        database.db.wallets.find_one.return_value = {"_id": "player", "balance": 1}
+        database.db.deposit_requests.find.return_value = []
+        database.db.withdrawals.find.return_value = []
+        engine = BankingEngine(database)
+        engine._world_id = lambda server, save, world: "world"
+        engine.admin = MagicMock()
+        engine.admin.lookup.side_effect = ValueError("No active mapping")
+        summary = engine.account_summary("player", "server", "save", "world")
+        self.assertIsNone(summary["game_balance"])
+        self.assertEqual(summary["game_balance_reason"], "no active, mod-confirmed farm manager mapping")

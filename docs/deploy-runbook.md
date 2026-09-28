@@ -245,6 +245,12 @@ In JiN, perform the minimum current-world checks:
 /balance
 ```
 
+`/balance` should show `Game balance: $...` after the refreshed server mod has
+produced at least one current snapshot. If it still says unavailable, inspect
+the authoritative snapshot and confirm that the farm record includes a
+`balance` value and that the user has an active, mod-confirmed farm-manager
+mapping. Do not infer a game balance from the SiN wallet or pending requests.
+
 For an intentional money smoke test only, use a small amount and verify the
 authoritative game-side receipt before repeating:
 
@@ -263,7 +269,7 @@ For read-only Central state inspection, use the repository's configured Python
 Mongo connection; do not use `mongosh` or edit MongoDB manually:
 
 ```powershell
-python -c "from fs25_network_core.database import Database; d=Database().db; print('SERVERS'); print(d.sin_servers.find_one({'server_key':'sin-fs25-01'})); print('ACTIVE WORLD'); print(d.world_generations.find_one({'server_key':'sin-fs25-01','save_key':'sin-fs25-hobo-v1','state':'active'})); print('LATEST SNAPSHOT'); print(d.server_snapshots.find_one({'server_key':'sin-fs25-01','save_key':'sin-fs25-hobo-v1'}, sort=[('received_at',-1)]))"
+python -c "from fs25_network_core.database import Database; d=Database().db; print('SERVERS'); print(d.sin_servers.find_one({'server_key':'sin-fs25-01'})); print('ACTIVE WORLD'); print(d.world_generations.find_one({'server_key':'sin-fs25-01','save_key':'sin-fs25-hobo-v1','state':'active'})); print('LATEST SNAPSHOT'); s=d.server_snapshots.find_one({'server_key':'sin-fs25-01','save_key':'sin-fs25-hobo-v1'}, sort=[('received_at',-1)]); print({'received_at':s.get('received_at'),'world_id':s.get('world_id'),'farms':s.get('farms'),'farm_balances':s.get('farm_balances') if s else None}); print('ACTIVE MANAGER'); print(d.memberships.find_one({'discord_id':'<DISCORD_ID>','server_id':'sin-fs25-01','save_id':'sin-fs25-hobo-v1','state':'active','desired_role':'farm_manager','applied_role':'farm_manager'}))"
 ```
 
 ## 8. Rollback

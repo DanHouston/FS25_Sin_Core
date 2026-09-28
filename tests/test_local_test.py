@@ -68,3 +68,13 @@ class LocalTestTests(unittest.TestCase):
             self.assertEqual(snapshot["farms"], {1: "My farm", 14: ""})
             self.assertEqual(snapshot["unnamed_farm_ids"], [14])
             self.assertEqual(snapshot["source"], "game")
+
+    def test_game_snapshot_parses_authoritative_farm_balance(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "snapshot.xml"
+            path.write_text('''<?xml version="1.0" encoding="utf-8"?>
+<networkLocal schemaVersion="1" source="game" session="test" sequence="1" savegameIndex="1">
+    <farms><farm farmId="2" name="Player Farm" balance="602651.5"/></farms>
+</networkLocal>''', encoding="utf-8")
+            snapshot = read_snapshot(path)
+            self.assertEqual(snapshot["farm_balances"], {2: 602651.5})
