@@ -151,6 +151,8 @@ def build(version, output):
     except subprocess.CalledProcessError:
         dirty = False
     canonical_dist = (ROOT / "dist").resolve()
+    if output != canonical_dist and canonical_dist in output.parents:
+        raise ValueError("release output must be the canonical dist directory, not a nested dist subdirectory")
     if output == canonical_dist and output.exists():
         # dist is generated state. Clean only this exact repository directory;
         # caller-supplied output directories remain reusable and untouched.
@@ -218,7 +220,8 @@ def build(version, output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--output", type=Path, default=ROOT / "dist",
+                        help="canonical generated output directory (default: dist)")
     args = parser.parse_args()
     build(args.version, args.output)
     print(args.output)

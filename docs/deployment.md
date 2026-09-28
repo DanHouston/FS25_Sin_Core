@@ -104,8 +104,11 @@ powershell.exe -ExecutionPolicy Bypass -File C:\SiN\Deploy\Restart-SiN-Agent.ps1
 ```
 
 The release builder treats `dist/` as ephemeral generated state and cleans it
-before a canonical local build. Deployment downloads authoritative GitHub
-Release assets and does not consume local `dist/` contents.
+before every canonical local build. The latest ZIPs and their validation
+metadata are written directly under `dist/`; nested `dist/<version>` output is
+rejected so repeated validation builds do not accumulate directories. Deployment
+downloads authoritative GitHub Release assets and does not consume local
+`dist/` contents.
 
 The newest updater is downloaded as `C:\SiN\Deploy\Update-SiN.next.ps1` so the
 currently running script is not replaced mid-execution.

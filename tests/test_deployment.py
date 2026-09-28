@@ -16,6 +16,10 @@ from scripts.build_release import build
 class DeploymentPackagingTests(unittest.TestCase):
     root = Path(__file__).parents[1]
 
+    def test_release_builder_rejects_nested_dist_output(self):
+        with self.assertRaisesRegex(ValueError, "canonical dist directory"):
+            build("validation-nested", self.root / "dist" / "validation-nested")
+
     def _run_migration(self, mailbox_root):
         powershell = shutil.which("powershell.exe") or shutil.which("pwsh")
         if powershell is None:

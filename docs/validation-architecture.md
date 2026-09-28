@@ -14,7 +14,7 @@ that would actually be shipped.
 | Unit | `python -m unittest discover -s tests` (or focused modules) | Pure service, persistence, renderer, protocol, configuration, and source-contract behavior | Real FS25 parser/runtime, Discord/Mongo/FS25 network behavior |
 | Contract | `python -m unittest tests.test_integration_campaign` | Adapter envelopes, authentication, receipts, scenario registry, and stable cross-component contracts | Live engine state and external delivery |
 | Integration/scenario | `python scripts/run_integration_campaign.py --scenario <name> ...` | Deterministic mailbox → Agent → Central → persistence → presentation workflows and composed replacement scenarios | GIANTS authority, real Discord rendering, real Mongo durability |
-| Packaged artifact | `python scripts/build_release.py ...` followed by `python scripts/validate_release.py <dir> --version <version> --require-clean` | Release manifest/checksums, both FS25 archive structures, mod descriptor membership, ZIP CRCs, every packaged Lua file, and passed campaign evidence | The game loading the ZIP under a particular GIANTS build |
+| Packaged artifact | `python scripts/build_release.py --version <version>` (writes directly to canonical `dist/`) followed by `python scripts/validate_release.py dist --version <version> --require-clean` | Release manifest/checksums, both FS25 archive structures, mod descriptor membership, ZIP CRCs, every packaged Lua file, and passed campaign evidence | The game loading the ZIP under a particular GIANTS build |
 | Live/external | The procedures in `docs/live-validation.md` | Actual FS25 load, world marker, snapshots, map extraction, Discord delivery, Mongo durability, and authoritative runtime read-back | Nothing beyond the evidence collected in that live environment |
 
 The CI and release workflows run the static layer before the test suite. The
@@ -75,7 +75,8 @@ git diff --check
 Release path:
 
 ```powershell
-python scripts/build_release.py --version <version> --output release
+python scripts/build_release.py --version <version>
+python scripts/validate_release.py dist --version <version> --require-clean
 python scripts/validate_release.py release --version <version> --require-clean
 ```
 
