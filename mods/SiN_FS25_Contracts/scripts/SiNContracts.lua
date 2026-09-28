@@ -1,5 +1,5 @@
--- SiN FS25 Contracts: read-only observation of the native MissionManager.
--- This mod never creates, starts, finishes, pays, or replaces a mission.
+-- SiN FS25 Contracts: native MissionManager diagnostics, UI estimates and
+-- guarded replenishment. FS25 remains authoritative for mission state.
 
 SiNContracts = {}
 local MOD_NAME = "[SiN Contracts] "
@@ -11,6 +11,7 @@ local LOW_AVAILABLE_THRESHOLD = 3
 local REFILL_AVAILABLE_THRESHOLD = 9
 local REFILL_INTERVAL_MS = 10 * 60 * 1000
 local LOW_RETRY_INTERVAL_MS = 60 * 1000
+local GENERATION_BATCH_SIZE = 3
 
 local function logInfo(message, ...)
     if Logging ~= nil and Logging.info ~= nil then
@@ -60,6 +61,13 @@ local function callThree(object, name, ...)
     local ok, a, b, c = pcall(object[name], object, ...)
     if ok then return a, b, c end
     return nil, nil, nil
+end
+
+local function callFour(object, name, ...)
+    if object == nil or type(object[name]) ~= "function" then return nil, nil, nil, nil end
+    local ok, a, b, c, d = pcall(object[name], object, ...)
+    if ok then return a, b, c, d end
+    return nil, nil, nil, nil
 end
 
 local function nowMs()
@@ -218,10 +226,26 @@ local function equipmentData(mission)
         end
     end
     -- Some field mission implementations expose a group identifier and only
-    -- instantiate the lease vehicles when a player accepts the mission.
+    -- instantiate the lease vehicles when a player accepts the mission. The
+    -- native MissionManager retains the offered descriptors, so resolve them
+    -- for the pre-acceptance UI when that supported API is available. Width or
+    -- speed are used only when the descriptor actually exposes them; no
+    -- vehicle is instantiated and no value is inferred from a filename.
     if #result == 0 then
         local group = fieldValue(mission, {"vehicleGroupName", "vehicleGroupId", "vehicleGroupIdentifier"})
         sourceName = sourceName or text(group)
+        local identifier = number(group)
+        local fieldSize = text(call(mission, "getVehicleSize")) or text(fieldValue(mission, {"fieldSize", "vehicleSize"}))
+        if identifier ~= nil and fieldSize ~= nil and g_missionManager ~= nil then
+            local offered, _, _, offeredGroup = callFour(g_missionManager, "getVehicleGroupFromIdentifier",
+                missionType(mission), fieldSize, identifier)
+            if type(offered) == "table" then
+                for _, item in pairs(offered) do add(item) end
+            end
+            if sourceName == nil and offeredGroup ~= nil then
+                sourceName = text(fieldValue(offeredGroup, {"identifier", "id"}))
+            end
+        end
     end
     return result, sourceName
 end
@@ -368,7 +392,12 @@ function SiNContracts:maybeRequestGeneration(manager)
     if maximum ~= nil then
         local total = 0
         for _, _ in pairs(missions) do total = total + 1 end
-        if total >= maximum then return end
+        if total >= maximum then
+            -- The native cap is authoritative; abandon a partially queued
+            -- batch rather than leaving it armed forever at a full board.
+            self.generationBatchRemaining = 0
+            return
+        end
     end
 
     local emergency = available < LOW_AVAILABLE_THRESHOLD
@@ -376,29 +405,91 @@ function SiNContracts:maybeRequestGeneration(manager)
         and now - self.lastRefillPolicyMs >= REFILL_INTERVAL_MS
     local lowRetryDue = self.lastLowGenerationMs == nil
         or now - self.lastLowGenerationMs >= LOW_RETRY_INTERVAL_MS
-    if not emergency and not refillDue then return end
-    if emergency and not lowRetryDue then return end
+
+    -- A trigger starts a bounded batch. Each native generation cycle can add
+    -- at most one offer, so three cycles are the smallest deterministic refill
+    -- that satisfies the policy without constructing missions ourselves.
+    local batchActive = (self.generationBatchRemaining or 0) > 0
+    if not batchActive then
+        if not emergency and not refillDue then return end
+        if emergency and not lowRetryDue then return end
+        self.generationBatchRemaining = GENERATION_BATCH_SIZE
+        self.lastRefillPolicyMs = now
+        if emergency then self.lastLowGenerationMs = now end
+    end
 
     -- Normal refills respect the native generation timer. The emergency path
-    -- may start one native cycle early so fewer than three offers do not wait
-    -- through a full ten-minute native interval; the cycle itself still ends
-    -- through MissionManager:finishMissionGeneration().
+    -- may start a batch early so fewer than three offers do not wait through a
+    -- full ten-minute native interval; each cycle still ends through
+    -- MissionManager:finishMissionGeneration().
     local nativeCanStart = call(manager, "getCanStartNewMissionGeneration")
     -- If a runtime does not expose the native cap, do not bypass its cooldown
     -- for the emergency path; this keeps the policy fail-closed on variants we
     -- have not inspected.
     if maximum == nil and emergency and nativeCanStart ~= true then return end
     if not emergency and nativeCanStart ~= true then return end
-    local ok = pcall(manager.startMissionGeneration, manager)
-    if not ok then
-        logWarning("native replenishment request failed available=%d emergency=%s", available, tostring(emergency))
+    local ok, accepted = pcall(manager.startMissionGeneration, manager)
+    if not ok or accepted == false then
+        -- Do not consume the remaining batch slot when the native API rejects
+        -- the request; a later update can safely retry after its gate clears.
+        logWarning("native replenishment request failed available=%d emergency=%s batchRemaining=%d",
+            available, tostring(emergency), self.generationBatchRemaining or 0)
         return
     end
-    self.lastRefillPolicyMs = now
-    if emergency then self.lastLowGenerationMs = now end
-    logInfo("native replenishment requested available=%d threshold=%d mode=%s", available,
+    self.generationBatchRemaining = math.max(0, (self.generationBatchRemaining or 1) - 1)
+    logInfo("native replenishment requested available=%d threshold=%d mode=%s batchSize=%d batchRemaining=%d", available,
         emergency and LOW_AVAILABLE_THRESHOLD or REFILL_AVAILABLE_THRESHOLD,
-        emergency and "low-availability" or "ten-minute-refill")
+        emergency and "low-availability" or "ten-minute-refill", GENERATION_BATCH_SIZE,
+        self.generationBatchRemaining)
+end
+
+local function formatEstimateHours(hours)
+    return string.format("%.1f h", hours)
+end
+
+local function formatEstimateMoney(value)
+    if g_i18n ~= nil and type(g_i18n.formatMoney) == "function" then
+        local ok, formatted = pcall(g_i18n.formatMoney, g_i18n, value, 0, true, false)
+        if ok and formatted ~= nil then return tostring(formatted) end
+    end
+    return string.format("$%.0f", value)
+end
+
+function SiNContracts:appendNativeUiDetails(mission, details)
+    if mission == nil or type(details) ~= "table" then return end
+    local field = fieldData(mission)
+    local equipment = equipmentData(mission)
+    local estimatedHours = estimate(field, equipment)
+    local reward = number(call(mission, "getReward")) or number(fieldValue(mission, {"reward", "money"}))
+    if estimatedHours == nil or reward == nil or estimatedHours <= 0 then return end
+
+    -- getDetails may be called more than once by a frame refresh. Do not add
+    -- duplicate rows if another wrapper has already passed this list through.
+    for _, row in pairs(details) do
+        if type(row) == "table" and (row.title == "SiN estimated work time" or row.title == "SiN estimated native $/hour") then
+            return
+        end
+    end
+    table.insert(details, {title = "SiN estimated work time", value = formatEstimateHours(estimatedHours)})
+    table.insert(details, {title = "SiN estimated native $/hour", value = formatEstimateMoney(reward / estimatedHours)})
+end
+
+function SiNContracts:installDetailsHook()
+    if self.detailsHookInstalled == true then return true end
+    if AbstractFieldMission == nil or type(AbstractFieldMission.getDetails) ~= "function" then return false end
+    local native = AbstractFieldMission.getDetails
+    AbstractFieldMission.getDetails = function(...)
+        local args = {...}
+        local values = {native(unpack(args))}
+        local ok = pcall(function()
+            SiNContracts:appendNativeUiDetails(args[1], values[1])
+        end)
+        if not ok then logWarning("native contract details estimate callback failed; native details preserved") end
+        return unpack(values)
+    end
+    AbstractFieldMission.__sinContractsHook_getDetails = true
+    self.detailsHookInstalled = true
+    return true
 end
 
 function SiNContracts:consoleCommandContracts()
@@ -456,7 +547,7 @@ local function appendMethod(target, name, callback, marker, preserveReturns)
 end
 
 function SiNContracts:installHooks()
-    if self.hooksInstalled == true and self.abstractHooksInstalled == true then return end
+    if self.hooksInstalled == true and self.abstractHooksInstalled == true and self.detailsHookInstalled == true then return end
     local installed = false
     if MissionManager ~= nil then
         installed = appendMethod(MissionManager, "registerMission", function(manager, mission)
@@ -494,8 +585,9 @@ function SiNContracts:installHooks()
         self.abstractHooksInstalled = AbstractMission.__sinContractsHook_finish == true
             and AbstractMission.__sinContractsHook_dismiss == true
     end
+    self:installDetailsHook()
     self.hooksInstalled = installed
-    if installed then logInfo("native MissionManager hooks installed; read-only efficiency=%.2f", EFFICIENCY) end
+    if installed then logInfo("native MissionManager hooks installed; guarded replenishment batch=%d efficiency=%.2f", GENERATION_BATCH_SIZE, EFFICIENCY) end
 end
 
 function SiNContracts:loadMap()
@@ -519,6 +611,8 @@ SiNContracts.records = {}
 SiNContracts.fingerprints = {}
 SiNContracts.hooksInstalled = false
 SiNContracts.abstractHooksInstalled = false
+SiNContracts.detailsHookInstalled = false
 SiNContracts.lastRefillPolicyMs = nil
 SiNContracts.lastLowGenerationMs = nil
+SiNContracts.generationBatchRemaining = 0
 addModEventListener(SiNContracts)

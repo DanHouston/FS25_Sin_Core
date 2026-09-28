@@ -101,7 +101,7 @@ class ContractsLuaTests(unittest.TestCase):
         lua = self._runtime()
         lua.execute(
             """
-            local field = {id = 26, areaHa = 2.3, name = "Field 26"}
+            local field = {id = 26, areaHa = 15.2, name = "Field 26"}
             function field:getId() return self.id end
             function field:getAreaHa() return self.areaHa end
             function field:getName() return self.name end
@@ -145,7 +145,7 @@ class ContractsLuaTests(unittest.TestCase):
             """
         )
 
-    def test_low_offer_count_requests_one_native_generation_cycle(self):
+    def test_low_offer_count_requests_three_native_generation_cycles(self):
         lua = self._runtime()
         lua.execute(
             """
@@ -168,6 +168,15 @@ class ContractsLuaTests(unittest.TestCase):
             MissionManager:update()
             assert(requests == 1)
             assert(MissionManager.missionGenerationInProgress == true)
+            MissionManager.missionGenerationInProgress = false
+            MissionManager:update()
+            assert(requests == 2)
+            MissionManager.missionGenerationInProgress = false
+            MissionManager:update()
+            assert(requests == 3)
+            MissionManager.missionGenerationInProgress = false
+            MissionManager:update()
+            assert(requests == 3)
             """
         )
 
@@ -197,5 +206,67 @@ class ContractsLuaTests(unittest.TestCase):
             g_currentMission.time = 601001
             MissionManager:update()
             assert(requests == 1)
+            MissionManager.missionGenerationInProgress = false
+            MissionManager:update()
+            assert(requests == 2)
+            MissionManager.missionGenerationInProgress = false
+            MissionManager:update()
+            assert(requests == 3)
+            """
+        )
+
+    def test_native_contract_details_append_estimate_and_rate(self):
+        lua = self._runtime()
+        lua.execute(
+            """
+            AbstractFieldMission = {}
+            function AbstractFieldMission.getDetails(mission)
+                return {{title = "Native detail", value = "native"}}
+            end
+            SiNContracts:installDetailsHook()
+            local field = {id = 26, areaHa = 15.2, name = "Field 26"}
+            function field:getId() return self.id end
+            function field:getAreaHa() return self.areaHa end
+            function field:getName() return self.name end
+            local vehicle = {workingWidth = 24, workingSpeed = 12}
+            local mission = {reward = 3444.825, vehicles = {vehicle}}
+            function mission:getField() return field end
+            function mission:getReward() return self.reward end
+            local details = AbstractFieldMission.getDetails(mission)
+            assert(#details == 3)
+            assert(details[2].title == "SiN estimated work time")
+            assert(details[2].value == "0.3 h")
+            assert(details[3].title == "SiN estimated native $/hour")
+            local again = AbstractFieldMission.getDetails(mission)
+            assert(#again == 3)
+            """
+        )
+
+    def test_preacceptance_offer_uses_native_vehicle_group_descriptor_when_metrics_exist(self):
+        lua = self._runtime()
+        lua.execute(
+            """
+            g_missionManager = {}
+            function g_missionManager:getVehicleGroupFromIdentifier(kind, size, identifier)
+                assert(kind == "fertilizeMission")
+                assert(size == "medium")
+                assert(identifier == 7)
+                return {{filename = "offered.xml", workingWidth = 12, workingSpeed = 10}}, 1.0, "", {identifier = 7}
+            end
+            local field = {id = 24, areaHa = 15.2, name = "Field 24"}
+            function field:getId() return self.id end
+            function field:getAreaHa() return self.areaHa end
+            function field:getName() return self.name end
+            local mission = {type = "fertilizeMission", status = "CREATED", reward = 2000,
+                             vehicleGroupIdentifier = 7}
+            function mission:getUniqueId() return "preaccept-offer" end
+            function mission:getField() return field end
+            function mission:getReward() return self.reward end
+            function mission:getVehicleSize() return "medium" end
+            local record = SiNContracts:observe(mission, "observed")
+            assert(#record.equipment == 1)
+            assert(record.equipment[1].name == "offered.xml")
+            assert(record.estimatedHours ~= nil)
+            assert(record.equipmentSource == "7")
             """
         )

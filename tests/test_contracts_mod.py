@@ -70,9 +70,19 @@ class ContractsModTests(unittest.TestCase):
         self.assertIn("LOW_AVAILABLE_THRESHOLD = 3", source)
         self.assertIn("REFILL_AVAILABLE_THRESHOLD = 9", source)
         self.assertIn("REFILL_INTERVAL_MS = 10 * 60 * 1000", source)
+        self.assertIn("GENERATION_BATCH_SIZE = 3", source)
+        self.assertIn("generationBatchRemaining", source)
         self.assertIn("getCanStartNewMissionGeneration", source)
         self.assertIn("startMissionGeneration", source)
         self.assertIn("g_currentMission:getIsServer() ~= true", source)
+
+    def test_native_details_ui_is_return_preserving_and_fail_closed(self):
+        source = (MOD / "scripts/SiNContracts.lua").read_text(encoding="utf-8")
+        self.assertIn("appendNativeUiDetails", source)
+        self.assertIn("SiN estimated work time", source)
+        self.assertIn("SiN estimated native $/hour", source)
+        self.assertIn("AbstractFieldMission.getDetails", source)
+        self.assertIn("native details preserved", source)
 
     def test_icon_is_present(self):
         self.assertGreater((MOD / "icon_contracts.dds").stat().st_size, 0)

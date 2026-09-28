@@ -71,6 +71,17 @@ speed is absent. Actual duration is measured from accepted observation to
 native finish observation. Transport and other non-field missions remain
 observable but are normally not time-estimable without a native route metric.
 
+The native contract details panel is extended, when the same metrics are
+available, with `SiN estimated work time` and `SiN estimated native $/hour`.
+The wrapper preserves every native return value and appends no rows when the
+area, width, speed or reward is unavailable. Before acceptance the mod asks
+the documented `MissionManager:getVehicleGroupFromIdentifier(missionType,
+fieldSize, identifier)` API for the offered descriptors; it uses only positive
+width/speed fields actually present in those descriptors. In many FS25 builds
+those descriptors contain filenames/configuration only, so the estimate first
+becomes available after lease equipment is instantiated. No equipment is
+created by the UI hook.
+
 After acceptance, when FS25 has instantiated leased equipment, the observer
 reads the current implement work width from the native WorkArea specialization:
 `getAIWorkAreaWidth()`, falling back to
@@ -82,13 +93,15 @@ an estimate.
 
 ## Native offer replenishment
 
-The server-side observer requests one native MissionManager generation cycle
-when fewer than three `CREATED` offers are available. It also performs a
-refill check every ten minutes and requests a native cycle when fewer than nine
-offers are available. Normal refills respect FS25's generation cooldown; the
-under-three emergency path may request one cycle early, with a one-minute retry
-guard. The mod never constructs, registers, rewards, or persists a custom
-mission. FS25 remains authoritative for `tryGenerateMission`, field
+The server-side observer starts a bounded batch of up to three native
+`MissionManager` generation cycles when fewer than three `CREATED` offers are
+available. It also performs a refill check every ten minutes and starts the
+same three-cycle batch when fewer than nine offers are available. Each native
+cycle can add at most one offer; the batch is stopped early by FS25's mission
+cap or native generation failure. Normal refills respect FS25's generation
+cooldown; the under-three emergency path may start early, with a one-minute
+retry guard. The mod never constructs, registers, rewards, or persists a
+custom mission. FS25 remains authoritative for `tryGenerateMission`, field
 validation, vehicle groups, reward calculation, mission caps, and save state.
 
 ## Live diagnostics
