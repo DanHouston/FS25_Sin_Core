@@ -7,7 +7,7 @@
         <en>SiN FS25 Contracts</en>
     </title>
     <description>
-        <en>Read-only diagnostics for native FS25 contracts.</en>
+        <en>Native FS25 contract diagnostics and guarded replenishment.</en>
     </description>
     <multiplayer supported="true"/>
     <extraSourceFiles>

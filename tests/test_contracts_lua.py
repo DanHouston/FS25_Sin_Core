@@ -144,3 +144,58 @@ class ContractsLuaTests(unittest.TestCase):
             assert(record.estimatedHours ~= nil)
             """
         )
+
+    def test_low_offer_count_requests_one_native_generation_cycle(self):
+        lua = self._runtime()
+        lua.execute(
+            """
+            g_currentMission = {time = 1000, getIsServer = function() return true end}
+            MissionStatus = {CREATED = "CREATED"}
+            MissionManager = {}
+            MissionManager.MAX_MISSIONS = 25
+            MissionManager.missions = {{status = "CREATED"}, {status = "CREATED"}}
+            MissionManager.missionGenerationInProgress = false
+            local requests = 0
+            function MissionManager:getMissions() return self.missions end
+            function MissionManager:getCanStartNewMissionGeneration() return false end
+            function MissionManager:startMissionGeneration() requests = requests + 1; self.missionGenerationInProgress = true end
+            function MissionManager:registerMission() end
+            function MissionManager:startMission() return true end
+            function MissionManager:cancelMission() return true end
+            function MissionManager:dismissMission() return true end
+            function MissionManager:update() return 23 end
+            SiNContracts:installHooks()
+            MissionManager:update()
+            assert(requests == 1)
+            assert(MissionManager.missionGenerationInProgress == true)
+            """
+        )
+
+    def test_nine_offer_refill_waits_ten_minutes_and_respects_native_gate(self):
+        lua = self._runtime()
+        lua.execute(
+            """
+            g_currentMission = {time = 1000, getIsServer = function() return true end}
+            MissionStatus = {CREATED = "CREATED"}
+            MissionManager = {}
+            MissionManager.missions = {}
+            for i = 1, 8 do table.insert(MissionManager.missions, {status = "CREATED"}) end
+            MissionManager.missionGenerationInProgress = false
+            local requests = 0
+            function MissionManager:getMissions() return self.missions end
+            function MissionManager:getCanStartNewMissionGeneration() return true end
+            function MissionManager:startMissionGeneration() requests = requests + 1; self.missionGenerationInProgress = true end
+            function MissionManager:registerMission() end
+            function MissionManager:startMission() return true end
+            function MissionManager:cancelMission() return true end
+            function MissionManager:dismissMission() return true end
+            function MissionManager:update() return 23 end
+            SiNContracts:installHooks()
+            MissionManager:update()
+            assert(requests == 0)
+            MissionManager.missionGenerationInProgress = false
+            g_currentMission.time = 601001
+            MissionManager:update()
+            assert(requests == 1)
+            """
+        )

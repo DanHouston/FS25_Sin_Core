@@ -65,5 +65,14 @@ class ContractsModTests(unittest.TestCase):
         self.assertIn('workWidth', source)
         self.assertIn('workingWidthSource', source)
 
+    def test_native_replenishment_policy_is_guarded_and_thresholded(self):
+        source = (MOD / "scripts/SiNContracts.lua").read_text(encoding="utf-8")
+        self.assertIn("LOW_AVAILABLE_THRESHOLD = 3", source)
+        self.assertIn("REFILL_AVAILABLE_THRESHOLD = 9", source)
+        self.assertIn("REFILL_INTERVAL_MS = 10 * 60 * 1000", source)
+        self.assertIn("getCanStartNewMissionGeneration", source)
+        self.assertIn("startMissionGeneration", source)
+        self.assertIn("g_currentMission:getIsServer() ~= true", source)
+
     def test_icon_is_present(self):
         self.assertGreater((MOD / "icon_contracts.dds").stat().st_size, 0)

@@ -1,9 +1,9 @@
 # SiN FS25 Contracts
 
-`SiN_FS25_Contracts` is a standalone, read-only diagnostic layer for the
-native FS25 contract system. It does not register mission types, generate
-missions, alter rewards, start or cancel work, issue payment, or copy mission
-authority into SiN. FS25 remains the source of truth.
+`SiN_FS25_Contracts` is a standalone diagnostic and guarded replenishment layer
+for the native FS25 contract system. It does not register mission types,
+construct missions, alter rewards, start or cancel work, issue payment, or copy
+mission authority into SiN. FS25 remains the source of truth.
 
 ## Native runtime surface
 
@@ -79,6 +79,17 @@ than a cosmetic/configuration width. Width is therefore normally unavailable
 for an unaccepted offer, and remains unavailable when the native vehicle
 exposes no positive work area; the observer does not infer a width or fabricate
 an estimate.
+
+## Native offer replenishment
+
+The server-side observer requests one native MissionManager generation cycle
+when fewer than three `CREATED` offers are available. It also performs a
+refill check every ten minutes and requests a native cycle when fewer than nine
+offers are available. Normal refills respect FS25's generation cooldown; the
+under-three emergency path may request one cycle early, with a one-minute retry
+guard. The mod never constructs, registers, rewards, or persists a custom
+mission. FS25 remains authoritative for `tryGenerateMission`, field
+validation, vehicle groups, reward calculation, mission caps, and save state.
 
 ## Live diagnostics
 

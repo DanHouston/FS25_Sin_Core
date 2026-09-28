@@ -7,6 +7,10 @@ local MAX_RECORDS = 128
 local MAX_EQUIPMENT = 16
 local EFFICIENCY = 0.70
 local POLL_INTERVAL_MS = 1000
+local LOW_AVAILABLE_THRESHOLD = 3
+local REFILL_AVAILABLE_THRESHOLD = 9
+local REFILL_INTERVAL_MS = 10 * 60 * 1000
+local LOW_RETRY_INTERVAL_MS = 60 * 1000
 
 local function logInfo(message, ...)
     if Logging ~= nil and Logging.info ~= nil then
@@ -331,6 +335,72 @@ function SiNContracts:scan(reason)
     return count
 end
 
+local function missionIsAvailable(mission)
+    if mission == nil then return false end
+    local raw = fieldValue(mission, {"status", "missionStatus"})
+    if MissionStatus ~= nil and raw ~= nil and raw == MissionStatus.CREATED then return true end
+    return statusName(mission) == "CREATED"
+end
+
+function SiNContracts:availableMissionCount(manager)
+    local missions = call(manager, "getMissions") or manager.missions or {}
+    local count = 0
+    for _, mission in pairs(missions) do
+        if missionIsAvailable(mission) then count = count + 1 end
+    end
+    return count, missions
+end
+
+-- Replenishment delegates to the native MissionManager generation cycle. It
+-- never constructs or registers a mission itself, and it is server-only.
+function SiNContracts:maybeRequestGeneration(manager)
+    if g_currentMission == nil or g_currentMission:getIsServer() ~= true or manager == nil then return end
+    local available, missions = self:availableMissionCount(manager)
+    local now = nowMs()
+    if now == nil then return end
+    if self.lastRefillPolicyMs == nil then self.lastRefillPolicyMs = now end
+
+    local inProgress = fieldValue(manager, {"missionGenerationInProgress"}) == true
+    if inProgress then return end
+    local missionManagerClass = MissionManager or manager
+    local maximum = number(fieldValue(missionManagerClass, {"MAX_MISSIONS"}))
+    if maximum == nil then maximum = number(fieldValue(manager, {"MAX_MISSIONS"})) end
+    if maximum ~= nil then
+        local total = 0
+        for _, _ in pairs(missions) do total = total + 1 end
+        if total >= maximum then return end
+    end
+
+    local emergency = available < LOW_AVAILABLE_THRESHOLD
+    local refillDue = available < REFILL_AVAILABLE_THRESHOLD
+        and now - self.lastRefillPolicyMs >= REFILL_INTERVAL_MS
+    local lowRetryDue = self.lastLowGenerationMs == nil
+        or now - self.lastLowGenerationMs >= LOW_RETRY_INTERVAL_MS
+    if not emergency and not refillDue then return end
+    if emergency and not lowRetryDue then return end
+
+    -- Normal refills respect the native generation timer. The emergency path
+    -- may start one native cycle early so fewer than three offers do not wait
+    -- through a full ten-minute native interval; the cycle itself still ends
+    -- through MissionManager:finishMissionGeneration().
+    local nativeCanStart = call(manager, "getCanStartNewMissionGeneration")
+    -- If a runtime does not expose the native cap, do not bypass its cooldown
+    -- for the emergency path; this keeps the policy fail-closed on variants we
+    -- have not inspected.
+    if maximum == nil and emergency and nativeCanStart ~= true then return end
+    if not emergency and nativeCanStart ~= true then return end
+    local ok = pcall(manager.startMissionGeneration, manager)
+    if not ok then
+        logWarning("native replenishment request failed available=%d emergency=%s", available, tostring(emergency))
+        return
+    end
+    self.lastRefillPolicyMs = now
+    if emergency then self.lastLowGenerationMs = now end
+    logInfo("native replenishment requested available=%d threshold=%d mode=%s", available,
+        emergency and LOW_AVAILABLE_THRESHOLD or REFILL_AVAILABLE_THRESHOLD,
+        emergency and "low-availability" or "ten-minute-refill")
+end
+
 function SiNContracts:consoleCommandContracts()
     local count = self:scan("console")
     logInfo("diagnostic snapshot missions=%d efficiency=%.2f", count, EFFICIENCY)
@@ -411,6 +481,7 @@ function SiNContracts:installHooks()
                 self.lastPollMs = now
                 self:scan("observed")
             end
+            self:maybeRequestGeneration(manager)
         end, nil, true) or installed
     end
     if AbstractMission ~= nil then
@@ -448,4 +519,6 @@ SiNContracts.records = {}
 SiNContracts.fingerprints = {}
 SiNContracts.hooksInstalled = false
 SiNContracts.abstractHooksInstalled = false
+SiNContracts.lastRefillPolicyMs = nil
+SiNContracts.lastLowGenerationMs = nil
 addModEventListener(SiNContracts)
