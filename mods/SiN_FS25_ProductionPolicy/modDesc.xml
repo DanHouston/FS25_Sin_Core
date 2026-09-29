@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<modDesc descVersion="92">
+    <author>SiN (SimNet)</author>
+    <version>0.1.0.0</version>
+    <iconFilename>icon_production_policy.dds</iconFilename>
+    <title>
+        <en>SiN FS25 Production Policy</en>
+    </title>
+    <description>
+        <en>Server-authoritative runtime purchase policy for third-party production placeables.</en>
+    </description>
+    <multiplayer supported="true"/>
+    <extraSourceFiles>
+        <sourceFile filename="scripts/SiNProductionPolicy.lua"/>
+    </extraSourceFiles>
+</modDesc>
