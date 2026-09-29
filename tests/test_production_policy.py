@@ -61,7 +61,8 @@ class ProductionPolicyTests(unittest.TestCase):
         self.assertIn("getModNameAndBaseDirectory", source)
         self.assertNotIn("changeMoney", source)
         self.assertNotIn("FS25SiNServer", source)
-        self.assertNotIn("storeItem.price =", source)
+        self.assertIn("storeItem.__sinProductionPolicySourcePrice = sourcePrice", source)
+        self.assertIn("storeItem.price = effectivePrice", source)
 
     def test_mod_descriptor_and_icon_are_present(self):
         descriptor = (MOD / "modDesc.xml").read_text(encoding="utf-8")

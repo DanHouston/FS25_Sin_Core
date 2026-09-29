@@ -18,14 +18,17 @@ item is a `StoreSpecies.PLACEABLE` whose XML root is
 Each descriptor retains `modName`, `xmlPath`, `sourcePrice`, `effectivePrice`,
 recipes (inputs/outputs, cycles per hour, active-hour cost), and operating cost.
 Unknown or malformed assets do not produce a descriptor and retain native
-behavior.
+behavior. For an explicitly matched production, the runtime store item's price
+is set to its effective value so ConstructionScreen's catalog (which renders
+that field directly) displays the policy price. The native source value remains
+separately retained in the immutable descriptor and metadata fields.
 
 ## Policy and runtime seam
 
 The data file is `config/production-policy.xml`. Overrides must be positive
 whole dollars; invalid entries fail closed. Applying the policy is idempotent:
-the original `storeItem.price` is never overwritten, and the effective price is
-resolved from that source price on every native pricing call.
+the original price is retained before the one matched catalog item is updated,
+and repeated discovery does not compound the effective value.
 
 The narrow interception point is `EconomyManager:getBuyPrice`. FS25 uses that
 method when `BuyPlaceableData:updatePrice` creates its purchase data, therefore

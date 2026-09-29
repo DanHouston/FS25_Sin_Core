@@ -141,6 +141,15 @@ function SiNProductionPolicy:discover(storeItem)
         recipes = recipes, operatingCost = operatingCost
     }
     storeItem.__sinProductionPolicyDescriptor = descriptor
+    -- ConstructionScreen renders the catalog from storeItem.price directly.
+    -- Retain immutable source metadata before setting this one, explicitly
+    -- matched item to its effective catalog price. The guarded economy hook
+    -- below still recalculates the authoritative server charge.
+    storeItem.__sinProductionPolicySourcePrice = sourcePrice
+    storeItem.__sinProductionPolicyEffectivePrice = effectivePrice
+    if policy ~= nil and storeItem.price ~= effectivePrice then
+        storeItem.price = effectivePrice
+    end
     self.registry[id] = descriptor
     if policy ~= nil then
         info(string.format("production discovered id=%s sourcePrice=%d policy=matched effectivePrice=%d recipes=%d operatingCost=%s",
