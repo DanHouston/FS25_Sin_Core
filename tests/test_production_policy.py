@@ -24,6 +24,8 @@ class ProductionPolicyTests(unittest.TestCase):
             with self.subTest(mod_name=mod_name, path=path):
                 with self.assertRaises(ValueError):
                     canonical_production_id(mod_name, path)
+        self.assertEqual(canonical_production_id("FS25_BaseGame", "data/placeables/brandless/productionPointsGeneric/bakery/bakery.xml"),
+                         "FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/bakery/bakery.xml")
 
     def test_source_price_is_retained_and_lime_effective_price_is_exact(self):
         descriptor = describe_production("FS25_LimeProduction", "LimeProduction.xml", 110000, self.policy)
@@ -56,8 +58,10 @@ class ProductionPolicyTests(unittest.TestCase):
         self.assertIn("data:updatePrice()", source)
         self.assertIn("sourcePrice", source)
         self.assertIn("effectivePrice", source)
-        self.assertIn("placeable#type", source)
-        self.assertIn('placeableType ~= "productionPoint"', source)
+        self.assertIn('xmlFile:hasProperty("placeable.productionPoint")', source)
+        self.assertIn("baseGameIdentity", source)
+        self.assertIn("FS25_BaseGame", source)
+        self.assertIn("discoverRegisteredProductions", source)
         self.assertIn("getModNameAndBaseDirectory", source)
         self.assertNotIn("changeMoney", source)
         self.assertNotIn("FS25SiNServer", source)

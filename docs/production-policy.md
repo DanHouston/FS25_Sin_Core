@@ -9,11 +9,13 @@ from its source value of `$110,000` to its effective SiN price of `$500,000`.
 ## Canonical identity and discovery
 
 The canonical ID is `<FS25 mod name>:<XML path relative to that mod root>`,
-with `/` separators. The source mod name comes from
+with `/` separators. Base-game assets use
+`FS25_BaseGame:data/<path>`. The source mod name comes from
 `Utils.getModNameAndBaseDirectory(storeItem.xmlFilename)`, not from the
 localized display name. A descriptor is created only when the registered store
-item is a `StoreSpecies.PLACEABLE` whose XML root is
-`<placeable type="productionPoint">`.
+item is a `StoreSpecies.PLACEABLE` whose XML contains a
+`<placeable><productionPoint>` block; this supports production-capable
+placeables without assuming one particular placeable type.
 
 Each descriptor retains `modName`, `xmlPath`, `sourcePrice`, `effectivePrice`,
 recipes (inputs/outputs, cycles per hour, active-hour cost), and operating cost.
@@ -47,8 +49,9 @@ a policy-selected price.
 
 ## Diagnostics
 
-`log.txt` records policy load, discovery, source price, policy match, effective
-price, and applied native pricing calls. `sinProductionPolicy` logs retained
+`log.txt` records policy load, post-store-registration inventory discovery,
+source price, policy match, effective price, and applied native pricing calls.
+`sinProductionPolicy` logs retained
 descriptors including recipes and operating costs. Diagnostics are bounded for
 unknown productions; only configured pricing is logged at application time.
 

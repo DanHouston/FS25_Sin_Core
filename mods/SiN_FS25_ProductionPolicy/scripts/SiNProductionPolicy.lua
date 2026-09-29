@@ -86,6 +86,22 @@ local function relativePathForItem(storeItem, modName, baseDirectory)
     return normalizePath(string.sub(normalizedFilename, string.len(normalizedBase) + 1))
 end
 
+local function baseGameIdentity(storeItem)
+    local filename = storeItem ~= nil and storeItem.xmlFilename or nil
+    if type(filename) ~= "string" then return nil, nil end
+    local normalized = string.gsub(filename, "\\", "/")
+    local lower = string.lower(normalized)
+    local startAt = string.find(lower, "/data/", 1, true)
+    if startAt == nil then
+        -- FS25 can retain a virtual data path in a store item on some hosts.
+        if string.sub(lower, 1, 5) == "data/" then
+            return "FS25_BaseGame", normalizePath(normalized)
+        end
+        return nil, nil
+    end
+    return "FS25_BaseGame", normalizePath(string.sub(normalized, startAt + 1))
+end
+
 local function readRecipes(storeItem)
     local recipes, operatingCost = {}, nil
     if storeItem == nil or storeItem.xmlFilename == nil then return recipes, operatingCost end
@@ -118,15 +134,19 @@ function SiNProductionPolicy:discover(storeItem)
     if StoreItemUtil == nil or StoreItemUtil.getIsPlaceable == nil or not StoreItemUtil.getIsPlaceable(storeItem) then return nil end
     if Utils == nil or type(Utils.getModNameAndBaseDirectory) ~= "function" then return nil end
     local modName, baseDirectory = Utils.getModNameAndBaseDirectory(storeItem.xmlFilename)
-    if modName == nil or baseDirectory == nil then return nil end
-    local relativePath = relativePathForItem(storeItem, modName, baseDirectory)
+    local relativePath = nil
+    if modName ~= nil and baseDirectory ~= nil then
+        relativePath = relativePathForItem(storeItem, modName, baseDirectory)
+    else
+        modName, relativePath = baseGameIdentity(storeItem)
+    end
     local id = canonicalId(modName, relativePath)
     if id == nil then return nil end
     local xmlFile = XMLFile.load("SiNProductionType", storeItem.xmlFilename)
     if xmlFile == nil then return nil end
-    local placeableType = xmlFile:getString("placeable#type")
+    local isProduction = xmlFile:hasProperty("placeable.productionPoint")
     xmlFile:delete()
-    if placeableType ~= "productionPoint" then return nil end
+    if not isProduction then return nil end
     local sourcePrice = validPrice(storeItem.price)
     if sourcePrice == nil then
         warning("production=" .. id .. " has invalid source price; unchanged")
@@ -221,15 +241,38 @@ local function installServerPurchaseRecalculation()
     return true
 end
 
+function SiNProductionPolicy:discoverRegisteredProductions()
+    if g_storeManager == nil or type(g_storeManager.getItems) ~= "function" then return false end
+    for _, item in ipairs(g_storeManager:getItems()) do self:discover(item) end
+    return true
+end
+
 function SiNProductionPolicy:loadMap()
     self:loadPolicy()
     self.hooksInstalled = overwriteEconomy()
     local authorityHook = installServerPurchaseRecalculation()
-    if g_storeManager ~= nil and type(g_storeManager.getItems) == "function" then
-        for _, item in ipairs(g_storeManager:getItems()) do self:discover(item) end
-    end
+    -- StoreManager loading is asynchronous. Discover once after its first
+    -- settled update rather than treating the first partial list as complete.
+    self.discoveryDelayMs = 1500
+    self.discoveryComplete = false
     info("runtime ready server=" .. tostring(g_currentMission ~= nil and g_currentMission:getIsServer() == true)
         .. " priceHook=" .. tostring(self.hooksInstalled) .. " authorityHook=" .. tostring(authorityHook))
+end
+
+function SiNProductionPolicy:update(dt)
+    if self.discoveryComplete == true then return end
+    self.discoveryDelayMs = (self.discoveryDelayMs or 0) - (dt or 0)
+    if self.discoveryDelayMs <= 0 and self:discoverRegisteredProductions() then
+        self.discoveryComplete = true
+        info("production inventory discovery complete count=" .. tostring((function()
+            local count = 0; for _ in pairs(self.registry) do count = count + 1 end; return count
+        end)()))
+    end
+end
+
+function SiNProductionPolicy:deleteMap()
+    self.registry = {}
+    self.discoveryComplete = false
 end
 
 function SiNProductionPolicy:consoleList()

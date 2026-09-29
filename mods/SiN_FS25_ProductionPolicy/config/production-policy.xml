@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Canonical ID = <mod name>:<path relative to the mod root>. -->
+<!-- Canonical ID = <mod name>:<path relative to the mod root>, or
+     FS25_BaseGame:data/<path> for base-game assets. -->
 <productionPolicy schemaVersion="1">
     <production id="FS25_LimeProduction:LimeProduction.xml" purchasePrice="500000"/>
 </productionPolicy>
