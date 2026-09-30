@@ -141,8 +141,8 @@ they should not receive the crop-converter revenue multiplier.
 
 | Canonical asset | Tier | Native price | Capacity | Target recipe capability/rates | Native annual gross / recipe | Candidate price |
 |---|---|---:|---:|---|---:|---:|
-| `FS25_AmericanSilosProductionPack:silos/staveSiloSmall.xml` | Small | $50k | 250,000 L | Common full set; hay/silage 4,500 cycles/h, pig food 2, forage 3 | $73k-$806k | **$403k** |
-| `FS25_AmericanSilosProductionPack:silos/steelSiloSmall.xml` | Small | $75k | 750,000 L | Common full set; hay/silage 4,500 cycles/h, pig food 2, forage 3 | $73k-$806k | **$403k** |
+| `FS25_AmericanSilosProductionPack:silos/staveSiloSmall.xml` | Small | $50k | 250,000 L | Common full set; hay/silage 4,000 cycles/h, pig food 1.5, forage 2.5 | $65k-$605k | **$302.5k** |
+| `FS25_AmericanSilosProductionPack:silos/steelSiloSmall.xml` | Small | $75k | 750,000 L | Common full set; hay/silage 4,000 cycles/h, pig food 1.5, forage 2.5 | $65k-$605k | **$302.5k** |
 | `FS25_AmericanSilosProductionPack:silos/staveSiloLarge.xml` | Large | $100k | 500,000 L | Common full set; hay/silage 5,000 cycles/h, pig food 2, forage 3.5 | $81k-$806k | **$403k** |
 | `FS25_AmericanSilosProductionPack:silos/steelSiloLarge.xml` | Large | $125k | 1,000,000 L | Common full set; hay/silage 5,000 cycles/h, pig food 2, forage 3.5 | $81k-$806k | **$403k** |
 
@@ -150,10 +150,10 @@ they should not receive the crop-converter revenue multiplier.
 and cycles/hour within each tier. The large pair already meets that rule in the
 source XMLs. The small pair has matching inputs/outputs but native rates of
 4,000/1.5/2.5 (stave) versus 4,500/2/3 (steel) for hay/silage, pig food, and
-forage respectively. The target uses the higher existing small-tier rates, so
-the stave small silo is raised to the steel small profile rather than nerfing
-steel. The source ZIP remains untouched; these are the rates to encode in the
-SiN runtime policy after live validation.
+forage respectively. The target uses the lower existing small-tier rates, so
+the steel small silo is normalized down to the stave small profile rather than
+raising the smaller stave silo. The source ZIP remains untouched; these are the
+rates to encode in the SiN runtime policy after live validation.
 
 Every silo can convert grass to hay; chaff, grass, hay, or straw to silage;
 the crop recipe `500 maize + 250 wheat + 175 canola + 75 sugar beet` to
