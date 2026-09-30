@@ -149,14 +149,21 @@ they should not receive the crop-converter revenue multiplier.
 Every silo can convert grass to hay; chaff, grass, hay, or straw to silage;
 the crop recipe `500 maize + 250 wheat + 175 canola + 75 sugar beet` to
 1,000 pig food; and `400 silage + 400 hay + 200 straw` to 1,000 forage. The
-four rates and capacities are not a clean small-to-large linear family, so
-their purchase prices should still be checked against intended livestock demand
-and storage capacity. The candidate values use native cycles and the highest
-sustainable recipe's six-game-month gross output (144 active game-hours), with
-no input-cost deduction. No throughput multiplier is proposed: the native 4,000-5,000
-cycles/hour drying and silage rates are already extremely high, and multiplying
-them would create an artificial processing-rate policy rather than a purchase
-price policy.
+The capability policy should make the two small silos recipe-equivalent and the
+two large silos recipe-equivalent. Each tier should expose the complete common
+set above: hay, silage, pig food, and forage. The small/large distinction should
+come from storage capacity and the separately reviewed purchase price, not from
+one sibling silently losing a recipe. Throughput remains a separate native-rate
+decision unless a later balancing pass explicitly changes it.
+
+The four native rates and capacities are not a clean small-to-large linear
+family, so their purchase prices should still be checked against intended
+livestock demand and storage capacity. The candidate values use native cycles
+and the highest sustainable recipe's six-game-month gross output (144 active
+game-hours), with no input-cost deduction. No throughput multiplier is proposed:
+the native 4,000-5,000 cycles/hour drying and silage rates are already extremely
+high, and multiplying them would create an artificial processing-rate policy
+rather than a purchase-price policy.
 
 ## Catalog coverage check
 
