@@ -54,7 +54,10 @@ local function validPositiveNumber(value)
 end
 
 local function validRecipeId(value)
-    if type(value) ~= "string" or string.match(value, "^[%w_]+$") == nil then return nil end
+    -- Production XML permits human-readable IDs containing spaces (the
+    -- American Silos pack uses "forage mixer"). Keep the identifier bounded
+    -- and path-free while accepting the native spelling exactly.
+    if type(value) ~= "string" or string.match(value, "^[%w_][%w_ %-]*$") == nil then return nil end
     return value
 end
 

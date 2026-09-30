@@ -1,9 +1,13 @@
 # SiN FS25 Production Policy
 
 `SiN_FS25_ProductionPolicy` is a standalone runtime policy mod. It does not
-alter map files, saves, or third-party ZIPs. The first policy is deliberately
-narrow: it identifies explicitly named production store items. Lime Production
-is `FS25_LimeProduction:LimeProduction.xml`; its source price is `$110,000`
+alter map files, saves, or third-party ZIPs. The policy identifies explicitly
+named production store items. It currently applies the approved SiN
+purchase-price plan to farm-supply, direct crop, downstream food/animal, and
+American Silos assets. Greenhouses, energy/BGA, forestry, and
+construction-material assets remain native until their separate economic
+models are approved. Lime Production is
+`FS25_LimeProduction:LimeProduction.xml`; its source price is `$110,000`
 and its current SiN price is `$100,000`.
 
 ## Canonical identity and discovery
@@ -31,7 +35,9 @@ The data file is `config/production-policy.xml`. Purchase-price overrides must
 be positive whole dollars; invalid entries fail closed. A production entry can
 also hold narrowly targeted recipe rules: a positive `cyclesPerHour`, exact
 named input/output amount overrides, or `enabled="false"` to remove a named
-recipe from the native production indexes. Applying the policy is idempotent:
+recipe from the native production indexes. Native recipe IDs may contain
+letters, numbers, underscores, hyphens, and spaces (for example the American
+Silos `forage mixer` recipe). Applying the policy is idempotent:
 the original price is retained before the one matched catalog item is updated,
 and repeated discovery does not compound the effective value.
 
@@ -66,8 +72,19 @@ The current recipe policy is intentionally limited to:
   price `$230,000`;
 - `FS25_RH_LiquidFertillizerProduction:liquidFertilizerFactory.xml`, recipe
   `LiquidFertilizerFactory`: purchase price `$175,000`, one cycle per hour;
-- `FS25_SeedProductionFactory:seedProductionFactory.xml`: removal of the four
-  explicitly named `*_rush` recipes. Normal seed recipes are unchanged.
+- `FS25_SeedProductionFactory:seedProductionFactory.xml`: purchase price
+  `$300,000` and removal of the four explicitly named `*_rush` recipes. Normal
+  seed recipes are unchanged;
+- the four `FS25_AmericanSilosProductionPack` entries: small-tier purchase
+  price `$302,500` with the common `4,000/1.5/2.5` hay/silage, pig-food, and
+  forage rates; large-tier purchase price `$403,000` with the common
+  `5,000/2/3.5` rates. Storage capacities remain native because no safe
+  authoritative capacity seam is implemented.
+
+The remaining approved purchase prices are data-only entries in
+`config/production-policy.xml`; they do not change native input/output ratios
+or recipe concurrency. This keeps the price rollout separate from any future
+throughput or yield decision. The source production ZIPs remain untouched.
 
 An unmatched runtime structure or input/output name fails closed for that
 recipe and is logged. A map/save reload is required for a recipe policy to
@@ -127,10 +144,14 @@ every game update.
 
 ## Live validation
 
-1. Keep `FS25_LimeProduction.zip` byte-for-byte unchanged; record its SHA256.
-2. Install `SiN_FS25_ProductionPolicy.zip` beside it and enable both on a new
+1. Keep every third-party production ZIP byte-for-byte unchanged; record the
+   hashes of any assets being tested.
+2. Install `SiN_FS25_ProductionPolicy.zip` beside them and enable both on a new
    test save (identical policy ZIP on a dedicated server and all clients).
-3. Open Construction > Productions and select Lime Production. Confirm `$100,000`.
+3. Open Construction > Productions and spot-check Lime (`$100,000`), cereal
+   (`$995,000`), an approved downstream line, and both silo tiers (`$302,500`
+   small / `$403,000` large). Hold-native categories should retain their
+   source prices.
 4. Purchase it on a farm with sufficient funds. Confirm the farm loses exactly
    `$100,000`, plus separately shown native placement/displacement costs only.
 5. Place Lime Production, open its production menu, and confirm its only recipe
@@ -142,4 +163,4 @@ every game update.
    canonical ID `FS25_LimeProduction:LimeProduction.xml`.
 8. Save, reload, and repeat the recipe and store-display checks. Confirm
    unrelated production prices and recipes are unchanged.
-9. Recalculate the original Lime ZIP hash and confirm it matches step 1.
+9. Recalculate the original production ZIP hashes and confirm they match step 1.

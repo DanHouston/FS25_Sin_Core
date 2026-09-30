@@ -62,6 +62,47 @@ class ProductionPolicyTests(unittest.TestCase):
             "wheat_seeds_rush", "barley_seeds_rush", "oat_seeds_rush", "maize_seeds_rush"})
         self.assertTrue(all(node.get("enabled") == "false" for node in seed.findall("recipe")))
 
+    def test_approved_price_plan_covers_all_non_native_groups(self):
+        root = ElementTree.parse(MOD / "config/production-policy.xml").getroot()
+        entries = {node.get("id"): node for node in root.findall("production")}
+        expected = {
+            "FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/cerealFactory/cerealFactory.xml": "995000",
+            "FS25_BaseGame:data/placeables/mapUS/oilPlantUS/oilPlantUS.xml": "515000",
+            "FS25_BaseGame:data/placeables/mapEU/preservedFoodFactory/preservedFoodFactoryPlaceable.xml": "1770000",
+            "FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/tailorShop/tailorShop.xml": "2455000",
+            "FS25_AmericanSilosProductionPack:silos/staveSiloSmall.xml": "302500",
+            "FS25_AmericanSilosProductionPack:silos/steelSiloSmall.xml": "302500",
+            "FS25_AmericanSilosProductionPack:silos/staveSiloLarge.xml": "403000",
+            "FS25_AmericanSilosProductionPack:silos/steelSiloLarge.xml": "403000",
+        }
+        self.assertTrue(expected.keys() <= entries.keys())
+        for canonical_id, price in expected.items():
+            self.assertEqual(entries[canonical_id].get("purchasePrice"), price)
+
+    def test_silo_tier_recipe_policy_is_identical_and_native_ids_are_safe(self):
+        root = ElementTree.parse(MOD / "config/production-policy.xml").getroot()
+        entries = {node.get("id"): node for node in root.findall("production")}
+        small_ids = {
+            "FS25_AmericanSilosProductionPack:silos/staveSiloSmall.xml",
+            "FS25_AmericanSilosProductionPack:silos/steelSiloSmall.xml",
+        }
+        large_ids = {
+            "FS25_AmericanSilosProductionPack:silos/staveSiloLarge.xml",
+            "FS25_AmericanSilosProductionPack:silos/steelSiloLarge.xml",
+        }
+        def rates(canonical_id):
+            return {node.get("id"): node.get("cyclesPerHour")
+                    for node in entries[canonical_id].findall("recipe")}
+        small = sorted(small_ids)
+        large = sorted(large_ids)
+        self.assertEqual(rates(small[0]), rates(small[1]))
+        self.assertEqual(rates(large[0]), rates(large[1]))
+        self.assertEqual(rates(small[0]), {
+            "hay": "4000", "chaffSilage": "4000", "grassSilage": "4000",
+            "haySilage": "4000", "strawSilage": "4000", "Pigfood": "1.5",
+            "forage mixer": "2.5"})
+        self.assertIn("forage mixer", rates(large[0]))
+
     def test_runtime_recipe_policy_is_explicit_and_narrow(self):
         source = (MOD / "scripts/SiNProductionPolicy.lua").read_text(encoding="utf-8")
         self.assertIn("ProductionPoint.load = Utils.overwrittenFunction", source)
