@@ -139,12 +139,18 @@ The American Silos Production Pack is identified by the stable canonical IDs
 below, not its localized display title. These are storage/animal-feed assets;
 they should not receive the crop-converter revenue multiplier.
 
-| Canonical asset | Native price | Capacity | Native annual gross / recipe | Candidate price | Proposed rule |
-|---|---:|---:|---:|---:|---|
-| `FS25_AmericanSilosProductionPack:silos/staveSiloSmall.xml` | $50k | 250,000 L | $65k-$605k | **$302.5k** | Native cycles, high sustainable recipe |
-| `FS25_AmericanSilosProductionPack:silos/staveSiloLarge.xml` | $100k | 500,000 L | $81k-$806k | **$403k** | Native cycles, high sustainable recipe |
-| `FS25_AmericanSilosProductionPack:silos/steelSiloSmall.xml` | $75k | 750,000 L | $73k-$806k | **$403k** | Native cycles, high sustainable recipe |
-| `FS25_AmericanSilosProductionPack:silos/steelSiloLarge.xml` | $125k | 1,000,000 L | $81k-$806k | **$403k** | Native cycles, high sustainable recipe |
+| Canonical asset | Tier | Native price | Capacity | Target recipe capability | Native annual gross / recipe | Candidate price |
+|---|---|---:|---:|---|---:|---:|
+| `FS25_AmericanSilosProductionPack:silos/staveSiloSmall.xml` | Small | $50k | 250,000 L | Common full set: hay, silage, pig food, forage | $65k-$605k | **$302.5k** |
+| `FS25_AmericanSilosProductionPack:silos/steelSiloSmall.xml` | Small | $75k | 750,000 L | Common full set: hay, silage, pig food, forage | $73k-$806k | **$403k** |
+| `FS25_AmericanSilosProductionPack:silos/staveSiloLarge.xml` | Large | $100k | 500,000 L | Common full set: hay, silage, pig food, forage | $81k-$806k | **$403k** |
+| `FS25_AmericanSilosProductionPack:silos/steelSiloLarge.xml` | Large | $125k | 1,000,000 L | Common full set: hay, silage, pig food, forage | $81k-$806k | **$403k** |
+
+“Aligned capability” means the same recipe IDs are available within and across
+the small and large tiers. It does not mean identical cycle rates, output per
+hour, capacity, or revenue; those remain native/economic attributes and explain
+the different gross ranges above. The source XMLs still need to be checked
+before encoding this target as a runtime recipe policy.
 
 Every silo can convert grass to hay; chaff, grass, hay, or straw to silage;
 the crop recipe `500 maize + 250 wheat + 175 canola + 75 sugar beet` to
