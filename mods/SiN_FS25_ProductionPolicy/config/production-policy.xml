@@ -2,5 +2,22 @@
 <!-- Canonical ID = <mod name>:<path relative to the mod root>, or
      FS25_BaseGame:data/<path> for base-game assets. -->
 <productionPolicy schemaVersion="1">
-    <production id="FS25_LimeProduction:LimeProduction.xml" purchasePrice="500000"/>
+    <production id="FS25_LimeProduction:LimeProduction.xml" purchasePrice="100000">
+        <!-- Preserve the native one-cycle-per-hour cadence; set the SiN
+             conversion policy explicitly while retaining the source XML. -->
+        <recipe id="Lime" cyclesPerHour="1">
+            <input fillType="STONE" amount="300"/>
+            <output fillType="LIME" amount="3000"/>
+        </recipe>
+    </production>
+    <production id="FS25_fertilizerProductionDS:xml/fertilizerProduction_DS.xml" purchasePrice="230000"/>
+    <production id="FS25_RH_LiquidFertillizerProduction:liquidFertilizerFactory.xml" purchasePrice="175000">
+        <recipe id="LiquidFertilizerFactory" cyclesPerHour="1"/>
+    </production>
+    <production id="FS25_SeedProductionFactory:seedProductionFactory.xml">
+        <recipe id="wheat_seeds_rush" enabled="false"/>
+        <recipe id="barley_seeds_rush" enabled="false"/>
+        <recipe id="oat_seeds_rush" enabled="false"/>
+        <recipe id="maize_seeds_rush" enabled="false"/>
+    </production>
 </productionPolicy>

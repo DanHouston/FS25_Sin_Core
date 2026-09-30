@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<constructionPolicy schemaVersion="1">
+    <!-- Structural, catalog-only policy. Existing and map-owned sell points are unchanged. -->
+    <sellingPoints showInConstruction="false" />
+</constructionPolicy>

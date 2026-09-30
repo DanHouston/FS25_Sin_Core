@@ -347,7 +347,38 @@ local function collectStateIds(fruitType, runtimePeriods)
     return result
 end
 
-local function collectControlledStates(fruitType, entry)
+local function nativeHarvestStateIds(fruitType, knownStateList)
+    -- A policy stateChain may omit additional native harvest-ready visual
+    -- states. FS25 exposes the authoritative contiguous range on the fruit
+    -- descriptor; guard every registered state in that range after the
+    -- harvest window so those variants cannot remain ready indefinitely.
+    local knownStates = {}
+    for _, growthState in ipairs(knownStateList or {}) do
+        knownStates[growthState] = true
+    end
+    local minimum = fruitType.minHarvestingGrowthState
+    local maximum = fruitType.maxHarvestingGrowthState
+    if type(minimum) ~= "number" and type(fruitType.getMinHarvestingGrowthState) == "function" then
+        local ok, value = pcall(fruitType.getMinHarvestingGrowthState, fruitType)
+        if ok then minimum = value end
+    end
+    if type(maximum) ~= "number" and type(fruitType.getMaxHarvestingGrowthState) == "function" then
+        local ok, value = pcall(fruitType.getMaxHarvestingGrowthState, fruitType)
+        if ok then maximum = value end
+    end
+    if not isIntegerState(minimum) or not isIntegerState(maximum) or minimum <= 0 or maximum < minimum then
+        return {}
+    end
+    local result = {}
+    for growthState = minimum, maximum do
+        if knownStates[growthState] then
+            result[growthState] = true
+        end
+    end
+    return result
+end
+
+local function collectControlledStates(fruitType, entry, knownStateList)
     local result = {}
     local seen = {}
     local function add(value)
@@ -363,6 +394,9 @@ local function collectControlledStates(fruitType, entry)
         end
         add("INVISIBLE")
         add("DEAD")
+        for growthState in pairs(nativeHarvestStateIds(fruitType, knownStateList)) do
+            add(growthState)
+        end
     end
     for _, period in ipairs(entry.periods) do
         for _, transition in ipairs(period.transitions) do
@@ -600,6 +634,7 @@ local function buildAnnualLifecycle(fruitType, entry, seasonal, state)
         end
         runtimePeriods[period] = runtimePeriod
     end
+    local nativeHarvestStates = nativeHarvestStateIds(fruitType, collectStateIds(fruitType, runtimePeriods))
     local nativePath = deriveNativeStatePath(states, runtimePeriods)
     if nativePath ~= nil then
         states = nativePath
@@ -634,11 +669,31 @@ local function buildAnnualLifecycle(fruitType, entry, seasonal, state)
                 replacement[states[#states - 1]] = states[#states]
                 replacement[states[#states]] = states[#states]
             end
-        elseif offset == lastHarvestOffset + 1 then
+        end
+        -- Keep the terminal transition active after the harvest window.  Also
+        -- apply it at a planting boundary: an existing ready crop must not
+        -- survive forever merely because the calendar wrapped into a new
+        -- sowing window while the game remained running.
+        if offset > lastHarvestOffset or planting[period] then
             replacement[states[#states]] = dead
+        end
+        if offset > lastHarvestOffset then
+            for harvestState in pairs(nativeHarvestStates) do
+                replacement[harvestState] = dead
+            end
         end
         plan[period] = replacement
     end
+    -- Native processing consumes the outgoing period's mapping when entering
+    -- the next period (live November -> engine period 8; December -> 9).
+    -- Schedule destination-month progression one slot earlier. Germination
+    -- stays with the outgoing planting month so late-window sowings still grow.
+    local scheduled = {}
+    for period = 1, 12 do
+        scheduled[period] = copyMapping(plan[period % 12 + 1])
+        scheduled[period][invisible] = plan[period][invisible]
+    end
+    plan = scheduled
     -- Prove every allowed sowing cohort reaches readiness inside this cycle,
     -- stays ready to the window's end, then withers. Never publish flags alone.
     for plantingPeriod = 1, 12 do
@@ -649,9 +704,10 @@ local function buildAnnualLifecycle(fruitType, entry, seasonal, state)
             if endOffset < 1 then
                 return reject("planting falls outside viable annual cycle")
             end
-            for step = 0, endOffset do
+            for step = 1, endOffset do
                 local period = (plantingPeriod - 1 + step) % 12 + 1
-                current = plan[period][current] or current
+                local outgoing = (period + 10) % 12 + 1
+                current = plan[outgoing][current] or current
                 if current == states[#states] then
                     if not harvest[period] then
                         return reject("maturity outside harvest window")
@@ -661,7 +717,7 @@ local function buildAnnualLifecycle(fruitType, entry, seasonal, state)
                     return reject("ready crop lost before harvest window ends")
                 end
             end
-            local deathPeriod = (plantingPeriod + endOffset) % 12 + 1
+            local deathPeriod = (plantingPeriod + endOffset - 1) % 12 + 1
             if not reachedReady or (plan[deathPeriod][current] or current) ~= dead then
                 return reject("planting cohort cannot complete annual lifecycle")
             end
@@ -742,7 +798,7 @@ local function applyFruit(fruitType, entry, state, policyXmlFile)
             end
         end
         local knownStates = collectStateIds(fruitType, runtimePeriods)
-        local controlledStates = collectControlledStates(fruitType, entry)
+        local controlledStates = collectControlledStates(fruitType, entry, knownStates)
         mappingPlan = {}
         for period = 1, 12 do
             local completed = completeMapping(
@@ -857,6 +913,72 @@ function SiNCropSettings.apply(manager, missionInfo)
         policy.version, mapName, state.applied, state.changed, state.skipped, state.unsupported, state.conflicts))
 end
 
+-- Opt-in runtime evidence, not a second growth implementation. In particular,
+-- do not force density-map writes to hide a missed native growth update.
+local function describeGrowth(fruitName, source)
+    local fruit = g_fruitTypeManager ~= nil and findFruit(g_fruitTypeManager, fruitName) or nil
+    if fruit == nil then return "Fruit not registered: " .. tostring(fruitName) end
+    local seasonal = seasonalData(fruit)
+    local periods = type(seasonal) == "table" and seasonal.periods or nil
+    if type(periods) ~= "table" then return "Seasonal data unavailable: " .. fruitName end
+    local states = nativeHarvestStateIds(fruit, collectStateIds(fruit, periods))
+    local ready = resolveGrowthState(fruit, "HARVESTREADY")
+    if ready ~= nil then states[ready] = true end
+    local ordered = {}
+    for id in pairs(states) do table.insert(ordered, id) end
+    table.sort(ordered)
+    local summaries = {}
+    for period = 1, 12 do
+        local data = periods[period]
+        local mappings = {}
+        for _, id in ipairs(ordered) do
+            local target = type(data) == "table" and type(data.growthMapping) == "table"
+                and data.growthMapping[id] or nil
+            table.insert(mappings, tostring(id) .. ">" .. tostring(target))
+        end
+        table.insert(summaries, tostring(period) .. ":" .. tostring(type(data) == "table" and data.isHarvestable)
+            .. "[" .. table.concat(mappings, ",") .. "]")
+    end
+    logInfo(string.format("growth-probe source=%s fruit=%s nativeWithered=%s namedDead=%s periods=%s",
+        source, fruitName, tostring(fruit.witheredState), tostring(resolveGrowthState(fruit, "DEAD")),
+        table.concat(summaries, ";")))
+    return nil
+end
+
+local function installGrowthProbe()
+    if GrowthSystem == nil or type(GrowthSystem.setMonthEngineState) ~= "function" then return false end
+    if SiNCropSettings.growthProbeInstalled then return true end
+    local native = GrowthSystem.setMonthEngineState
+    GrowthSystem.setMonthEngineState = function(system, ...)
+        if (SiNCropSettings.probeRemaining or 0) > 0 then
+            SiNCropSettings.probeRemaining = SiNCropSettings.probeRemaining - 1
+            -- Do not assume the native signature beyond the receiver; forward
+            -- every argument and every return value unchanged.
+            local args = {}
+            for i = 1, select("#", ...) do
+                local value = select(i, ...)
+                table.insert(args, type(value) == "number" and tostring(value) or type(value))
+            end
+            local ok, reason = pcall(describeGrowth, SiNCropSettings.probeFruit,
+                "setMonthEngineState(" .. table.concat(args, ",") .. ")")
+            if not ok or reason ~= nil then logWarning("growth-probe unavailable: " .. tostring(reason)) end
+        end
+        return native(system, ...)
+    end
+    SiNCropSettings.growthProbeInstalled = true
+    return true
+end
+
+function SiNCropSettings:consoleGrowth(fruitName)
+    fruitName = normalizeName(fruitName or "OAT")
+    if fruitName == nil then return "Usage: sinCropGrowth OAT (registered fruit name)" end
+    local ok, reason = pcall(describeGrowth, fruitName, "console")
+    if not ok or reason ~= nil then return "Growth probe unavailable: " .. tostring(reason) end
+    if not installGrowthProbe() then return "Descriptor logged; native engine hook unavailable" end
+    self.probeFruit, self.probeRemaining = fruitName, 4
+    return "Read-only growth probe armed for " .. fruitName .. "; next four native engine-state calls"
+end
+
 local function installHook()
     if FruitTypeManager == nil or FruitTypeManager.loadMapData == nil then
         logWarning("FruitTypeManager:loadMapData unavailable; policy hook disabled")
@@ -883,3 +1005,6 @@ local function installHook()
 end
 
 installHook()
+if type(addConsoleCommand) == "function" then
+    addConsoleCommand("sinCropGrowth", "Read-only crop withering diagnostics", "consoleGrowth", SiNCropSettings)
+end

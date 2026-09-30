@@ -143,8 +143,8 @@ def build_production_policy_mod(destination):
         raise ValueError("SiN_FS25_ProductionPolicy mod descriptor/icon is invalid")
     if source_names != ["scripts/SiNProductionPolicy.lua"]:
         raise ValueError("SiN_FS25_ProductionPolicy descriptor has unexpected source files")
-    config_name = "config/production-policy.xml"
-    names_to_package = ["modDesc.xml", *source_names, config_name, icon_name]
+    config_names = ["config/production-policy.xml", "config/construction-policy.xml"]
+    names_to_package = ["modDesc.xml", *source_names, *config_names, icon_name]
     for name in names_to_package:
         if not (source / name).is_file():
             raise ValueError(f"SiN_FS25_ProductionPolicy source is missing: {name}")
@@ -154,7 +154,8 @@ def build_production_policy_mod(destination):
     with ZipFile(destination) as archive:
         if set(archive.namelist()) != set(names_to_package):
             raise ValueError("SiN_FS25_ProductionPolicy ZIP does not match its descriptor")
-        ET.fromstring(archive.read(config_name))
+        for config_name in config_names:
+            ET.fromstring(archive.read(config_name))
         for name in archive.namelist():
             if name.lower().endswith(".lua"):
                 validate_fs25_lua_source(archive.read(name), name)

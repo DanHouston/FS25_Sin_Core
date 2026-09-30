@@ -23,18 +23,18 @@ def estimate_field_work_hours(area_ha: float, working_width_m: float,
         raise ValueError("area, width and speed must be positive")
     if not 0 < efficiency <= 1:
         raise ValueError("efficiency must be greater than zero and at most one")
-    return area_ha * 3.6 / (working_width_m * working_speed_kmh * efficiency)
+    return area_ha * 10.0 / (working_width_m * working_speed_kmh * efficiency)
 
 
 def equipment_performance(equipment: Iterable[Mapping[str, Any]]) -> tuple[float, float] | None:
-    """Choose the widest and slowest positive offered equipment metrics."""
-    widths = [float(item["workingWidthM"]) for item in equipment
-              if item.get("workingWidthM") is not None and float(item["workingWidthM"]) > 0]
-    speeds = [float(item["workingSpeedKmh"]) for item in equipment
-              if item.get("workingSpeedKmh") is not None and float(item["workingSpeedKmh"]) > 0]
-    if not widths or not speeds:
+    """Choose paired width and work speed from one field-working implement."""
+    pairs = [(float(item["workingWidthM"]), float(item["workingSpeedKmh"]))
+             for item in equipment
+             if item.get("workingWidthM") is not None and item.get("workingSpeedKmh") is not None
+             and float(item["workingWidthM"]) > 0 and float(item["workingSpeedKmh"]) > 0]
+    if not pairs:
         return None
-    return max(widths), min(speeds)
+    return sorted(pairs, key=lambda pair: (-pair[0], pair[1]))[0]
 
 
 def estimate_native_dollars_per_hour(reward: float | None, hours: float | None) -> float | None:

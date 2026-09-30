@@ -58,16 +58,17 @@ For a field mission with area and usable offered equipment metrics, the mod
 reports:
 
 ```text
-estimated hours = area hectares * 3.6
+estimated hours = area hectares * 10
                   / (working width metres * working speed km/h * 0.70)
 estimated native $/hour = native reward / estimated hours
 ```
 
 `0.70` is an explicit efficiency assumption covering turns, overlap,
 headlands, refills and other losses. It is an estimate, not a native FS25
-completion prediction. The diagnostic chooses the widest offered implement and
-the slowest positive offered speed. It reports no estimate when area, width or
-speed is absent. Actual duration is measured from accepted observation to
+completion prediction. The diagnostic chooses the widest offered item that has
+both a working width and that same item's explicit work speed; it never mixes a
+tractor/trailer speed with another implement's width. It reports no estimate
+when no paired width/speed exists. Actual duration is measured from accepted observation to
 native finish observation. Transport and other non-field missions remain
 observable but are normally not time-estimable without a native route metric.
 
@@ -76,33 +77,57 @@ available, with `SiN estimated work time` and `SiN estimated native $/hour`.
 The wrapper preserves every native return value and appends no rows when the
 area, width, speed or reward is unavailable. Before acceptance the mod asks
 the documented `MissionManager:getVehicleGroupFromIdentifier(missionType,
-fieldSize, identifier)` API for the offered descriptors; it uses only positive
-width/speed fields actually present in those descriptors. In many FS25 builds
-those descriptors contain filenames/configuration only, so the estimate first
-becomes available after lease equipment is instantiated. No equipment is
-created by the UI hook.
+fieldSize, identifier)` API for the offered descriptors, including native
+offers that expose only the numeric `vehicleGroup` identifier and no size.
+If the pre-acceptance proxy omits `getVehicleSize`, the mod mirrors
+`AbstractFieldMission`'s documented small/medium/large area thresholds without
+changing mission state. When a descriptor has
+only a filename/configuration (the normal native shape), the mod resolves the
+matching read-only store item and loads its explicit `storeData.specs` values
+(`workingWidth`, `workingWidthConfig`, and `speedLimit`) through
+`StoreItemUtil.loadSpecsFromXML`. Configuration-specific width is used only
+when the exact native configuration id is present. No generic bounding-box
+width is used and no equipment is created by the UI hook. This makes the
+estimate available on the **New** contract card for supported store metadata;
+if a modded item exposes neither explicit store specs nor live vehicle metrics,
+the rows remain unavailable until FS25 instantiates the lease equipment.
+
+FS25's `Vehicle.loadSpecValueWorkingWidth` returns `{width, minWidth}`;
+configuration entries also contain a `width` member. Both are decoded before
+numeric validation (older builds mistakenly treated these tables as numbers).
+Reference: [Vehicle](https://gdn.giants-software.com/documentation_scripting_fs25.php?category=91&class=888&version=script).
 
 After acceptance, when FS25 has instantiated leased equipment, the observer
 reads the current implement work width from the native WorkArea specialization:
 `getAIWorkAreaWidth()`, falling back to
 `spec_workArea.workAreas[].workWidth`. This is the field-working width rather
-than a cosmetic/configuration width. Width is therefore normally unavailable
-for an unaccepted offer, and remains unavailable when the native vehicle
-exposes no positive work area; the observer does not infer a width or fabricate
-an estimate.
+than a cosmetic/configuration width. Width is unavailable for an unaccepted
+offer only when its store metadata lacks an explicit working width, and remains
+unavailable when the native vehicle exposes no positive work area; the observer
+does not infer a width or fabricate an estimate.
 
 ## Native offer replenishment
 
 The server-side observer starts a bounded batch of up to three native
 `MissionManager` generation cycles when fewer than three `CREATED` offers are
-available. It also performs a refill check every ten minutes and starts the
-same three-cycle batch when fewer than nine offers are available. Each native
-cycle can add at most one offer; the batch is stopped early by FS25's mission
-cap or native generation failure. Normal refills respect FS25's generation
-cooldown; the under-three emergency path may start early, with a one-minute
-retry guard. The mod never constructs, registers, rewards, or persists a
-custom mission. FS25 remains authoritative for `tryGenerateMission`, field
-validation, vehicle groups, reward calculation, mission caps, and save state.
+available. The same batch policy refills any board below nine offers. Because
+native generation is asynchronous, requests within a batch are spaced by ten
+seconds and the retry window starts from the latest successful request; this
+prevents a burst of calls before FS25 has registered the previous offer. A
+batch stops as soon as nine offers are visible, or earlier on FS25's mission
+cap/native generation failure. The log emits one line per logical batch rather
+than one line per native cycle. The mod never constructs, registers, rewards,
+or persists a custom mission. FS25 remains authoritative for
+`tryGenerateMission`, field validation, vehicle groups, reward calculation,
+mission caps, and save state.
+
+For a due refill only, the native `generationTimer` cooldown is expired and
+`getCanStartNewMissionGeneration()` is checked again. An in-flight cycle, total
+mission cap, or another mod's rejection still blocks the request. The old timer
+is restored on rejection. Without this override, repeated refill requests waited
+on FS25's original cooldown, so the target of nine was not achieved promptly.
+Three cycles are attempts, not three guaranteed offers: FS25 can find no eligible
+work. Below nine, bounded batches continue; at nine, the native timer is untouched.
 
 ## Live diagnostics
 

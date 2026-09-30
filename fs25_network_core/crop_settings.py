@@ -318,6 +318,8 @@ def _annual_lifecycle_plan(entry: FruitPolicy, period_map: dict[str, dict[str, A
         result.diagnostics.append(f"{entry.name}: annual lifecycle state chain unsupported")
         return None
     states = [state for state in resolved_states if state is not None]
+    native_harvest_states = _native_harvest_state_ids(
+        descriptor, _state_ids(descriptor, period_map))
     native_path = _native_state_path(states, period_map)
     if native_path is not None:
         states = native_path
@@ -373,24 +375,42 @@ def _annual_lifecycle_plan(entry: FruitPolicy, period_map: dict[str, dict[str, A
             if period_name in harvest:
                 replacement[states[-2]] = states[-1]
                 replacement[states[-1]] = states[-1]
-        elif offset == last_harvest_offset + 1:
+        # Keep the terminal transition active after the harvest window. Also
+        # apply it at a planting boundary: an existing ready crop must not
+        # survive forever merely because the calendar wrapped into a new
+        # sowing window while the game remained running.
+        if offset > last_harvest_offset or period_name in planting:
             replacement[states[-1]] = dead
+        # Some native descriptors expose a contiguous harvest-ready range
+        # wider than the configured stateChain. Guard every such native state
+        # after the harvest window, not only the policy's final visual state.
+        if offset > last_harvest_offset:
+            for harvest_state in native_harvest_states:
+                replacement[harvest_state] = dead
         replacements[period_name] = replacement
+    # FS25 consumes the outgoing month's mapping on the next boundary.
+    # Keep germination in the sowing month, retime established growth only.
+    scheduled = {}
+    for i, name in enumerate(_PERIOD_ORDER):
+        scheduled[name] = dict(replacements[_PERIOD_ORDER[(i + 1) % 12]])
+        scheduled[name][invisible] = replacements[name][invisible]
+    replacements = scheduled
     for planting_name in planting:
         start = _PERIOD_ORDER.index(planting_name)
         end_offset = last_harvest_offset - ((start + 1 - first_plant) % 12)
         current = invisible
         reached_ready = False
         valid = end_offset >= 1
-        for step in range(end_offset + 1):
+        for step in range(1, end_offset + 1):
             name = _PERIOD_ORDER[(start + step) % 12]
-            current = replacements[name].get(current, current)
+            outgoing = _PERIOD_ORDER[(start + step - 1) % 12]
+            current = replacements[outgoing].get(current, current)
             if current == states[-1]:
                 valid = valid and name in harvest
                 reached_ready = True
             elif reached_ready:
                 valid = False
-        death_name = _PERIOD_ORDER[(start + end_offset + 1) % 12]
+        death_name = _PERIOD_ORDER[(start + end_offset) % 12]
         if not valid or not reached_ready or replacements[death_name].get(current, current) != dead:
             result.unsupported += 1
             result.diagnostics.append(f"{entry.name}: planting cohort cannot complete annual lifecycle")
@@ -422,7 +442,23 @@ def _state_ids(descriptor: dict[str, Any], period_map: dict[str, dict[str, Any]]
     return result
 
 
-def _controlled_state_ids(entry: FruitPolicy, descriptor: dict[str, Any]) -> set[int]:
+def _native_harvest_state_ids(descriptor: dict[str, Any], known_states: set[int]) -> set[int]:
+    """Return native states marked harvest-ready by the fruit descriptor.
+
+    A policy stateChain is intentionally concise, but a map may expose more
+    than one harvest-ready foliage state. Those states must all receive the
+    post-window withering transition.
+    """
+    minimum = descriptor.get("minHarvestingGrowthState")
+    maximum = descriptor.get("maxHarvestingGrowthState")
+    if (type(minimum) is not int or type(maximum) is not int or
+            minimum <= 0 or maximum < minimum):
+        return set()
+    return {state for state in range(minimum, maximum + 1) if state in known_states}
+
+
+def _controlled_state_ids(entry: FruitPolicy, descriptor: dict[str, Any],
+                          period_map: dict[str, dict[str, Any]] | None = None) -> set[int]:
     """Return states whose native transitions are owned by this policy."""
     result: set[int] = set()
     if entry.lifecycle == "ANNUAL":
@@ -430,6 +466,8 @@ def _controlled_state_ids(entry: FruitPolicy, descriptor: dict[str, Any]) -> set
             state = _resolve_state(descriptor, token)
             if state is not None:
                 result.add(state)
+        if period_map is not None:
+            result.update(_native_harvest_state_ids(descriptor, _state_ids(descriptor, period_map)))
     for period in entry.periods:
         for from_state, to_state in period.transitions:
             for token in (from_state, to_state):
@@ -450,7 +488,7 @@ def _totalized_mapping_plan(entry: FruitPolicy, period_map: dict[str, dict[str, 
     ``setCropsGrowthNextState`` call.
     """
     known = _state_ids(descriptor, period_map)
-    controlled = _controlled_state_ids(entry, descriptor)
+    controlled = _controlled_state_ids(entry, descriptor, period_map)
     completed: dict[str, dict[int, int]] = {}
     for period_name in _PERIOD_ORDER:
         runtime = period_map.get(period_name) or period_map.get(period_name.lower())

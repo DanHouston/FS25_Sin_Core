@@ -9,8 +9,21 @@ local EFFICIENCY = 0.70
 local POLL_INTERVAL_MS = 1000
 local LOW_AVAILABLE_THRESHOLD = 3
 local REFILL_AVAILABLE_THRESHOLD = 9
-local REFILL_INTERVAL_MS = 10 * 60 * 1000
-local LOW_RETRY_INTERVAL_MS = 60 * 1000
+-- Emergency replenishment is deliberately bounded, but a one-minute retry
+-- made a depleted board visibly stall when a native generation cycle found no
+-- eligible field. Retry the next three-cycle batch after ten seconds instead;
+-- the native manager still gates each cycle and no custom mission is created.
+local LOW_RETRY_INTERVAL_MS = 10 * 1000
+-- Once the board is below the nine-offer target, keep asking the native
+-- manager for another bounded batch after this short retry interval. The
+-- native generation gate still decides whether a cycle may actually start.
+local REFILL_RETRY_INTERVAL_MS = 10 * 1000
+-- startMissionGeneration is asynchronous on the native manager.  Calling it
+-- again on the next update can be accepted while the previous cycle is still
+-- registering its offer, which produces a burst of ineffective requests and
+-- leaves the board below target.  Space native requests by one generation
+-- interval even when the manager does not expose a reliable in-flight flag.
+local GENERATION_REQUEST_INTERVAL_MS = 10 * 1000
 local GENERATION_BATCH_SIZE = 3
 
 local function logInfo(message, ...)
@@ -183,11 +196,57 @@ local function runtimeWorkAreaWidth(item)
     return nil, nil
 end
 
+-- Native pre-acceptance mission vehicle groups contain only XML filenames and
+-- configuration ids.  FS25 already has the authoritative, read-only store
+-- metadata for those files; StoreItemUtil populates specs from the same XML
+-- used by the shop.  Use only explicit workingWidth/speedLimit specs (and an
+-- exact configuration override).  Never use generic size.width or instantiate
+-- a vehicle merely to make the estimate appear.
+local function storeSpecValue(storeItem, specName, item)
+    if type(storeItem) ~= "table" then return nil end
+    local specs = fieldValue(storeItem, {"specs"})
+    if type(specs) ~= "table" then return nil end
+
+    local configured = fieldValue(specs, {specName .. "Config"})
+    local configurations = fieldValue(item, {"configurations", "configuration"})
+    if type(configured) == "table" and type(configurations) == "table" then
+        for configName, configId in pairs(configurations) do
+            local values = configured[configName]
+            if type(values) == "table" then
+                local value = values[configId] or values[tostring(configId)]
+                if specName == "workingWidth" and type(value) == "table" then value = value.width end
+                value = number(value)
+                if value ~= nil and value > 0 then return value, "store-specs-config" end
+            end
+        end
+    end
+
+    local raw = fieldValue(specs, {specName})
+    -- Vehicle.loadSpecValueWorkingWidth returns {width, minWidth}, not a number.
+    if specName == "workingWidth" and type(raw) == "table" then raw = raw.width end
+    local base = number(raw)
+    if base ~= nil and base > 0 then return base, "store-specs" end
+    return nil, nil
+end
+
+local function storeItemSpecs(item)
+    if type(item) ~= "table" or g_storeManager == nil then return nil end
+    local filename = text(fieldValue(item, {"filename", "xmlFilename", "configFileName"}))
+    if filename == nil or filename == "" then return nil end
+    local storeItem = call(g_storeManager, "getItemByXMLFilename", filename)
+    if type(storeItem) ~= "table" then return nil end
+    if StoreItemUtil ~= nil and type(StoreItemUtil.loadSpecsFromXML) == "function" then
+        pcall(StoreItemUtil.loadSpecsFromXML, storeItem)
+    end
+    return storeItem
+end
+
 local function equipmentValues(item)
     if type(item) ~= "table" then return nil end
     local width = number(fieldValue(item, {"workingWidth", "workWidth", "width"}))
     local widthSource = width ~= nil and "native-field" or nil
     local speed = number(fieldValue(item, {"workingSpeed", "workSpeed", "speed", "maxSpeed"}))
+    local speedSource = speed ~= nil and "native-field" or nil
     local capacity = number(fieldValue(item, {"capacity", "fillUnitCapacity", "maxCapacity"}))
     if width == nil then
         width = number(call(item, "getWorkingWidth")) or number(call(item, "getWorkWidth"))
@@ -198,15 +257,41 @@ local function equipmentValues(item)
     end
     if speed == nil then
         speed = number(call(item, "getWorkingSpeed")) or number(call(item, "getSpeedLimit"))
+        if speed ~= nil then speedSource = "native-method" end
     end
     if capacity == nil then capacity = number(call(item, "getFillUnitCapacity", 1)) end
+    local storeItem = storeItemSpecs(item)
+    if storeItem ~= nil then
+        if width == nil then width, widthSource = storeSpecValue(storeItem, "workingWidth", item) end
+        if speed == nil then speed, speedSource = storeSpecValue(storeItem, "speedLimit", item) end
+        if capacity == nil then capacity = select(1, storeSpecValue(storeItem, "capacity", item)) end
+    end
     local config = fieldValue(item, {"configFileName", "filename", "name", "vehicleName"})
     if width == nil and speed == nil and capacity == nil and config == nil then return nil end
     return {name = text(config), workingWidthM = width, workingWidthSource = widthSource,
-        workingSpeedKmh = speed, capacity = capacity}
+        workingSpeedKmh = speed, workingSpeedSource = speedSource, capacity = capacity}
 end
 
-local function equipmentData(mission)
+local function vehicleSize(mission, field)
+    local value = text(call(mission, "getVehicleSize")) or text(fieldValue(mission,
+        {"fieldSize", "vehicleSize", "vehicleGroupSize"}))
+    if value ~= nil and value ~= "" then return value end
+
+    -- AbstractFieldMission:getVehicleSize() is the native source. A few
+    -- mission variants do not expose the method on the pre-acceptance proxy,
+    -- so mirror its documented area thresholds only when the native method is
+    -- unavailable; this remains a read-only classification, not a work-time
+    -- guess.
+    local areaHa = field ~= nil and number(field.areaHa) or nil
+    if areaHa == nil then return nil end
+    local large = number(fieldValue(AbstractFieldMission, {"FIELD_SIZE_LARGE"})) or 5
+    local medium = number(fieldValue(AbstractFieldMission, {"FIELD_SIZE_MEDIUM"})) or 1.5
+    if areaHa > large then return "large" end
+    if areaHa > medium then return "medium" end
+    return "small"
+end
+
+local function equipmentData(mission, field)
     local source = fieldValue(mission, {"vehicles", "vehicleGroup", "vehicleGroups", "leaseVehicles"})
     local result = {}
     local sourceName = nil
@@ -228,17 +313,37 @@ local function equipmentData(mission)
     -- Some field mission implementations expose a group identifier and only
     -- instantiate the lease vehicles when a player accepts the mission. The
     -- native MissionManager retains the offered descriptors, so resolve them
-    -- for the pre-acceptance UI when that supported API is available. Width or
-    -- speed are used only when the descriptor actually exposes them; no
-    -- vehicle is instantiated and no value is inferred from a filename.
+    -- for the pre-acceptance UI when that supported API is available. Explicit
+    -- store specs may supply width/speed; no vehicle is instantiated and no
+    -- generic size value is inferred from a filename.
     if #result == 0 then
-        local group = fieldValue(mission, {"vehicleGroupName", "vehicleGroupId", "vehicleGroupIdentifier"})
+        -- Native field missions commonly expose the offer as the numeric
+        -- `vehicleGroup` field (the same identifier shown by diagnostics),
+        -- while other mission variants use one of the explicit names. The
+        -- old probe omitted `vehicleGroup`, leaving new offers with a source
+        -- id but no descriptors until acceptance instantiated vehicles.
+        local group = fieldValue(mission, {"vehicleGroupName", "vehicleGroupId",
+            "vehicleGroupIdentifier", "vehicleGroup"})
+        if type(group) == "table" then
+            group = fieldValue(group, {"identifier", "id", "vehicleGroupIdentifier"})
+        end
         sourceName = sourceName or text(group)
         local identifier = number(group)
-        local fieldSize = text(call(mission, "getVehicleSize")) or text(fieldValue(mission, {"fieldSize", "vehicleSize"}))
-        if identifier ~= nil and fieldSize ~= nil and g_missionManager ~= nil then
+        local fieldSize = vehicleSize(mission, field)
+        if identifier ~= nil and g_missionManager ~= nil then
             local offered, _, _, offeredGroup = callFour(g_missionManager, "getVehicleGroupFromIdentifier",
                 missionType(mission), fieldSize, identifier)
+            -- A few native mission variants provide the group id but omit the
+            -- size argument. Probe read-only compatibility forms without
+            -- inventing or instantiating equipment.
+            if type(offered) ~= "table" then
+                offered, _, _, offeredGroup = callFour(g_missionManager,
+                    "getVehicleGroupFromIdentifier", missionType(mission), identifier)
+            end
+            if type(offered) ~= "table" then
+                offered, _, _, offeredGroup = callFour(g_missionManager,
+                    "getVehicleGroupFromIdentifier", identifier)
+            end
             if type(offered) == "table" then
                 for _, item in pairs(offered) do add(item) end
             end
@@ -252,19 +357,23 @@ end
 
 local function estimate(field, equipment)
     if field == nil or field.areaHa == nil or field.areaHa <= 0 then return nil, nil end
-    local width, speed = nil, nil
+    -- A width and speed describe one implement. Never mix a tractor's speed
+    -- with a separate plow/seeder/sprayer's width.
+    local selected = nil
     for _, item in ipairs(equipment or {}) do
-        if item.workingWidthM ~= nil and item.workingWidthM > 0 then
-            width = math.max(width or 0, item.workingWidthM)
-        end
-        if item.workingSpeedKmh ~= nil and item.workingSpeedKmh > 0 then
-            speed = math.min(speed or item.workingSpeedKmh, item.workingSpeedKmh)
+        local width, speed = item.workingWidthM, item.workingSpeedKmh
+        if width ~= nil and width > 0 and speed ~= nil and speed > 0 then
+            if selected == nil or width > selected.width or
+                (width == selected.width and speed < selected.speed) then
+                selected = {width = width, speed = speed, name = item.name}
+            end
         end
     end
-    if width == nil or speed == nil then return nil, "working width/speed unavailable" end
-    -- area (ha) * 3.6 / (width (m) * speed (km/h) * efficiency).
-    local hours = field.areaHa * 3.6 / (width * speed * EFFICIENCY)
-    return hours, {workingWidthM = width, workingSpeedKmh = speed, efficiency = EFFICIENCY}
+    if selected == nil then return nil, "paired implement working width/speed unavailable" end
+    -- 10,000 m2/ha divided by 1,000 m/km: hours = ha * 10 / (m * km/h).
+    local hours = field.areaHa * 10 / (selected.width * selected.speed * EFFICIENCY)
+    return hours, {workingWidthM = selected.width, workingSpeedKmh = selected.speed,
+        equipmentName = selected.name, efficiency = EFFICIENCY}
 end
 
 function SiNContracts:observe(mission, eventName, finishState)
@@ -275,7 +384,7 @@ function SiNContracts:observe(mission, eventName, finishState)
         return nil
     end
     local field = fieldData(mission)
-    local equipment, equipmentSource = equipmentData(mission)
+    local equipment, equipmentSource = equipmentData(mission, field)
     local estimatedHours, assumptions = estimate(field, equipment)
     local reward = number(call(mission, "getReward")) or number(fieldValue(mission, {"reward", "money"}))
     local targetLocation = field ~= nil and field.location or text(call(mission, "getLocation"))
@@ -295,6 +404,7 @@ function SiNContracts:observe(mission, eventName, finishState)
     record.equipment = equipment
     record.equipmentSource = equipmentSource
     record.estimatedHours = estimatedHours
+    record.estimateEvidence = assumptions
     record.estimatedNativeDollarsPerHour = estimatedHours ~= nil and reward ~= nil and reward / estimatedHours or nil
     record.lastSeenMs = nowMs()
     record.lastEvent = eventName or record.lastEvent or "observed"
@@ -319,10 +429,11 @@ function SiNContracts:observe(mission, eventName, finishState)
             tostring(estimatedHours or "unavailable"), tostring(record.estimatedNativeDollarsPerHour or "unavailable"),
             #equipment, tostring(equipmentSource or "unavailable"))
         for equipmentIndex, item in ipairs(equipment) do
-            logInfo("mission=%s equipment=%d name=%s widthM=%s widthSource=%s speedKmh=%s capacity=%s",
+            logInfo("mission=%s equipment=%d name=%s widthM=%s widthSource=%s speedKmh=%s speedSource=%s capacity=%s",
                 id, equipmentIndex, tostring(item.name or "unavailable"),
                 tostring(item.workingWidthM or "unavailable"), tostring(item.workingWidthSource or "unavailable"),
                 tostring(item.workingSpeedKmh or "unavailable"),
+                tostring(item.workingSpeedSource or "unavailable"),
                 tostring(item.capacity or "unavailable"))
         end
     end
@@ -382,7 +493,11 @@ function SiNContracts:maybeRequestGeneration(manager)
     local available, missions = self:availableMissionCount(manager)
     local now = nowMs()
     if now == nil then return end
-    if self.lastRefillPolicyMs == nil then self.lastRefillPolicyMs = now end
+    if self.lastRefillPolicyMs == nil then
+        -- Permit the first deficit check immediately; a board that starts at
+        -- 4-8 offers should not wait ten minutes before its first refill.
+        self.lastRefillPolicyMs = now - REFILL_RETRY_INTERVAL_MS
+    end
 
     local inProgress = fieldValue(manager, {"missionGenerationInProgress"}) == true
     if inProgress then return end
@@ -396,13 +511,27 @@ function SiNContracts:maybeRequestGeneration(manager)
             -- The native cap is authoritative; abandon a partially queued
             -- batch rather than leaving it armed forever at a full board.
             self.generationBatchRemaining = 0
+            local lastCapLog = self.lastGenerationCapLogMs
+            if lastCapLog == nil or now - lastCapLog >= 60000 then
+                self.lastGenerationCapLogMs = now
+                logInfo("native replenishment blocked available=%d total=%d maximum=%d reason=mission-cap",
+                    available, total, maximum)
+            end
             return
         end
     end
 
+    -- A batch may be in flight while native registration adds offers. Stop as
+    -- soon as the target is reached rather than overshooting it by the full
+    -- three-cycle batch.
+    if available >= REFILL_AVAILABLE_THRESHOLD then
+        self.generationBatchRemaining = 0
+        return
+    end
+
     local emergency = available < LOW_AVAILABLE_THRESHOLD
     local refillDue = available < REFILL_AVAILABLE_THRESHOLD
-        and now - self.lastRefillPolicyMs >= REFILL_INTERVAL_MS
+        and now - self.lastRefillPolicyMs >= REFILL_RETRY_INTERVAL_MS
     local lowRetryDue = self.lastLowGenerationMs == nil
         or now - self.lastLowGenerationMs >= LOW_RETRY_INTERVAL_MS
 
@@ -410,6 +539,9 @@ function SiNContracts:maybeRequestGeneration(manager)
     -- at most one offer, so three cycles are the smallest deterministic refill
     -- that satisfies the policy without constructing missions ourselves.
     local batchActive = (self.generationBatchRemaining or 0) > 0
+    local requestDue = self.lastGenerationRequestMs == nil
+        or now - self.lastGenerationRequestMs >= GENERATION_REQUEST_INTERVAL_MS
+    if not requestDue then return end
     if not batchActive then
         if not emergency and not refillDue then return end
         if emergency and not lowRetryDue then return end
@@ -418,29 +550,53 @@ function SiNContracts:maybeRequestGeneration(manager)
         if emergency then self.lastLowGenerationMs = now end
     end
 
-    -- Normal refills respect the native generation timer. The emergency path
-    -- may start a batch early so fewer than three offers do not wait through a
-    -- full ten-minute native interval; each cycle still ends through
-    -- MissionManager:finishMissionGeneration().
+    -- Our refill cadence replaces only the native cooldown, not its cap,
+    -- in-flight guard or field/mission eligibility. Recheck the native gate
+    -- after expiring the timer so other mods can still reject generation.
+    local previousTimer = number(fieldValue(manager, {"generationTimer"}))
     local nativeCanStart = call(manager, "getCanStartNewMissionGeneration")
-    -- If a runtime does not expose the native cap, do not bypass its cooldown
-    -- for the emergency path; this keeps the policy fail-closed on variants we
-    -- have not inspected.
-    if maximum == nil and emergency and nativeCanStart ~= true then return end
-    if not emergency and nativeCanStart ~= true then return end
+    local timerOverridden = nativeCanStart == false and previousTimer ~= nil and previousTimer >= 0
+    if timerOverridden then
+        manager.generationTimer = -1
+        nativeCanStart = call(manager, "getCanStartNewMissionGeneration")
+    end
+    if nativeCanStart ~= true then
+        if timerOverridden then manager.generationTimer = previousTimer end
+        local lastGateLog = self.lastGenerationGateLogMs
+        if lastGateLog == nil or now - lastGateLog >= 60000 then
+            self.lastGenerationGateLogMs = now
+            logInfo("native replenishment deferred available=%d reason=%s", available,
+                nativeCanStart == nil and "generation-gate-unavailable" or "native-generation-gate")
+        end
+        return
+    end
+    -- Record the attempt before entering native code so both a rejected call
+    -- and a slow asynchronous native cycle are rate-limited identically.
+    self.lastGenerationRequestMs = now
     local ok, accepted = pcall(manager.startMissionGeneration, manager)
     if not ok or accepted == false then
+        if timerOverridden then manager.generationTimer = previousTimer end
         -- Do not consume the remaining batch slot when the native API rejects
         -- the request; a later update can safely retry after its gate clears.
         logWarning("native replenishment request failed available=%d emergency=%s batchRemaining=%d",
             available, tostring(emergency), self.generationBatchRemaining or 0)
         return
     end
+    -- Treat the successful native request as the batch's progress point.  The
+    -- native offer may not appear in getMissions until a later update, so the
+    -- next logical batch must not begin its retry window from the first
+    -- request in this batch.
+    self.lastRefillPolicyMs = now
+    if emergency then self.lastLowGenerationMs = now end
     self.generationBatchRemaining = math.max(0, (self.generationBatchRemaining or 1) - 1)
-    logInfo("native replenishment requested available=%d threshold=%d mode=%s batchSize=%d batchRemaining=%d", available,
-        emergency and LOW_AVAILABLE_THRESHOLD or REFILL_AVAILABLE_THRESHOLD,
-        emergency and "low-availability" or "ten-minute-refill", GENERATION_BATCH_SIZE,
-        self.generationBatchRemaining)
+    -- Emit one bounded line per logical batch rather than one line for every
+    -- native cycle.  The per-cycle state remains diagnostic in mission
+    -- observations, while the operator sees when a refill batch starts.
+    if self.generationBatchRemaining == GENERATION_BATCH_SIZE - 1 then
+        logInfo("native replenishment batch started available=%d threshold=%d mode=%s batchSize=%d", available,
+            emergency and LOW_AVAILABLE_THRESHOLD or REFILL_AVAILABLE_THRESHOLD,
+            emergency and "low-availability" or "target-refill", GENERATION_BATCH_SIZE)
+    end
 end
 
 local function formatEstimateHours(hours)
@@ -458,7 +614,7 @@ end
 function SiNContracts:appendNativeUiDetails(mission, details)
     if mission == nil or type(details) ~= "table" then return end
     local field = fieldData(mission)
-    local equipment = equipmentData(mission)
+    local equipment = equipmentData(mission, field)
     local estimatedHours = estimate(field, equipment)
     local reward = number(call(mission, "getReward")) or number(fieldValue(mission, {"reward", "money"}))
     if estimatedHours == nil or reward == nil or estimatedHours <= 0 then return end
@@ -509,10 +665,11 @@ function SiNContracts:consoleCommandContracts()
             tostring(r.estimatedNativeDollarsPerHour or "unavailable"), tostring(r.actualHours or "unavailable"),
             #(r.equipment or {}))
         for equipmentIndex, item in ipairs(r.equipment or {}) do
-            logInfo("diagnostic mission=%s equipment=%d name=%s widthM=%s widthSource=%s speedKmh=%s capacity=%s",
+            logInfo("diagnostic mission=%s equipment=%d name=%s widthM=%s widthSource=%s speedKmh=%s speedSource=%s capacity=%s",
                 id, equipmentIndex, tostring(item.name or "unavailable"),
                 tostring(item.workingWidthM or "unavailable"), tostring(item.workingWidthSource or "unavailable"),
                 tostring(item.workingSpeedKmh or "unavailable"),
+                tostring(item.workingSpeedSource or "unavailable"),
                 tostring(item.capacity or "unavailable"))
         end
     end

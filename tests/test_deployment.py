@@ -95,7 +95,7 @@ class DeploymentPackagingTests(unittest.TestCase):
                 self.assertNotIn("FS25SiNServer", contract_source)
             with ZipFile(output / "SiN_FS25_ProductionPolicy.zip") as archive:
                 self.assertEqual(set(archive.namelist()), {
-                    "modDesc.xml", "scripts/SiNProductionPolicy.lua", "config/production-policy.xml", "icon_production_policy.dds"
+                    "modDesc.xml", "scripts/SiNProductionPolicy.lua", "config/production-policy.xml", "config/construction-policy.xml", "icon_production_policy.dds"
                 })
                 self.assertIn("EconomyManager.getBuyPrice", archive.read("scripts/SiNProductionPolicy.lua").decode("utf-8"))
             self.assertFalse((output / "FS25_SiN_NetworkLocal.zip").exists())

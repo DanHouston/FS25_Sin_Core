@@ -181,7 +181,7 @@ def _validate_contracts_archive(path: Path) -> None:
 
 
 def _validate_production_policy_archive(path: Path) -> None:
-    expected = {"modDesc.xml", "scripts/SiNProductionPolicy.lua", "config/production-policy.xml", "icon_production_policy.dds"}
+    expected = {"modDesc.xml", "scripts/SiNProductionPolicy.lua", "config/production-policy.xml", "config/construction-policy.xml", "icon_production_policy.dds"}
     try:
         with ZipFile(path) as archive:
             names = set(_safe_archive_names(archive, path.name))
@@ -190,6 +190,7 @@ def _validate_production_policy_archive(path: Path) -> None:
             try:
                 descriptor = ElementTree.fromstring(archive.read("modDesc.xml"))
                 policy = ElementTree.fromstring(archive.read("config/production-policy.xml"))
+                construction_policy = ElementTree.fromstring(archive.read("config/construction-policy.xml"))
             except (ValueError, ElementTree.ParseError) as error:
                 raise ReleaseValidationError("SiN_FS25_ProductionPolicy.zip has invalid XML") from error
             if descriptor.get("descVersion") != "92" or descriptor.findtext("iconFilename") != "icon_production_policy.dds":
@@ -198,6 +199,8 @@ def _validate_production_policy_archive(path: Path) -> None:
                 raise ReleaseValidationError("SiN_FS25_ProductionPolicy.zip has unexpected source files")
             if policy.tag != "productionPolicy" or policy.get("schemaVersion") != "1":
                 raise ReleaseValidationError("SiN_FS25_ProductionPolicy.zip has an invalid policy schema")
+            if construction_policy.tag != "constructionPolicy" or construction_policy.get("schemaVersion") != "1":
+                raise ReleaseValidationError("SiN_FS25_ProductionPolicy.zip has an invalid construction policy schema")
             validate_fs25_lua_source(archive.read("scripts/SiNProductionPolicy.lua"), "scripts/SiNProductionPolicy.lua")
     except BadZipFile as error:
         raise ReleaseValidationError("SiN_FS25_ProductionPolicy.zip is not a valid ZIP archive") from error

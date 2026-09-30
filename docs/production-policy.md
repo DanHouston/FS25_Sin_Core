@@ -2,9 +2,9 @@
 
 `SiN_FS25_ProductionPolicy` is a standalone runtime policy mod. It does not
 alter map files, saves, or third-party ZIPs. The first policy is deliberately
-narrow: it identifies the Lime Production store item as
-`FS25_LimeProduction:LimeProduction.xml` and changes only its purchase price
-from its source value of `$110,000` to its effective SiN price of `$500,000`.
+narrow: it identifies explicitly named production store items. Lime Production
+is `FS25_LimeProduction:LimeProduction.xml`; its source price is `$110,000`
+and its current SiN price is `$100,000`.
 
 ## Canonical identity and discovery
 
@@ -27,8 +27,11 @@ separately retained in the immutable descriptor and metadata fields.
 
 ## Policy and runtime seam
 
-The data file is `config/production-policy.xml`. Overrides must be positive
-whole dollars; invalid entries fail closed. Applying the policy is idempotent:
+The data file is `config/production-policy.xml`. Purchase-price overrides must
+be positive whole dollars; invalid entries fail closed. A production entry can
+also hold narrowly targeted recipe rules: a positive `cyclesPerHour`, exact
+named input/output amount overrides, or `enabled="false"` to remove a named
+recipe from the native production indexes. Applying the policy is idempotent:
 the original price is retained before the one matched catalog item is updated,
 and repeated discovery does not compound the effective value.
 
@@ -47,6 +50,31 @@ mod forces native `updatePrice()` again. The dedicated server therefore computes
 the charge itself through the same `getBuyPrice` hook; a client does not supply
 a policy-selected price.
 
+### Runtime recipe seam
+
+`ProductionPoint.load` is wrapped with `Utils.overwrittenFunction`. Native
+recipe loading completes first; the mod then resolves the placeable's canonical
+XML identity and applies only configured recipe IDs. At this seam FS25 has
+created both the `productions` lookup used by simulation and the
+`sortedProductions` list used by the production UI.
+
+The current recipe policy is intentionally limited to:
+
+- `FS25_LimeProduction:LimeProduction.xml`: purchase price `$100,000`; recipe
+  `Lime`: `300` stone to `3,000` lime at one cycle per hour;
+- `FS25_fertilizerProductionDS:xml/fertilizerProduction_DS.xml`: purchase
+  price `$230,000`;
+- `FS25_RH_LiquidFertillizerProduction:liquidFertilizerFactory.xml`, recipe
+  `LiquidFertilizerFactory`: purchase price `$175,000`, one cycle per hour;
+- `FS25_SeedProductionFactory:seedProductionFactory.xml`: removal of the four
+  explicitly named `*_rush` recipes. Normal seed recipes are unchanged.
+
+An unmatched runtime structure or input/output name fails closed for that
+recipe and is logged. A map/save reload is required for a recipe policy to
+reach an already placed production. The same policy ZIP must be installed on
+the server and all clients; the dedicated server remains authoritative for the
+actual production simulation.
+
 ## Diagnostics
 
 `log.txt` records policy load, post-store-registration inventory discovery,
@@ -55,11 +83,45 @@ source price, policy match, effective price, and applied native pricing calls.
 descriptors including recipes and operating costs. Diagnostics are bounded for
 unknown productions; only configured pricing is logged at application time.
 
+For an actual pricing review, run `sinProductionPolicyExport` on the
+authoritative server (or a single-player test save). It writes the full,
+canonical-ID-sorted catalog to:
+
+```text
+<FS25 user profile>/modSettings/SiN_FS25_ProductionPolicy/production-catalog.csv
+```
+
+The file has no timestamp or display-name fields, so it is safe to diff between
+maps/mod sets. Its columns are canonical ID, originating mod/XML path, source
+price, current effective price, recipe count, and active-hour operating cost.
+The export is deliberately unavailable to multiplayer clients: policy review
+uses the same authoritative catalog that governs purchases.
+
+## Construction sell-point catalog policy
+
+The same small policy mod also carries one narrow construction-catalog rule:
+`config/construction-policy.xml` sets `sellingPoints showInConstruction="false"`.
+After the store catalog has loaded, it identifies placeable XML containing
+`<placeable><sellingStation>`, sets that item's shop `showInStore` value to
+`false`, and removes its construction `brush` descriptor. `showInStore` alone
+does not control ConstructionScreen; the brush descriptor is the native data
+that puts a placeable in its construction tab. Some matched assets also have
+production behavior; the policy intentionally excludes them because the rule
+is that the Selling Points construction tab contains no purchasable entries.
+It does not use a name or a localized category match, and does not alter
+existing, preplaced, or map-owned sell points. `sinConstructionPolicy` reports
+the exact catalog entries whose visibility this policy changed.
+
+This is a catalog/UI rule, not an economy or save-state mutation. All clients
+need the same mod so their construction catalogs agree; the authoritative
+server owns the same configuration. Deliberately malformed or unavailable
+construction policy files fail closed, leaving sell points visible.
+
 ## Known limits
 
 This changes new-construction purchase pricing. It does not retroactively alter
 the value of an already placed production, resale economics, configuration
-surcharges, terrain/placement costs, or production recipes. FS25 updates could
+surcharges, or terrain/placement costs. FS25 updates could
 change the native price seam; the live purchase test below is mandatory for
 every game update.
 
@@ -68,11 +130,16 @@ every game update.
 1. Keep `FS25_LimeProduction.zip` byte-for-byte unchanged; record its SHA256.
 2. Install `SiN_FS25_ProductionPolicy.zip` beside it and enable both on a new
    test save (identical policy ZIP on a dedicated server and all clients).
-3. Open Construction > Productions and select Lime Production. Confirm `$500,000`.
+3. Open Construction > Productions and select Lime Production. Confirm `$100,000`.
 4. Purchase it on a farm with sufficient funds. Confirm the farm loses exactly
-   `$500,000`, plus separately shown native placement/displacement costs only.
-5. Run `sinProductionPolicy`; confirm source `110000`, effective `500000`, and
+   `$100,000`, plus separately shown native placement/displacement costs only.
+5. Place Lime Production, open its production menu, and confirm its only recipe
+   requires `300` stone and produces `3,000` lime at one cycle per hour.
+6. Place Liquid Fertilizer Factory and confirm its recipe rate is one cycle per
+   hour. Place Seed Production Factory and confirm none of the four `rush`
+   recipes appears or can be activated.
+7. Run `sinProductionPolicy`; confirm source `110000`, effective `100000`, and
    canonical ID `FS25_LimeProduction:LimeProduction.xml`.
-6. Save, reload, and repeat the store display and a new purchase test. Confirm
-   unrelated production prices are unchanged.
-7. Recalculate the original Lime ZIP hash and confirm it matches step 1.
+8. Save, reload, and repeat the recipe and store-display checks. Confirm
+   unrelated production prices and recipes are unchanged.
+9. Recalculate the original Lime ZIP hash and confirm it matches step 1.

@@ -2,7 +2,7 @@
 
 `SiN_FS25_Crop_Settings.zip` is a standalone multiplayer mod. It is deliberately
 separate from `FS25_SiN_Server` and from every map. The shipped
-`config/fruit-policy.xml` is the canonical SiN calendar (`policyVersion="0.3.1-verified-annual-cycles"`).
+`config/fruit-policy.xml` is the canonical SiN calendar (`policyVersion="0.3.3-native-harvest-range-guard"`).
 Only fruit types registered by the active map are touched; absent map fruits are
 reported as skipped and are never fabricated.
 
@@ -41,26 +41,26 @@ The policy windows are:
 | Runtime fruit | Plant | Harvest |
 | --- | --- | --- |
 | BARLEY | Sep-Oct | Mar-Jun |
-| CANOLA | Aug-Sep | Mar-Jun |
+| CANOLA | Sep-Oct | Mar-Jun |
 | CARROT | Apr-May | Aug-Nov |
 | MAIZE | Apr-May | Sep-Dec |
 | COTTON | Mar-Apr | Sep-Dec |
 | GRAPE | Mar-Apr | Aug-Nov |
 | GRASS | Mar-Nov | Mar-Dec |
-| GREENBEAN | Apr-May | Jul-Oct |
+| GREENBEAN | Apr-May | Aug-Nov |
 | RICELONGGRAIN | Apr-May | Aug-Nov |
 | OAT | Mar-Apr | Jul-Oct |
-| OILSEEDRADISH | Mar-Oct | None |
+| OILSEEDRADISH | Mar-Oct | All months (calendar flag; not a combine crop) |
 | OLIVE | Mar-Apr | Sep-Dec |
 | PARSNIP | Apr-May | Aug-Nov |
-| PEA | Mar-Apr | Jun-Sep |
-| POPLAR | Mar-Oct | Mar-Dec |
+| PEA | Mar-Apr | Jul-Oct |
+| POPLAR | Mar-Oct | All months |
 | POTATO | Mar-Apr | Jul-Oct |
 | BEETROOT | Apr-May | Aug-Nov |
 | RICE | Apr-May | Aug-Nov |
 | SORGHUM | Apr-May | Aug-Nov |
 | SOYBEAN | Apr-May | Sep-Dec |
-| SPINACH | Mar-Apr | Jun-Sep |
+| SPINACH | Mar-Apr | Jun-Nov |
 | SUGARBEET | Mar-Apr | Sep-Dec |
 | SUGARCANE | Mar-Apr | Mar-Dec |
 | SUNFLOWER | Apr-May | Aug-Nov |
@@ -73,9 +73,17 @@ rewrite, the runtime derives the longest native path from the active descriptor;
 optional states are therefore omitted when the map uses a direct transition (for
 example `harvestReadyGreen -> harvestReady3`). Each period advances at most one
 native stage; the terminal transition to the final harvest-ready state is withheld
-until the harvest window, then the ready state is held until the following period
-withers it. This preserves staggered maturity without inventing map stages or
+until the harvest window, then the ready state is held through the window and
+mapped to the native dead state in every subsequent period. This preserves
+staggered maturity without inventing map stages or
 changing `growthTime`.
+
+The wither guard also reads the native fruit descriptor's
+`minHarvestingGrowthState`/`maxHarvestingGrowthState` range. If a map exposes
+multiple harvest-ready foliage states that are not named in the concise
+`stateChain` (as some oat descriptors do), every registered state in that
+range is held during the harvest window and mapped to the native dead state
+afterward.
 
 Every policy-owned seasonal descriptor is also totalized before it is handed
 back to `GrowthSystem`: each numeric state exposed by the native descriptor
@@ -131,10 +139,11 @@ shortened paths where the reference descriptors skip optional visual states:
 | Sugar beet | Mar, Apr | Dec | Jan |
 | Sunflower | Apr, May | Nov | Dec |
 | Wheat | Oct, Nov | Jul | Aug |
-| Sorghum (unchanged explicit policy) | Apr, May | Nov | Dec |
+| Sorghum | Apr, May | Nov | Dec |
 
 Every tested cohort must traverse the selected path, first reach maturity within
-the crop's configured harvest window, and remain ready until that window ends.
+the crop's configured harvest window, remain ready until that window ends, then
+enter the native dead state in every subsequent post-window period.
 Different planting dates can converge on the same maturity period if both reach
 the pre-maturity state before the window opens. Tests also prove rejection is
 atomic and a repeat map-load hook does not reapply the policy. These are executable
@@ -144,13 +153,73 @@ this annual-cycle test.
 
 Grass, Poplar, Sugarcane, Grapes, Olives and Spinach are treated as native
 perennial/regrowth lifecycles: SiN changes their planting and harvest gates while
-leaving map-owned growth transitions intact. Oilseed Radish has no normal harvest
-window and retains its native cover-crop/regrowth behavior. These native
+leaving map-owned growth transitions intact. The current user-edited policy sets
+Oilseed Radish's calendar harvest flag for all twelve months; it remains a native
+cover crop, not a newly enabled combine crop. These native
 lifecycles cannot be safely reconstructed from a generic annual state chain.
 
-Sorghum retains the already validated explicit native-shaped block. Its
-`greenBig -> harvestReady` transition starts in August and the ready state is
-held through November, with `harvestReady -> dead` in December.
+Source XML changes do not update an installed ZIP. Rebuild and copy
+`dist/SiN_FS25_Crop_Settings.zip` to the game's configured mod directory, then
+fully reload the save. Version 0.2.3.0 packages the user-edited XML unchanged.
+The policy version string alone cannot distinguish edits made without bumping
+that string: compare the ZIP's `config/fruit-policy.xml` bytes to the source.
+The reported Oilseed Radish visual glitch is not yet reproduced or resolved;
+whether it concerns calendar bars or field foliage still needs confirmation.
+
+### Growth boundary correction (mod 0.2.5.0)
+
+The single-player Pea test showed `setMonthEngineState(8)` while entering
+November and `setMonthEngineState(9)` while entering December. Peas withered
+only in December under 0.2.4.0. Our former tests incorrectly applied a month's
+mapping on entry to that same month. Native processing applies the outgoing
+period's mapping at the next boundary.
+
+Generated annual established-growth mappings are now scheduled one slot earlier;
+planting eligibility and calendar harvest flags are unchanged. Germination stays
+in the outgoing sowing month's mapping so the last sowing cohort is not stranded.
+Cohort validation starts with an invisible crop planted during the sowing month,
+then runs outgoing mappings at each following boundary. Every supported cohort
+must mature inside its window, remain ready through the last allowed month, and
+wither on the boundary into the following month. Explicit/native perennial
+mappings are not shifted. No density-map state is forcibly rewritten.
+
+The corrected model rejects the synthetic full seven-stage Sunflower path for
+late sowing: it cannot finish by November at one stage per boundary. The shorter
+native Sunflower path remains supported. Actual map support is checked at load;
+look for unsupported diagnostics. Rice's missing-state limitation and Spinach's
+preserved-native lifecycle remain unresolved and are not fixed by this change.
+
+Live retest: install 0.2.5.0, reload before the end of a harvest window, run
+`sinCropGrowth PEA`, then cross October to November. Period 8 should now show
+`5>6`, with Peas withering in November, not December. Check Barley/Canola June
+to July and Wheat July to August. Retest fresh early/late sowing cohorts too;
+the maturity correction still needs live validation. Preserve the user-edited
+XML bytes when rebuilding; do not shift calendar month names in that file.
+
+### Read-only live withering probe (introduced in mod 0.2.4.0)
+
+Descriptor tests do not prove density-map execution or NPC field behavior.
+No field state is forcibly rewritten by this diagnostic.
+
+Run `sinCropGrowth OAT` in the local single-player console (substitute the
+affected registered fruit name). It records all twelve runtime seasonal
+harvest flags and harvest-state successors, plus native `witheredState` and
+the named `DEAD` state. Period 1 is March; period 9 is November. For oats the
+configured July–October window now yields a withering successor in outgoing
+period 8, which executes on entering November (period 9).
+The command also arms four observations immediately before native
+`GrowthSystem:setMonthEngineState` calls. Advance across a month boundary and
+collect `[SiN Crop Settings] growth-probe` log lines, along with crop, month,
+field number and player/NPC ownership. This establishes whether the mapping
+is still present at the native boundary; it does not claim the engine has
+changed a field. The wrapper forwards all arguments and return values and
+does not invoke growth itself. No polling or continuous logging is added.
+
+Sorghum uses the same annual `stateChain` policy as the other annual crops.
+Its active map descriptor supplies the native `greenSmall -> greenMiddle ->
+greenBig -> harvestReady` path; the policy retimes that path to April-May
+planting, August-November harvest, and a native `harvestReady -> dead`
+transition after the window.
 
 A policy change requires a normal map/save reload; the script applies once after
 `FruitTypeManager:loadMapData` and does not continuously overwrite runtime state.
@@ -161,7 +230,7 @@ unresolved states fail closed.
 
 The policy uses a compact, versioned shape. Annual entries name their stable
 state chain and period windows; explicit `<seasonal>` updates remain available
-for a crop such as Sorghum whose native lifecycle needs a hand-reviewed shape:
+for map-specific crops whose native lifecycle needs a hand-reviewed shape:
 
 ```xml
 <fruit name="WHEAT" enabled="true">
@@ -192,7 +261,7 @@ For a live validation, build the ZIP, install the same bytes on server and every
 client, and restart/reload the save (policy application is map-load scoped).
 Verify one bounded log line like:
 
-`[SiN Crop Settings] policy=0.3.1-verified-annual-cycles map=<map> applied=<n> changed=<n> skipped=<n> unsupported=0 conflicts=0`
+`[SiN Crop Settings] policy=0.3.3-native-harvest-range-guard map=<map> applied=<n> changed=<n> skipped=<n> unsupported=0 conflicts=0`
 
 Then inspect the in-game calendar against the table above. Existing crop
 density states are not rewritten; changing future calendar transitions should
