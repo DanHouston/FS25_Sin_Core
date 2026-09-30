@@ -181,6 +181,10 @@ class AuthorizationTests(unittest.TestCase):
         update = self.db.permission_jobs.update_one.call_args.args[1]["$set"]
         self.assertEqual(update["state"], "reconciliation_required")
         self.assertNotIn("applied_role", update)
+        # Reconciliation is deliberately recorded outside the transaction
+        # that rejects the receipt; otherwise the raised validation error
+        # rolls the quarantine update back and the Agent retries forever.
+        self.assertNotIn("session", self.db.permission_jobs.update_one.call_args.kwargs)
 
     def test_manager_receipt_cannot_be_satisfied_by_generic_success_text(self):
         self.db.permission_jobs.find_one.return_value = {

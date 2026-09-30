@@ -752,28 +752,45 @@ class AuthorizationManager:
     def acknowledge(self, operation_id, authenticated_server_id, save_id, revision, receipt, world_id=None):
         """Only after the mod confirms the exact job was applied and persisted."""
 
+        query = {"_id": operation_id, "server_id": authenticated_server_id,
+                 "save_id": save_id, "revision": revision}
+        if world_id:
+            query["world_id"] = str(world_id)
+
+        # Validate before entering the transaction as well as inside it.  An
+        # invalid receipt must be durably quarantined; doing that update inside
+        # the transaction and then re-raising rolls it back, leaving the job
+        # pending forever and causing the Agent to retry the same receipt.
+        preflight_job = self.db.permission_jobs.find_one(query)
+        if not preflight_job:
+            raise ValueError("Unknown operation or wrong server/save/revision")
+        try:
+            self._validate_permission_receipt(preflight_job, receipt)
+        except ValueError:
+            if preflight_job.get("state") in {"pending", "dispatched"}:
+                now = datetime.now(timezone.utc)
+                self.db.permission_jobs.update_one(
+                    {"_id": operation_id, "state": {"$in": ["pending", "dispatched"]}},
+                    {"$set": {"state": "reconciliation_required", "receipt": receipt,
+                              "updated_at": now}})
+                self.db.memberships.update_one(
+                    {"_id": preflight_job["membership_id"], "operation_id": operation_id,
+                     "revision": revision, "state": {"$in": ["pending", "active"]}},
+                    {"$set": {"state": "reconciliation_required", "receipt": receipt,
+                              "updated_at": now}})
+            raise
+
         def acknowledge(session):
-            query = {"_id": operation_id, "server_id": authenticated_server_id,
-                     "save_id": save_id, "revision": revision}
-            if world_id:
-                query["world_id"] = str(world_id)
             job = self.db.permission_jobs.find_one(query, session=session)
             if not job:
                 raise ValueError("Unknown operation or wrong server/save/revision")
             try:
                 self._validate_permission_receipt(job, receipt)
             except ValueError:
-                if job.get("state") in {"pending", "dispatched"}:
-                    now = datetime.now(timezone.utc)
-                    self.db.permission_jobs.update_one({"_id": operation_id,
-                        "state": {"$in": ["pending", "dispatched"]}},
-                        {"$set": {"state": "reconciliation_required", "receipt": receipt,
-                                  "updated_at": now}}, session=session)
-                    self.db.memberships.update_one({"_id": job["membership_id"],
-                        "operation_id": operation_id, "revision": revision,
-                        "state": {"$in": ["pending", "active"]}},
-                        {"$set": {"state": "reconciliation_required", "receipt": receipt,
-                                  "updated_at": now}}, session=session)
+                # The preflight path above durably records this state.  Keep
+                # the in-transaction validation as a race-safe guard; if the
+                # job changed between reads, the transaction rolls back with
+                # no permission applied and the Agent can reconcile it.
                 raise
             if job["state"] == "applied":
                 return "applied"
