@@ -17,8 +17,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$assets = @("sin-agent.zip", "FS25_SiN_Server.zip", "build-manifest.json", "SHA256SUMS.txt", "Update-SiN.ps1", "Restart-SiN-Agent.ps1")
-$checksumAssets = @("sin-agent.zip", "FS25_SiN_Server.zip", "Update-SiN.ps1", "Restart-SiN-Agent.ps1")
+$assets = @("sin-agent.zip", "FS25_SiN_Server.zip", "build-manifest.json", "SHA256SUMS.txt", "Update-SiN.ps1", "Restart-SiN-Agent.ps1", "Publish-SiN-Modpack.ps1")
+$checksumAssets = @("sin-agent.zip", "FS25_SiN_Server.zip", "Update-SiN.ps1", "Restart-SiN-Agent.ps1", "Publish-SiN-Modpack.ps1")
 $logRoot = "C:\SiN\Logs"
 
 function Get-AgentProcess {
@@ -532,6 +532,7 @@ try {
     New-Item -ItemType Directory -Force -Path $DeployRoot | Out-Null
     Copy-Item -LiteralPath (Join-Path $downloadDirectory "Update-SiN.ps1") -Destination (Join-Path $DeployRoot "Update-SiN.next.ps1") -Force
     Copy-Item -LiteralPath (Join-Path $downloadDirectory "Restart-SiN-Agent.ps1") -Destination (Join-Path $DeployRoot "Restart-SiN-Agent.ps1") -Force
+    Copy-Item -LiteralPath (Join-Path $downloadDirectory "Publish-SiN-Modpack.ps1") -Destination (Join-Path $DeployRoot "Publish-SiN-Modpack.ps1") -Force
 
     $timestamp = (Get-Date).ToUniversalTime().ToString("yyyyMMdd-HHmmss")
     $backup = Join-Path $BackupRoot "$timestamp-$resolvedVersion"

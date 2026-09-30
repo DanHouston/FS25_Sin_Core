@@ -24,6 +24,7 @@ CONTRACTS_MOD_ASSET = "SiN_FS25_Contracts.zip"
 PRODUCTION_POLICY_MOD_ASSET = "SiN_FS25_ProductionPolicy.zip"
 CLIENT_UPDATER_ASSET = "Update-SiN-Client.ps1"
 AGENT_RESTART_ASSET = "Restart-SiN-Agent.ps1"
+MODPACK_PUBLISHER_ASSET = "Publish-SiN-Modpack.ps1"
 
 
 def git(*args):
@@ -212,6 +213,8 @@ def build(version, output):
     shutil.copy2(ROOT / "scripts" / CLIENT_UPDATER_ASSET, client_updater)
     agent_restart = output / AGENT_RESTART_ASSET
     shutil.copy2(ROOT / "scripts" / AGENT_RESTART_ASSET, agent_restart)
+    modpack_publisher = output / MODPACK_PUBLISHER_ASSET
+    shutil.copy2(ROOT / "scripts" / MODPACK_PUBLISHER_ASSET, modpack_publisher)
     # Ship reproducible validation evidence beside the runtime assets.  The
     # evidence is never included in either runtime ZIP.
     campaign_report = output / "integration-campaign.json"
@@ -231,6 +234,7 @@ def build(version, output):
         "updater_sha256": sha256(updater),
         "client_updater_sha256": sha256(client_updater),
         "agent_restart_sha256": sha256(agent_restart),
+        "modpack_publisher_sha256": sha256(modpack_publisher),
         "campaign_report_sha256": sha256(campaign_report),
         "live_validation_manifest_sha256": sha256(live_manifest),
         "required_scenarios": json.loads(live_manifest.read_text(encoding="utf-8"))["required_scenarios"],
@@ -244,7 +248,7 @@ def build(version, output):
         "github_run_id": os.environ.get("GITHUB_RUN_ID"),
     }
     (output / "build-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    checksummed = (agent, mod, crop_mod, contracts_mod, production_policy_mod, updater, client_updater, agent_restart, campaign_report, live_manifest)
+    checksummed = (agent, mod, crop_mod, contracts_mod, production_policy_mod, updater, client_updater, agent_restart, modpack_publisher, campaign_report, live_manifest)
     (output / "SHA256SUMS.txt").write_text(
         "".join(f"{sha256(path)}  {path.name}\n" for path in checksummed), encoding="utf-8")
     validate_release_directory(output, expected_version=version)

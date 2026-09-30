@@ -21,7 +21,7 @@ $ServerName = "SiN Test Server 01"
 $ServerMods = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\mods"
 $Mailbox = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\modSettings\FS25_SiN_Server"
 $ClientMods = "C:\Users\Dan\OneDrive\Documents\My Games\SiN"
-$PublicationRoot = "H:\My Drive\SiN Mods"
+$PublicationRoot = "G:\My Drive\SiN Mods\sin-fs25-01"
 ```
 
 The standard Central API port is `8787`. The Agent URL, updater `-ApiUrl`, and
@@ -65,7 +65,8 @@ git push origin $Version
 Wait for the tag workflow to publish the GitHub Release before running either
 updater. Verify the release contains `sin-agent.zip`,
 `FS25_SiN_Server.zip`, `build-manifest.json`, `SHA256SUMS.txt`,
-`Update-SiN.ps1`, `Update-SiN-Client.ps1`, and `Restart-SiN-Agent.ps1`.
+`Update-SiN.ps1`, `Update-SiN-Client.ps1`, `Restart-SiN-Agent.ps1`, and
+`Publish-SiN-Modpack.ps1`.
 
 ## 3. Deploy Central and JiN
 
@@ -181,51 +182,25 @@ Get-FileHash -LiteralPath $ClientZip -Algorithm SHA256
 
 The client and server SHA256 values must be identical before multiplayer load.
 
-## 6. Refresh and publish the approved modpack
+## 6. Publish the server modpack
 
-When the approved ZIP list is unchanged, install the new SiN ZIP first, then
-refresh/publish from the existing approval manifest:
-
-```powershell
-Set-Location $Repo
-& powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File (Join-Path $Repo "scripts\Update-SiN-Client.ps1") `
-  -Version $Version `
-  -ModsPath $ClientMods `
-  -PublishModpack -RefreshApprovedModpack `
-  -ModpackRepositoryRoot $Repo `
-  -ModpackPublicationRoot $PublicationRoot `
-  -ModpackServerKey $ServerKey `
-  -ModpackServerName $ServerName `
-  -ModpackVersion $Version
-```
-
-This reads the existing approved filenames, fails closed if one is missing, and
-does not approve newly appearing ZIPs. Use `-ApproveAllSourceMods` only when the
-source directory itself is deliberately the complete approved set; never combine
-it with `-RefreshApprovedModpack`.
-
-Validate the published pack and optionally synchronize another client:
+The modpack command copies every ZIP currently in the server mod folder. There
+is no separate approval list or versioned publication tree. Run this after the
+server's mod folder contains the exact set you want clients to receive:
 
 ```powershell
-$env:PYTHONPATH = $Repo
-python -m fs25_network_core.modpack validate `
-  --source-dir $ClientMods `
-  --publication-root $PublicationRoot `
-  --server-key $ServerKey `
-  --server-name $ServerName
-
-python -m fs25_network_core.modpack sync `
-  --source-dir $ClientMods `
-  --publication-root $PublicationRoot `
-  --client-dir "C:\path\to\another\FS25\mods" `
-  --server-key $ServerKey `
-  --server-name $ServerName
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File "C:\SiN\Deploy\Publish-SiN-Modpack.ps1" `
+  -SourceMods $ServerMods `
+  -Destination $PublicationRoot `
+  -ServerKey $ServerKey `
+  -ServerName $ServerName
 ```
 
-The publication root is first modified when a validated versioned release is
-captured. `Current` is swapped only after the complete pack and hashes validate.
-Google Drive is used as a mounted filesystem; no Google API is involved.
+On success, inspect the printed `mod_count`, `manifest_sha256`, and
+`modpack_sha256`. The destination contains `mods\`, `manifest.json`, and one
+`SiN Test Server 01-Modpack.zip`. Google Drive is used as a mounted filesystem;
+no Google API is involved.
 
 ## 7. Post-deployment checks
 

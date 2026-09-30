@@ -42,6 +42,7 @@ class DeploymentPackagingTests(unittest.TestCase):
             updater = output / "Update-SiN.ps1"
             client = output / "Update-SiN-Client.ps1"
             restart = output / "Restart-SiN-Agent.ps1"
+            packager = output / "Publish-SiN-Modpack.ps1"
             self.assertTrue((output / "sin-agent.zip").is_file())
             self.assertTrue((output / "FS25_SiN_Server.zip").is_file())
             self.assertTrue((output / "SiN_FS25_Crop_Settings.zip").is_file())
@@ -51,9 +52,11 @@ class DeploymentPackagingTests(unittest.TestCase):
             self.assertTrue(updater.is_file())
             self.assertTrue(client.is_file())
             self.assertTrue(restart.is_file())
+            self.assertTrue(packager.is_file())
             self.assertEqual(hashlib.sha256(updater.read_bytes()).hexdigest(), manifest["updater_sha256"])
             self.assertEqual(hashlib.sha256(client.read_bytes()).hexdigest(), manifest["client_updater_sha256"])
             self.assertEqual(hashlib.sha256(restart.read_bytes()).hexdigest(), manifest["agent_restart_sha256"])
+            self.assertEqual(hashlib.sha256(packager.read_bytes()).hexdigest(), manifest["modpack_publisher_sha256"])
             sums = (output / "SHA256SUMS.txt").read_text(encoding="utf-8")
             self.assertIn("sin-agent.zip", sums)
             self.assertIn("FS25_SiN_Server.zip", sums)
@@ -63,11 +66,12 @@ class DeploymentPackagingTests(unittest.TestCase):
             self.assertIn("Update-SiN.ps1", sums)
             self.assertIn("Update-SiN-Client.ps1", sums)
             self.assertIn("Restart-SiN-Agent.ps1", sums)
+            self.assertIn("Publish-SiN-Modpack.ps1", sums)
             checksum_entries = {
                 line.split(None, 1)[1]: line.split(None, 1)[0]
                 for line in sums.splitlines() if line.strip()
             }
-            for asset in ("sin-agent.zip", "FS25_SiN_Server.zip", "SiN_FS25_Crop_Settings.zip", "SiN_FS25_Contracts.zip", "SiN_FS25_ProductionPolicy.zip", "Update-SiN.ps1", "Update-SiN-Client.ps1", "Restart-SiN-Agent.ps1"):
+            for asset in ("sin-agent.zip", "FS25_SiN_Server.zip", "SiN_FS25_Crop_Settings.zip", "SiN_FS25_Contracts.zip", "SiN_FS25_ProductionPolicy.zip", "Update-SiN.ps1", "Update-SiN-Client.ps1", "Restart-SiN-Agent.ps1", "Publish-SiN-Modpack.ps1"):
                 self.assertEqual(hashlib.sha256((output / asset).read_bytes()).hexdigest(),
                                  checksum_entries[asset])
             with ZipFile(output / "FS25_SiN_Server.zip") as archive:
@@ -334,13 +338,16 @@ class DeploymentPackagingTests(unittest.TestCase):
         self.assertNotIn("serverBinding.xml", client)
         self.assertNotIn("MONGODB", client)
 
-    def test_client_updater_has_explicit_approval_gated_modpack_publish_path(self):
+    def test_client_updater_does_not_publish_modpacks(self):
         client = (self.root / "scripts" / "Update-SiN-Client.ps1").read_text(encoding="utf-8")
-        self.assertIn("PublishModpack", client)
-        self.assertIn("RefreshApprovedModpack", client)
-        self.assertIn("ApproveAllSourceMods", client)
-        self.assertIn("refresh-publish", client)
-        self.assertIn("ApprovedMod", client)
-        self.assertIn('Get-ChildItem -LiteralPath $ModsPath -Filter "*.zip"', client)
-        self.assertIn("fs25_network_core\\modpack.py", client)
-        self.assertIn("New modpack approval requires", client)
+        self.assertNotIn("PublishModpack", client)
+        self.assertNotIn("RefreshApprovedModpack", client)
+        self.assertNotIn("ApproveAllSourceMods", client)
+        self.assertNotIn("fs25_network_core\\modpack.py", client)
+
+    def test_simple_modpack_publisher_is_the_canonical_path(self):
+        publisher = (self.root / "scripts" / "Publish-SiN-Modpack.ps1").read_text(encoding="utf-8")
+        self.assertIn('G:\\My Drive\\SiN Mods\\sin-fs25-01', publisher)
+        self.assertIn('Get-ChildItem -LiteralPath $sourceResolved -Filter "*.zip" -File', publisher)
+        self.assertIn('manifest_schema = "sin.fs25-modpack/1"', publisher)
+        self.assertIn('Compress-Archive -LiteralPath $manifestPath, $stageMods', publisher)

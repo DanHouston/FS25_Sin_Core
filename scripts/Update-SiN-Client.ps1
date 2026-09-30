@@ -2,16 +2,7 @@
 param(
     [string]$Version = "latest",
     [string]$Repository = "DanHouston/FS25_Sin_Core",
-    [string]$ModsPath = $env:SIN_FS25_CLIENT_MODS_DIR,
-    [switch]$PublishModpack,
-    [switch]$RefreshApprovedModpack,
-    [switch]$ApproveAllSourceMods,
-    [string]$ModpackRepositoryRoot = $env:SIN_MODPACK_REPOSITORY_ROOT,
-    [string]$ModpackPublicationRoot = $env:SIN_MODPACK_PUBLICATION_ROOT,
-    [string]$ModpackServerKey = $env:SIN_MODPACK_SERVER_KEY,
-    [string]$ModpackServerName = $env:SIN_MODPACK_SERVER_NAME,
-    [string]$ModpackVersion = $env:SIN_MODPACK_VERSION,
-    [string[]]$ApprovedMod
+    [string]$ModsPath = $env:SIN_FS25_CLIENT_MODS_DIR
 )
 
 $ErrorActionPreference = "Stop"
@@ -58,58 +49,6 @@ function Get-ExpectedHash($checksumFile, $name) {
 if (-not $ModsPath) {
     throw "FS25 mods path is required. Pass -ModsPath or set SIN_FS25_CLIENT_MODS_DIR."
 }
-if ($RefreshApprovedModpack -and -not $PublishModpack) {
-    throw "-RefreshApprovedModpack requires -PublishModpack."
-}
-if ($ApproveAllSourceMods -and $RefreshApprovedModpack) {
-    throw "-ApproveAllSourceMods cannot be combined with -RefreshApprovedModpack."
-}
-if ($PublishModpack) {
-    if (-not $ModpackRepositoryRoot) {
-        throw "-ModpackRepositoryRoot or SIN_MODPACK_REPOSITORY_ROOT is required when publishing a modpack."
-    }
-    if (-not $ModpackPublicationRoot -or -not $ModpackServerKey -or -not $ModpackServerName) {
-        throw "Modpack publication requires publication root, server key, and server name."
-    }
-    if (-not $RefreshApprovedModpack -and -not $ApproveAllSourceMods -and @($ApprovedMod).Count -eq 0) {
-        throw "New modpack approval requires -ApproveAllSourceMods or one or more -ApprovedMod values; use -RefreshApprovedModpack to preserve the current approved set."
-    }
-}
-
-function Invoke-ModpackOperation {
-    param(
-        [Parameter(Mandatory = $true)][string]$Operation,
-        [Parameter(Mandatory = $true)][string]$PackVersion,
-        [Parameter(Mandatory = $true)][string]$RepositoryRoot
-    )
-
-    $modpackModule = Join-Path $RepositoryRoot "fs25_network_core\modpack.py"
-    if (-not (Test-Path -LiteralPath $modpackModule -PathType Leaf)) {
-        throw "Modpack publishing requires a repository containing fs25_network_core\modpack.py. Pass -ModpackRepositoryRoot."
-    }
-    $python = (Get-Command python.exe -ErrorAction SilentlyContinue)
-    if (-not $python) { $python = Get-Command python -ErrorAction SilentlyContinue }
-    if (-not $python) { throw "Python is required for deterministic modpack capture/publication." }
-
-    $arguments = @("-m", "fs25_network_core.modpack", $Operation,
-        "--source-dir", $ModsPath,
-        "--publication-root", $ModpackPublicationRoot,
-        "--server-key", $ModpackServerKey,
-        "--server-name", $ModpackServerName,
-        "--version", $PackVersion)
-    if ($Operation -eq "capture") {
-        foreach ($name in @($ApprovedMod)) { $arguments += @("--mod", $name) }
-    }
-    $oldPythonPath = $env:PYTHONPATH
-    try {
-        $env:PYTHONPATH = if ($oldPythonPath) { "$RepositoryRoot;$oldPythonPath" } else { $RepositoryRoot }
-        & $python.Source @arguments
-        if ($LASTEXITCODE -ne 0) { throw "Modpack $Operation failed with exit code $LASTEXITCODE." }
-    } finally {
-        $env:PYTHONPATH = $oldPythonPath
-    }
-}
-
 $temporary = Join-Path ([IO.Path]::GetTempPath()) ("sin-client-" + [guid]::NewGuid().ToString("N"))
 try {
     New-Item -ItemType Directory -Force -Path $temporary | Out-Null
@@ -157,26 +96,6 @@ try {
     Write-Host "FS25_SiN_Server     UPDATED"
     Write-Host "SHA256             $actual"
     Write-Host "FS25 reload        REQUIRED"
-    if ($PublishModpack) {
-        $packVersion = if ($ModpackVersion) { $ModpackVersion } else { $resolvedVersion }
-        if ($RefreshApprovedModpack) {
-            Invoke-ModpackOperation -Operation "refresh-publish" -PackVersion $packVersion -RepositoryRoot $ModpackRepositoryRoot
-        } else {
-            if ($ApproveAllSourceMods) {
-                $ApprovedMod = @(Get-ChildItem -LiteralPath $ModsPath -Filter "*.zip" -File |
-                    Sort-Object Name | ForEach-Object { $_.Name })
-                if (@($ApprovedMod).Count -eq 0) {
-                    throw "No ZIP files were found in the source/client mod directory to approve."
-                }
-                Write-Host "Approved source ZIPs"
-                $ApprovedMod | ForEach-Object { Write-Host "  $_" }
-            }
-            Invoke-ModpackOperation -Operation "capture" -PackVersion $packVersion -RepositoryRoot $ModpackRepositoryRoot
-            Invoke-ModpackOperation -Operation "publish" -PackVersion $packVersion -RepositoryRoot $ModpackRepositoryRoot
-        }
-        Write-Host "Modpack            PUBLISHED"
-        Write-Host "Modpack version    $packVersion"
-    }
 } finally {
     if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue }
 }

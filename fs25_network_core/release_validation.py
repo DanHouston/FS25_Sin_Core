@@ -27,6 +27,7 @@ RELEASE_ASSETS = frozenset({
     "integration-campaign.json",
     "live-validation-manifest.json",
     "Restart-SiN-Agent.ps1",
+    "Publish-SiN-Modpack.ps1",
     "SHA256SUMS.txt",
     "sin-agent.zip",
     "Update-SiN-Client.ps1",
@@ -41,6 +42,7 @@ CHECKSUM_ASSETS = frozenset({
     "Update-SiN.ps1",
     "Update-SiN-Client.ps1",
     "Restart-SiN-Agent.ps1",
+    "Publish-SiN-Modpack.ps1",
     "integration-campaign.json",
     "live-validation-manifest.json",
 })
@@ -245,6 +247,7 @@ def validate_release_directory(root: str | Path, *, expected_version: str | None
         "Update-SiN.ps1": "updater_sha256",
         "Update-SiN-Client.ps1": "client_updater_sha256",
         "Restart-SiN-Agent.ps1": "agent_restart_sha256",
+        "Publish-SiN-Modpack.ps1": "modpack_publisher_sha256",
         "integration-campaign.json": "campaign_report_sha256",
         "live-validation-manifest.json": "live_validation_manifest_sha256",
     }

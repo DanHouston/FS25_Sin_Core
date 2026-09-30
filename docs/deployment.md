@@ -189,28 +189,19 @@ HTTPS, validates the ZIP against `SHA256SUMS.txt`, checks root contents, and
 replaces only the FS25_SiN_Server ZIP and removes the legacy ZIP so both cannot
 load. FS25 must be reloaded afterward.
 
-When the approved mod list is unchanged, the same updater can explicitly
-refresh and publish the complete modpack after installing the new SiN ZIP:
+To publish the complete modpack, run the standalone server-side publisher after
+the server mod folder contains the exact ZIP set:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File "C:\repos\FS25_SiN_Core\scripts\Update-SiN-Client.ps1" `
-  -Version v0.1.32 `
-  -ModsPath "C:\Users\Dan\OneDrive\Documents\My Games\SiN" `
-  -PublishModpack -RefreshApprovedModpack `
-  -ModpackRepositoryRoot "C:\repos\FS25_SiN_Core" `
-  -ModpackPublicationRoot "H:\My Drive\SiN Mods" `
-  -ModpackServerKey sin-fs25-01 `
-  -ModpackServerName "SiN Test Server 01" `
-  -ModpackVersion v0.1.32
+  -File "C:\SiN\Deploy\Publish-SiN-Modpack.ps1" `
+  -SourceMods "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\mods" `
+  -Destination "G:\My Drive\SiN Mods\sin-fs25-01" `
+  -ServerKey sin-fs25-01 `
+  -ServerName "SiN Test Server 01"
 ```
 
-This mode reuses only the filenames in the current approved manifest. It fails
-closed if an approved source ZIP is missing and never adds an unapproved ZIP.
-If the explicitly supplied client/source directory is itself the complete
-approved modset, use `-PublishModpack -ApproveAllSourceMods` instead; that
-enumerates its ZIPs only for that invocation. For a deliberate constrained
-modset, use repeated `-ApprovedMod` parameters and omit both approval modes.
-The command publishes to the filesystem
-publication root only after the refreshed release validates; it does not deploy
-the pack to the dedicated server.
+The command writes `mods\`, `manifest.json`, and one combined
+`SiN Test Server 01-Modpack.zip` directly under the destination. It copies every
+source ZIP, validates the staged output, and leaves unrelated destination files
+alone. It does not deploy the pack to the dedicated server.
