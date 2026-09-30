@@ -142,9 +142,9 @@ they should not receive the crop-converter revenue multiplier.
 | Canonical asset | Tier | Native price | Capacity | Target recipe capability/rates | Native annual gross / recipe | Candidate price |
 |---|---|---:|---:|---|---:|---:|
 | `FS25_AmericanSilosProductionPack:silos/staveSiloSmall.xml` | Small | $50k | 250,000 L | Common full set; hay/silage 4,000 cycles/h, pig food 1.5, forage 2.5 | $65k-$605k | **$302.5k** |
-| `FS25_AmericanSilosProductionPack:silos/steelSiloSmall.xml` | Small | $75k | 750,000 L | Common full set; hay/silage 4,000 cycles/h, pig food 1.5, forage 2.5 | $65k-$605k | **$302.5k** |
+| `FS25_AmericanSilosProductionPack:silos/steelSiloSmall.xml` | Small | $75k | 250,000 L | Common full set; hay/silage 4,000 cycles/h, pig food 1.5, forage 2.5 | $65k-$605k | **$302.5k** |
 | `FS25_AmericanSilosProductionPack:silos/staveSiloLarge.xml` | Large | $100k | 500,000 L | Common full set; hay/silage 5,000 cycles/h, pig food 2, forage 3.5 | $81k-$806k | **$403k** |
-| `FS25_AmericanSilosProductionPack:silos/steelSiloLarge.xml` | Large | $125k | 1,000,000 L | Common full set; hay/silage 5,000 cycles/h, pig food 2, forage 3.5 | $81k-$806k | **$403k** |
+| `FS25_AmericanSilosProductionPack:silos/steelSiloLarge.xml` | Large | $125k | 500,000 L | Common full set; hay/silage 5,000 cycles/h, pig food 2, forage 3.5 | $81k-$806k | **$403k** |
 
 “Aligned capability” means matching recipe IDs, input amounts, output amounts,
 and cycles/hour within each tier. The large pair already meets that rule in the
@@ -158,12 +158,12 @@ rates to encode in the SiN runtime policy after live validation.
 Every silo can convert grass to hay; chaff, grass, hay, or straw to silage;
 the crop recipe `500 maize + 250 wheat + 175 canola + 75 sugar beet` to
 1,000 pig food; and `400 silage + 400 hay + 200 straw` to 1,000 forage. The
-The capability policy should make the two small silos recipe-equivalent and the
-two large silos recipe-equivalent. Each tier should expose the complete common
-set above: hay, silage, pig food, and forage. The small/large distinction should
-come from storage capacity and the separately reviewed purchase price, not from
-one sibling silently losing a recipe. Throughput remains a separate native-rate
-decision unless a later balancing pass explicitly changes it.
+The capability policy should make the two small silos and the two large silos
+identical within their tier: matching recipe IDs, input/output amounts,
+cycles/hour, and capacity. Each tier should expose the complete common set
+above: hay, silage, pig food, and forage. The small/large distinction remains
+250,000 L versus 500,000 L, with separately reviewed purchase prices, rather
+than one sibling silently having a different capacity or recipe profile.
 
 The four native rates and capacities are not a clean small-to-large linear
 family, so their purchase prices should still be checked against intended
