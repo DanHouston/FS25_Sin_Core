@@ -137,20 +137,22 @@ they should not receive the crop-converter revenue multiplier.
 
 | Canonical asset | Native price | Capacity | Native annual gross / recipe | Candidate price | Proposed rule |
 |---|---:|---:|---:|---:|---|
-| `FS25_AmericanSilosProductionPack:silos/staveSiloSmall.xml` | $50k | 250,000 L | $65k-$605k | **$700k** | 10x cycles, median recipe |
-| `FS25_AmericanSilosProductionPack:silos/staveSiloLarge.xml` | $100k | 500,000 L | $81k-$806k | **$870k** | 10x cycles, median recipe |
-| `FS25_AmericanSilosProductionPack:silos/steelSiloSmall.xml` | $75k | 750,000 L | $73k-$806k | **$785k** | 10x cycles, median recipe |
-| `FS25_AmericanSilosProductionPack:silos/steelSiloLarge.xml` | $125k | 1,000,000 L | $81k-$806k | **$870k** | 10x cycles, median recipe |
+| `FS25_AmericanSilosProductionPack:silos/staveSiloSmall.xml` | $50k | 250,000 L | $65k-$605k | **$70k** | Native cycles, median recipe |
+| `FS25_AmericanSilosProductionPack:silos/staveSiloLarge.xml` | $100k | 500,000 L | $81k-$806k | **$90k** | Native cycles, median recipe |
+| `FS25_AmericanSilosProductionPack:silos/steelSiloSmall.xml` | $75k | 750,000 L | $73k-$806k | **$80k** | Native cycles, median recipe |
+| `FS25_AmericanSilosProductionPack:silos/steelSiloLarge.xml` | $125k | 1,000,000 L | $81k-$806k | **$90k** | Native cycles, median recipe |
 
 Every silo can convert grass to hay; chaff, grass, hay, or straw to silage;
 the crop recipe `500 maize + 250 wheat + 175 canola + 75 sugar beet` to
 1,000 pig food; and `400 silage + 400 hay + 200 straw` to 1,000 forage. The
 four rates and capacities are not a clean small-to-large linear family, so
 their purchase prices should still be checked against intended livestock demand
-and storage capacity. The candidate values follow the requested gross-output
-method; they are not yet an approved rate change. In particular, a 10x policy
-would raise their already-high fermentation/drying rates to 40,000-50,000
-cycles/hour, so it needs a live storage/performance validation before approval.
+and storage capacity. The candidate values use native cycles and the median
+recipe's six-game-month gross output (144 active game-hours), with no input-cost
+deduction. No throughput multiplier is proposed: the native 4,000-5,000
+cycles/hour drying and silage rates are already extremely high, and multiplying
+them would create an artificial processing-rate policy rather than a purchase
+price policy.
 
 ## Catalog coverage check
 
