@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    SiN purchase-price policy. IDs are canonical <modName>:<relative XML path>
+    values discovered from the loaded store catalog. Only entries in this
+    file are changed; all other productions retain their source price.
+    Source ZIPs are never modified. Capacity remains native because FS25 does
+    not expose a safe, authoritative storage-capacity override at this seam.
+-->
+<productionPolicy schemaVersion="1">
+    <!-- Farm supply -->
+    <production id="FS25_LimeProduction:LimeProduction.xml" purchasePrice="100000">
+        <recipe id="Lime" cyclesPerHour="1">
+            <input fillType="STONE" amount="300"/>
+            <output fillType="LIME" amount="3000"/>
+        </recipe>
+    </production>
+    <production id="FS25_fertilizerProductionDS:xml/fertilizerProduction_DS.xml" purchasePrice="230000"/>
+    <production id="FS25_RH_LiquidFertillizerProduction:liquidFertilizerFactory.xml" purchasePrice="175000">
+        <recipe id="LiquidFertilizerFactory" cyclesPerHour="1"/>
+    </production>
+    <production id="FS25_SeedProductionFactory:seedProductionFactory.xml" purchasePrice="300000">
+        <recipe id="wheat_seeds_rush" enabled="false"/>
+        <recipe id="barley_seeds_rush" enabled="false"/>
+        <recipe id="oat_seeds_rush" enabled="false"/>
+        <recipe id="maize_seeds_rush" enabled="false"/>
+    </production>
+
+    <!-- Direct crop converters -->
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/cerealFactory/cerealFactory.xml" purchasePrice="995000"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/grainMill/grainMill.xml" purchasePrice="745000"/>
+    <production id="FS25_BaseGame:data/placeables/mapUS/grainFlourMillUS/grainFlourMillUS.xml" purchasePrice="745000"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsSmall/grainFlourMill/grainFlourMill.xml" purchasePrice="75000"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/grapeProcessingUnit/grapeProcessingUnit.xml" purchasePrice="525000"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsSmall/grapeProcessingPlant/grapeProcessingPlant.xml" purchasePrice="55000"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/oilMill/oilMill.xml" purchasePrice="515000"/>
+    <production id="FS25_BaseGame:data/placeables/mapUS/oilPlantUS/oilPlantUS.xml" purchasePrice="515000"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsSmall/oilPlant/oilPlant.xml" purchasePrice="50000"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/spinnery/spinnery.xml" purchasePrice="1735000"/>
+    <production id="FS25_BaseGame:data/placeables/mapEU/spinnery/spinneryPlaceable.xml" purchasePrice="1735000"/>
+    <production id="FS25_BaseGame:data/placeables/mapUS/spinneryUS/spinneryUS.xml" purchasePrice="1735000"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsSmall/spinnery/spinnery.xml" purchasePrice="175000"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/sugarMill/sugarMill.xml" purchasePrice="530000"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsSmall/sugarMill/sugarMill.xml" purchasePrice="55000"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsSmall/cannedPackagedFactory/cannedPackagedFactory.xml" purchasePrice="175000"/>
+    <production id="FS25_BaseGame:data/placeables/mapEU/preservedFoodFactory/preservedFoodFactoryPlaceable.xml" purchasePrice="1770000"/>
+    <production id="FS25_BaseGame:data/placeables/mapUS/cannedPackagedFactoryUS/cannedPackagedFactoryUS.xml" purchasePrice="1770000"/>
+    <production id="FS25_BaseGame:data/placeables/mapEU/potatoProcessingPlant/potatoProcessingPlantPlaceable.xml" purchasePrice="650000"/>
+    <production id="FS25_BaseGame:data/placeables/mapEU/soupFactory/soupFactoryPlaceable.xml" purchasePrice="805000"/>
+    <production id="FS25_BaseGame:data/placeables/mapUS/ropemakerUS/ropeMakerUS.xml" purchasePrice="2325000"/>
+
+    <!-- Downstream food and animal production -->
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/bakery/bakery.xml" purchasePrice="535000"/>
+    <production id="FS25_BaseGame:data/placeables/mapEU/bakery/bakery.xml" purchasePrice="535000"/>
+    <production id="FS25_BaseGame:data/placeables/mapUS/bakeryUS/bakeryUS.xml" purchasePrice="535000"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsSmall/bakery/bakery.xml" purchasePrice="55000"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/dairy/dairy.xml" purchasePrice="610000"/>
+    <production id="FS25_BaseGame:data/placeables/mapEU/dairy/dairyPlaceable.xml" purchasePrice="610000"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsSmall/dairy/dairy.xml" purchasePrice="60000"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/tailorShop/tailorShop.xml" purchasePrice="2455000"/>
+    <production id="FS25_BaseGame:data/placeables/mapUS/tailorUS/tailorUS.xml" purchasePrice="2455000"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsSmall/tailorShop/tailorShop.xml" purchasePrice="245000"/>
+
+    <!-- American Silos Production Pack: common recipe set and tier rates. -->
+    <production id="FS25_AmericanSilosProductionPack:silos/staveSiloSmall.xml" purchasePrice="302500">
+        <recipe id="hay" cyclesPerHour="4000"/>
+        <recipe id="chaffSilage" cyclesPerHour="4000"/>
+        <recipe id="grassSilage" cyclesPerHour="4000"/>
+        <recipe id="haySilage" cyclesPerHour="4000"/>
+        <recipe id="strawSilage" cyclesPerHour="4000"/>
+        <recipe id="Pigfood" cyclesPerHour="1.5"/>
+        <recipe id="forage mixer" cyclesPerHour="2.5"/>
+    </production>
+    <production id="FS25_AmericanSilosProductionPack:silos/steelSiloSmall.xml" purchasePrice="302500">
+        <recipe id="hay" cyclesPerHour="4000"/>
+        <recipe id="chaffSilage" cyclesPerHour="4000"/>
+        <recipe id="grassSilage" cyclesPerHour="4000"/>
+        <recipe id="haySilage" cyclesPerHour="4000"/>
+        <recipe id="strawSilage" cyclesPerHour="4000"/>
+        <recipe id="Pigfood" cyclesPerHour="1.5"/>
+        <recipe id="forage mixer" cyclesPerHour="2.5"/>
+    </production>
+    <production id="FS25_AmericanSilosProductionPack:silos/staveSiloLarge.xml" purchasePrice="403000">
+        <recipe id="hay" cyclesPerHour="5000"/>
+        <recipe id="chaffSilage" cyclesPerHour="5000"/>
+        <recipe id="grassSilage" cyclesPerHour="5000"/>
+        <recipe id="haySilage" cyclesPerHour="5000"/>
+        <recipe id="strawSilage" cyclesPerHour="5000"/>
+        <recipe id="Pigfood" cyclesPerHour="2"/>
+        <recipe id="forage mixer" cyclesPerHour="3.5"/>
+    </production>
+    <production id="FS25_AmericanSilosProductionPack:silos/steelSiloLarge.xml" purchasePrice="403000">
+        <recipe id="hay" cyclesPerHour="5000"/>
+        <recipe id="chaffSilage" cyclesPerHour="5000"/>
+        <recipe id="grassSilage" cyclesPerHour="5000"/>
+        <recipe id="haySilage" cyclesPerHour="5000"/>
+        <recipe id="strawSilage" cyclesPerHour="5000"/>
+        <recipe id="Pigfood" cyclesPerHour="2"/>
+        <recipe id="forage mixer" cyclesPerHour="3.5"/>
+    </production>
+</productionPolicy>

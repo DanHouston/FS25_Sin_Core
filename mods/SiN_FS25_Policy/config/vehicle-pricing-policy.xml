@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Base game is never matched. For third-party motor vehicles:
+     effective base = zero-surcharge engine HP * category rate + max engine surcharge.
+     The max surcharge is included once because FS25 multiplayer treats vehicle
+     configuration changes as free. Unsupported categories fail closed. -->
+<vehiclePricingPolicy schemaVersion="1" version="0.1.0">
+    <category name="tractorsS" dollarsPerHp="846"/>
+    <category name="tractorsM" dollarsPerHp="818"/>
+    <category name="tractorsL" dollarsPerHp="841"/>
+    <category name="trucks" dollarsPerHp="240" maxPrice="250000"/>
+    <category name="cars" dollarsPerHp="180" maxPrice="70000"/>
+    <category name="motorcycles" dollarsPerHp="270"/>
+</vehiclePricingPolicy>

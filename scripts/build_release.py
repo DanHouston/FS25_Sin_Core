@@ -21,7 +21,7 @@ AGENT_FILES = ("fs25_network_core/__init__.py", "fs25_network_core/agent.py")
 MOD_ASSET = "FS25_SiN_Server.zip"
 CROP_MOD_ASSET = "SiN_FS25_Crop_Settings.zip"
 CONTRACTS_MOD_ASSET = "SiN_FS25_Contracts.zip"
-PRODUCTION_POLICY_MOD_ASSET = "SiN_FS25_ProductionPolicy.zip"
+POLICY_MOD_ASSET = "SiN_FS25_Policy.zip"
 CLIENT_UPDATER_ASSET = "Update-SiN-Client.ps1"
 AGENT_RESTART_ASSET = "Restart-SiN-Agent.ps1"
 MODPACK_PUBLISHER_ASSET = "Publish-SiN-Modpack.ps1"
@@ -162,6 +162,61 @@ def build_production_policy_mod(destination):
                 validate_fs25_lua_source(archive.read(name), name)
 
 
+def build_vehicle_pricing_policy_mod(destination):
+    """Build the standalone third-party motor-vehicle price policy mod."""
+    source = ROOT / "mods" / "SiN_FS25_Vehicle_Pricing_Policy"
+    descriptor = source / "modDesc.xml"
+    import xml.etree.ElementTree as ET
+    descriptor_xml = ET.parse(descriptor)
+    icon_name = descriptor_xml.findtext("iconFilename")
+    source_names = [node.get("filename") for node in descriptor_xml.findall("./extraSourceFiles/sourceFile")]
+    if icon_name != "icon_vehicle_pricing_policy.dds" or not (source / icon_name).is_file():
+        raise ValueError("SiN_FS25_Vehicle_Pricing_Policy mod descriptor/icon is invalid")
+    if source_names != ["scripts/SiNVehiclePricingPolicy.lua"]:
+        raise ValueError("SiN_FS25_Vehicle_Pricing_Policy descriptor has unexpected source files")
+    config_name = "config/vehicle-pricing-policy.xml"
+    names_to_package = ["modDesc.xml", *source_names, config_name, icon_name]
+    for name in names_to_package:
+        if not (source / name).is_file():
+            raise ValueError(f"SiN_FS25_Vehicle_Pricing_Policy source is missing: {name}")
+    for lua_path in source.rglob("*.lua"):
+        validate_fs25_lua_source(lua_path.read_bytes(), str(lua_path.relative_to(ROOT)))
+    zip_files(destination, [(name, source / name) for name in names_to_package])
+    with ZipFile(destination) as archive:
+        if set(archive.namelist()) != set(names_to_package):
+            raise ValueError("SiN_FS25_Vehicle_Pricing_Policy ZIP does not match its descriptor")
+        ET.fromstring(archive.read(config_name))
+        validate_fs25_lua_source(archive.read("scripts/SiNVehiclePricingPolicy.lua"), "scripts/SiNVehiclePricingPolicy.lua")
+
+
+def build_policy_mod(destination):
+    """Build the modular production + vehicle policy mod."""
+    source = ROOT / "mods" / "SiN_FS25_Policy"
+    descriptor = source / "modDesc.xml"
+    import xml.etree.ElementTree as ET
+    descriptor_xml = ET.parse(descriptor)
+    icon_name = descriptor_xml.findtext("iconFilename")
+    source_names = [node.get("filename") for node in descriptor_xml.findall("./extraSourceFiles/sourceFile")]
+    config_names = ["config/production-policy.xml", "config/construction-policy.xml", "config/vehicle-pricing-policy.xml"]
+    expected_sources = ["scripts/SiNProductionPolicy.lua", "scripts/SiNVehiclePricingPolicy.lua"]
+    if icon_name != "icon_policy.dds" or not (source / icon_name).is_file() or source_names != expected_sources:
+        raise ValueError("SiN_FS25_Policy descriptor is invalid")
+    names_to_package = ["modDesc.xml", *source_names, *config_names, icon_name]
+    for name in names_to_package:
+        if not (source / name).is_file():
+            raise ValueError(f"SiN_FS25_Policy source is missing: {name}")
+    for lua_path in source.rglob("*.lua"):
+        validate_fs25_lua_source(lua_path.read_bytes(), str(lua_path.relative_to(ROOT)))
+    zip_files(destination, [(name, source / name) for name in names_to_package])
+    with ZipFile(destination) as archive:
+        if set(archive.namelist()) != set(names_to_package):
+            raise ValueError("SiN_FS25_Policy ZIP does not match its descriptor")
+        for config_name in config_names:
+            ET.fromstring(archive.read(config_name))
+        for source_name in source_names:
+            validate_fs25_lua_source(archive.read(source_name), source_name)
+
+
 def build_agent(destination):
     files = [(name, ROOT / name) for name in AGENT_FILES]
     zip_files(destination, files)
@@ -201,12 +256,12 @@ def build(version, output):
     mod = output / MOD_ASSET
     crop_mod = output / CROP_MOD_ASSET
     contracts_mod = output / CONTRACTS_MOD_ASSET
-    production_policy_mod = output / PRODUCTION_POLICY_MOD_ASSET
+    policy_mod = output / POLICY_MOD_ASSET
     build_agent(agent)
     build_mod(mod)
     build_crop_mod(crop_mod)
     build_contracts_mod(contracts_mod)
-    build_production_policy_mod(production_policy_mod)
+    build_policy_mod(policy_mod)
     updater = output / "Update-SiN.ps1"
     shutil.copy2(ROOT / "scripts" / "Update-SiN.ps1", updater)
     client_updater = output / CLIENT_UPDATER_ASSET
@@ -230,7 +285,7 @@ def build(version, output):
         "server_sha256": sha256(mod),
         "crop_settings_sha256": sha256(crop_mod),
         "contracts_sha256": sha256(contracts_mod),
-        "production_policy_sha256": sha256(production_policy_mod),
+        "policy_sha256": sha256(policy_mod),
         "updater_sha256": sha256(updater),
         "client_updater_sha256": sha256(client_updater),
         "agent_restart_sha256": sha256(agent_restart),
@@ -248,7 +303,7 @@ def build(version, output):
         "github_run_id": os.environ.get("GITHUB_RUN_ID"),
     }
     (output / "build-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    checksummed = (agent, mod, crop_mod, contracts_mod, production_policy_mod, updater, client_updater, agent_restart, modpack_publisher, campaign_report, live_manifest)
+    checksummed = (agent, mod, crop_mod, contracts_mod, policy_mod, updater, client_updater, agent_restart, modpack_publisher, campaign_report, live_manifest)
     (output / "SHA256SUMS.txt").write_text(
         "".join(f"{sha256(path)}  {path.name}\n" for path in checksummed), encoding="utf-8")
     validate_release_directory(output, expected_version=version)

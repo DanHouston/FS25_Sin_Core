@@ -1,6 +1,6 @@
-# SiN FS25 Production Policy
+# Production module — SiN FS25 Policy
 
-`SiN_FS25_ProductionPolicy` is a standalone runtime policy mod. It does not
+The production module in `SiN_FS25_Policy` is a standalone runtime policy module. It does not
 alter map files, saves, or third-party ZIPs. The policy identifies explicitly
 named production store items. It currently applies the approved SiN
 purchase-price plan to farm-supply, direct crop, downstream food/animal, and

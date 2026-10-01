@@ -111,23 +111,91 @@ does not infer a width or fabricate an estimate.
 The server-side observer starts a bounded batch of up to three native
 `MissionManager` generation cycles when fewer than three `CREATED` offers are
 available. The same batch policy refills any board below nine offers. Because
-native generation is asynchronous, requests within a batch are spaced by ten
-seconds and the retry window starts from the latest successful request; this
-prevents a burst of calls before FS25 has registered the previous offer. A
+native generation is asynchronous, requests within a batch are normally spaced
+by ten seconds; the emergency three-cycle batch below three offers is spaced by
+one second. The retry window starts from the logical batch start, preventing a
+burst of calls before FS25 has registered the previous offer. A
 batch stops as soon as nine offers are visible, or earlier on FS25's mission
-cap/native generation failure. The log emits one line per logical batch rather
-than one line per native cycle. The mod never constructs, registers, rewards,
+cap/native generation failure. Batch-start diagnostics are bounded to one line
+per minute. The mod never constructs, registers, rewards,
 or persists a custom mission. FS25 remains authoritative for
 `tryGenerateMission`, field validation, vehicle groups, reward calculation,
 mission caps, and save state.
 
-For a due refill only, the native `generationTimer` cooldown is expired and
-`getCanStartNewMissionGeneration()` is checked again. An in-flight cycle, total
-mission cap, or another mod's rejection still blocks the request. The old timer
-is restored on rejection. Without this override, repeated refill requests waited
-on FS25's original cooldown, so the target of nine was not achieved promptly.
+Mission generation and lifecycle observer wrappers are installed only on the
+authoritative server. Multiplayer clients retain only the read-only contract
+details presentation hook; they never wrap native `MissionManager:update` or
+`MissionManager:startMission`, preserving the vanilla Borrow Items/Accept
+input path.
+
+For every due refill, the native gate is checked before `MissionManager:update`.
+When the only blocking condition is the native cooldown, the mod temporarily
+expires that timer and starts the native generation cycle before entering the
+native update. FS25 then performs its normal validation and registration while
+the cycle is in flight; the timer is restored if the native call rejects. The
+mod never generates or registers missions itself, and never requests a cycle
+after native update/validation has completed. An in-flight cycle, total mission
+cap, or another native rejection still blocks the request.
 Three cycles are attempts, not three guaranteed offers: FS25 can find no eligible
-work. Below nine, bounded batches continue; at nine, the native timer is untouched.
+work. Below nine, bounded batches continue; at nine, no request is made. While
+fewer than three offers remain, the three cycle attempts are spaced one second
+apart; refilling from three through eight remains deliberately paced at ten
+seconds per cycle.
+
+If a native generation cycle finishes without registering an offer, the
+authoritative server logs a bounded `native generation completed without offer`
+diagnostic with the current period and the count of exhausted cycles. This
+means FS25 found no eligible native mission for the current save/month; it does
+not mean a client failed to receive an existing offer.
+
+### Controlled native field-work recovery
+
+When fewer than three offers remain **and three consecutive native generation
+cycles exhaust without an offer**, the authoritative server may prepare up to
+three NPC fields for ordinary native field work. This is a supply recovery
+layer, not a custom mission system: it queues the same native
+`FieldState:createFieldUpdateTask()` / `g_fieldManager:addFieldUpdateTask()`
+path FS25 uses for its own field updates, then waits for the normal native
+`MissionManager` cycle to select, validate, register, equip, price and pay a
+contract.
+
+The rotating recovery mix is:
+
+- herbicide/weeding: a growing, non-mature, weed-capable NPC crop receives a
+  valid weed state;
+- fertilizing/spraying: a growing, non-mature NPC crop has its fertilizer
+  layer reduced by one native level so fertilizing work is possible;
+- stone picking: a fallow NPC field receives a low stone level;
+- cultivating: a fallow NPC field is put into native stubble ground state;
+- plowing: a fallow NPC field has its plow counter reset.
+
+Only the target layer changes. Each queued task starts from the field's current
+native `FieldState`, retaining fruit type, growth state, lime and every other
+unrelated layer. The layer is never applied to player-owned fields, fields with
+an offered/active native mission, fields with a pending native update,
+mission-disabled fields, mature crops, or a field recovered during the previous
+hour. Recovery is capped at three fields per pass and at one pass per minute.
+If FS25 rejects the resulting field state, no offer is forced into the board.
+
+The server writes `native supply prepared` records with source layers, followed
+by a bounded recovery summary. `sinContractSupply` is a read-only dedicated
+server console command that reports the currently safe candidate count by work
+type and exclusion reason; it never queues an update task.
+
+For a disposable single-player or dedicated-server test save,
+`sinContractSupplyTest <herbicide|fertilize|stonePick|cultivate|plow>` queues
+exactly one safe NPC field update for the named work type without waiting for a
+shortage. It uses the same candidate checks and update path as automatic
+recovery, honors the per-field cooldown, and never creates a mission directly.
+After FS25 applies the update, normal native generation must still choose and
+validate the resulting offer.
+
+`sinContractSupplyTest recovery` is the full-pass simulation: it invokes the
+same rotating, maximum-three-field automatic recovery routine without waiting
+for the low-offer/three-empty-cycle gate. It is useful for validating automatic
+selection and queueing in a disposable save with a full contract board; it does
+not make every field ineligible and does not force a tenth offer above the
+nine-offer target.
 
 ## Live diagnostics
 

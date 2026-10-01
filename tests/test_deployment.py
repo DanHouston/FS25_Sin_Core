@@ -47,7 +47,7 @@ class DeploymentPackagingTests(unittest.TestCase):
             self.assertTrue((output / "FS25_SiN_Server.zip").is_file())
             self.assertTrue((output / "SiN_FS25_Crop_Settings.zip").is_file())
             self.assertTrue((output / "SiN_FS25_Contracts.zip").is_file())
-            self.assertTrue((output / "SiN_FS25_ProductionPolicy.zip").is_file())
+            self.assertTrue((output / "SiN_FS25_Policy.zip").is_file())
             self.assertTrue((output / "SHA256SUMS.txt").is_file())
             self.assertTrue(updater.is_file())
             self.assertTrue(client.is_file())
@@ -62,7 +62,7 @@ class DeploymentPackagingTests(unittest.TestCase):
             self.assertIn("FS25_SiN_Server.zip", sums)
             self.assertIn("SiN_FS25_Crop_Settings.zip", sums)
             self.assertIn("SiN_FS25_Contracts.zip", sums)
-            self.assertIn("SiN_FS25_ProductionPolicy.zip", sums)
+            self.assertIn("SiN_FS25_Policy.zip", sums)
             self.assertIn("Update-SiN.ps1", sums)
             self.assertIn("Update-SiN-Client.ps1", sums)
             self.assertIn("Restart-SiN-Agent.ps1", sums)
@@ -71,7 +71,7 @@ class DeploymentPackagingTests(unittest.TestCase):
                 line.split(None, 1)[1]: line.split(None, 1)[0]
                 for line in sums.splitlines() if line.strip()
             }
-            for asset in ("sin-agent.zip", "FS25_SiN_Server.zip", "SiN_FS25_Crop_Settings.zip", "SiN_FS25_Contracts.zip", "SiN_FS25_ProductionPolicy.zip", "Update-SiN.ps1", "Update-SiN-Client.ps1", "Restart-SiN-Agent.ps1", "Publish-SiN-Modpack.ps1"):
+            for asset in ("sin-agent.zip", "FS25_SiN_Server.zip", "SiN_FS25_Crop_Settings.zip", "SiN_FS25_Contracts.zip", "SiN_FS25_Policy.zip", "Update-SiN.ps1", "Update-SiN-Client.ps1", "Restart-SiN-Agent.ps1", "Publish-SiN-Modpack.ps1"):
                 self.assertEqual(hashlib.sha256((output / asset).read_bytes()).hexdigest(),
                                  checksum_entries[asset])
             with ZipFile(output / "FS25_SiN_Server.zip") as archive:
@@ -97,11 +97,15 @@ class DeploymentPackagingTests(unittest.TestCase):
                 contract_source = archive.read("scripts/SiNContracts.lua").decode("utf-8")
                 self.assertIn("MissionManager", contract_source)
                 self.assertNotIn("FS25SiNServer", contract_source)
-            with ZipFile(output / "SiN_FS25_ProductionPolicy.zip") as archive:
+            with ZipFile(output / "SiN_FS25_Policy.zip") as archive:
                 self.assertEqual(set(archive.namelist()), {
-                    "modDesc.xml", "scripts/SiNProductionPolicy.lua", "config/production-policy.xml", "config/construction-policy.xml", "icon_production_policy.dds"
+                    "modDesc.xml", "scripts/SiNProductionPolicy.lua", "scripts/SiNVehiclePricingPolicy.lua", "config/production-policy.xml", "config/construction-policy.xml", "config/vehicle-pricing-policy.xml", "icon_policy.dds"
                 })
-                self.assertIn("EconomyManager.getBuyPrice", archive.read("scripts/SiNProductionPolicy.lua").decode("utf-8"))
+                production_source = archive.read("scripts/SiNProductionPolicy.lua").decode("utf-8")
+                self.assertIn("Do not wrap EconomyManager:getBuyPrice", production_source)
+                self.assertNotIn("Utils.overwrittenFunction(EconomyManager.getBuyPrice", production_source)
+                vehicle_source = archive.read("scripts/SiNVehiclePricingPolicy.lua").decode("utf-8")
+                self.assertIn("Do not wrap EconomyManager:getBuyPrice", vehicle_source)
             self.assertFalse((output / "FS25_SiN_NetworkLocal.zip").exists())
             self.assertEqual(
                 hashlib.sha256((output / "FS25_SiN_Server.zip").read_bytes()).hexdigest(),
@@ -116,8 +120,8 @@ class DeploymentPackagingTests(unittest.TestCase):
                 manifest["contracts_sha256"],
             )
             self.assertEqual(
-                hashlib.sha256((output / "SiN_FS25_ProductionPolicy.zip").read_bytes()).hexdigest(),
-                manifest["production_policy_sha256"],
+                hashlib.sha256((output / "SiN_FS25_Policy.zip").read_bytes()).hexdigest(),
+                manifest["policy_sha256"],
             )
 
     def test_fs25_lua_gate_rejects_lua52_control_flow(self):

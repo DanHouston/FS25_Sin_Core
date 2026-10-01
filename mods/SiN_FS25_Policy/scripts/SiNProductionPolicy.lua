@@ -14,7 +14,7 @@ SiNProductionPolicy = {
 local MOD_DIRECTORY = g_currentModDirectory or ""
 local POLICY_PATH = MOD_DIRECTORY .. "config/production-policy.xml"
 local CONSTRUCTION_POLICY_PATH = MOD_DIRECTORY .. "config/construction-policy.xml"
-local EXPORT_DIRECTORY_NAME = "SiN_FS25_ProductionPolicy"
+local EXPORT_DIRECTORY_NAME = "SiN_FS25_Policy"
 local EXPORT_FILE_NAME = "production-catalog.csv"
 local MAX_DIAGNOSTICS = 24
 

@@ -23,7 +23,7 @@ RELEASE_ASSETS = frozenset({
     "FS25_SiN_Server.zip",
     "SiN_FS25_Crop_Settings.zip",
     "SiN_FS25_Contracts.zip",
-    "SiN_FS25_ProductionPolicy.zip",
+    "SiN_FS25_Policy.zip",
     "integration-campaign.json",
     "live-validation-manifest.json",
     "Restart-SiN-Agent.ps1",
@@ -38,7 +38,7 @@ CHECKSUM_ASSETS = frozenset({
     "FS25_SiN_Server.zip",
     "SiN_FS25_Crop_Settings.zip",
     "SiN_FS25_Contracts.zip",
-    "SiN_FS25_ProductionPolicy.zip",
+    "SiN_FS25_Policy.zip",
     "Update-SiN.ps1",
     "Update-SiN-Client.ps1",
     "Restart-SiN-Agent.ps1",
@@ -182,30 +182,34 @@ def _validate_contracts_archive(path: Path) -> None:
         raise ReleaseValidationError("SiN_FS25_Contracts.zip is not a valid ZIP archive") from error
 
 
-def _validate_production_policy_archive(path: Path) -> None:
-    expected = {"modDesc.xml", "scripts/SiNProductionPolicy.lua", "config/production-policy.xml", "config/construction-policy.xml", "icon_production_policy.dds"}
+def _validate_policy_archive(path: Path) -> None:
+    expected = {"modDesc.xml", "scripts/SiNProductionPolicy.lua", "scripts/SiNVehiclePricingPolicy.lua", "config/production-policy.xml", "config/construction-policy.xml", "config/vehicle-pricing-policy.xml", "icon_policy.dds"}
     try:
         with ZipFile(path) as archive:
             names = set(_safe_archive_names(archive, path.name))
             if names != expected:
-                raise ReleaseValidationError("SiN_FS25_ProductionPolicy.zip has an unexpected layout")
+                raise ReleaseValidationError("SiN_FS25_Policy.zip has an unexpected layout")
             try:
                 descriptor = ElementTree.fromstring(archive.read("modDesc.xml"))
                 policy = ElementTree.fromstring(archive.read("config/production-policy.xml"))
                 construction_policy = ElementTree.fromstring(archive.read("config/construction-policy.xml"))
+                vehicle_policy = ElementTree.fromstring(archive.read("config/vehicle-pricing-policy.xml"))
             except (ValueError, ElementTree.ParseError) as error:
-                raise ReleaseValidationError("SiN_FS25_ProductionPolicy.zip has invalid XML") from error
-            if descriptor.get("descVersion") != "92" or descriptor.findtext("iconFilename") != "icon_production_policy.dds":
-                raise ReleaseValidationError("SiN_FS25_ProductionPolicy.zip has invalid modDesc.xml")
-            if [node.get("filename") for node in descriptor.findall("./extraSourceFiles/sourceFile")] != ["scripts/SiNProductionPolicy.lua"]:
-                raise ReleaseValidationError("SiN_FS25_ProductionPolicy.zip has unexpected source files")
+                raise ReleaseValidationError("SiN_FS25_Policy.zip has invalid XML") from error
+            if descriptor.get("descVersion") != "92" or descriptor.findtext("iconFilename") != "icon_policy.dds":
+                raise ReleaseValidationError("SiN_FS25_Policy.zip has invalid modDesc.xml")
+            if [node.get("filename") for node in descriptor.findall("./extraSourceFiles/sourceFile")] != ["scripts/SiNProductionPolicy.lua", "scripts/SiNVehiclePricingPolicy.lua"]:
+                raise ReleaseValidationError("SiN_FS25_Policy.zip has unexpected source files")
             if policy.tag != "productionPolicy" or policy.get("schemaVersion") != "1":
-                raise ReleaseValidationError("SiN_FS25_ProductionPolicy.zip has an invalid policy schema")
+                raise ReleaseValidationError("SiN_FS25_Policy.zip has an invalid production policy schema")
             if construction_policy.tag != "constructionPolicy" or construction_policy.get("schemaVersion") != "1":
-                raise ReleaseValidationError("SiN_FS25_ProductionPolicy.zip has an invalid construction policy schema")
+                raise ReleaseValidationError("SiN_FS25_Policy.zip has an invalid construction policy schema")
+            if vehicle_policy.tag != "vehiclePricingPolicy" or vehicle_policy.get("schemaVersion") != "1":
+                raise ReleaseValidationError("SiN_FS25_Policy.zip has an invalid vehicle policy schema")
             validate_fs25_lua_source(archive.read("scripts/SiNProductionPolicy.lua"), "scripts/SiNProductionPolicy.lua")
+            validate_fs25_lua_source(archive.read("scripts/SiNVehiclePricingPolicy.lua"), "scripts/SiNVehiclePricingPolicy.lua")
     except BadZipFile as error:
-        raise ReleaseValidationError("SiN_FS25_ProductionPolicy.zip is not a valid ZIP archive") from error
+        raise ReleaseValidationError("SiN_FS25_Policy.zip is not a valid ZIP archive") from error
 
 
 def validate_release_directory(root: str | Path, *, expected_version: str | None = None,
@@ -243,7 +247,7 @@ def validate_release_directory(root: str | Path, *, expected_version: str | None
         "FS25_SiN_Server.zip": "server_sha256",
         "SiN_FS25_Crop_Settings.zip": "crop_settings_sha256",
         "SiN_FS25_Contracts.zip": "contracts_sha256",
-        "SiN_FS25_ProductionPolicy.zip": "production_policy_sha256",
+        "SiN_FS25_Policy.zip": "policy_sha256",
         "Update-SiN.ps1": "updater_sha256",
         "Update-SiN-Client.ps1": "client_updater_sha256",
         "Restart-SiN-Agent.ps1": "agent_restart_sha256",
@@ -268,5 +272,5 @@ def validate_release_directory(root: str | Path, *, expected_version: str | None
     _validate_server_archive(root / "FS25_SiN_Server.zip")
     _validate_crop_archive(root / "SiN_FS25_Crop_Settings.zip")
     _validate_contracts_archive(root / "SiN_FS25_Contracts.zip")
-    _validate_production_policy_archive(root / "SiN_FS25_ProductionPolicy.zip")
+    _validate_policy_archive(root / "SiN_FS25_Policy.zip")
     return manifest

@@ -5,6 +5,7 @@ SiNContracts = {}
 local MOD_NAME = "[SiN Contracts] "
 local MAX_RECORDS = 128
 local MAX_EQUIPMENT = 16
+local MAX_VALIDATION_FAILURE_DIAGNOSTICS = 16
 local EFFICIENCY = 0.70
 local POLL_INTERVAL_MS = 1000
 local LOW_AVAILABLE_THRESHOLD = 3
@@ -24,7 +25,22 @@ local REFILL_RETRY_INTERVAL_MS = 10 * 1000
 -- leaves the board below target.  Space native requests by one generation
 -- interval even when the manager does not expose a reliable in-flight flag.
 local GENERATION_REQUEST_INTERVAL_MS = 10 * 1000
+-- An empty (or nearly empty) board is player-visible immediately after a
+-- native period rollover. Native generation itself remains asynchronous and
+-- authoritative; only the spacing between the three bounded attempts is
+-- shortened so recovery does not sit empty for tens of seconds.
+local EMERGENCY_GENERATION_REQUEST_INTERVAL_MS = 1000
 local GENERATION_BATCH_SIZE = 3
+-- Supply recovery is deliberately a last resort.  A native generation pass is
+-- allowed to exhaust three times before the server prepares a few *NPC* fields
+-- for ordinary FS25 work.  It never creates a Mission or changes a player
+-- field.  The native MissionManager still selects, validates and rewards any
+-- resulting offer.
+local EMPTY_CYCLES_BEFORE_SUPPLY_RECOVERY = 3
+local SUPPLY_RECOVERY_COOLDOWN_MS = 60 * 1000
+local SUPPLY_RECOVERY_MAX_FIELDS = 3
+local SUPPLY_FIELD_COOLDOWN_MS = 60 * 60 * 1000
+local SUPPLY_ACTIONS = {"herbicide", "fertilize", "stonePick", "cultivate", "plow"}
 
 local function logInfo(message, ...)
     if Logging ~= nil and Logging.info ~= nil then
@@ -235,10 +251,20 @@ local function storeItemSpecs(item)
     if filename == nil or filename == "" then return nil end
     local storeItem = call(g_storeManager, "getItemByXMLFilename", filename)
     if type(storeItem) ~= "table" then return nil end
+
+    -- getItemByXMLFilename returns the StoreManager's canonical descriptor,
+    -- which is also owned by the vehicle shop.  Loading optional specs onto
+    -- that shared object from a contract-details query can race the shop's
+    -- asynchronous preview/configuration loading.  Work from a shallow copy:
+    -- the descriptor's nested values are read-only here and loadSpecsFromXML
+    -- only needs the copied XML identity plus its own specs slot.
+    local inspectionItem = {}
+    for key, value in pairs(storeItem) do inspectionItem[key] = value end
+    setmetatable(inspectionItem, getmetatable(storeItem))
     if StoreItemUtil ~= nil and type(StoreItemUtil.loadSpecsFromXML) == "function" then
-        pcall(StoreItemUtil.loadSpecsFromXML, storeItem)
+        pcall(StoreItemUtil.loadSpecsFromXML, inspectionItem)
     end
-    return storeItem
+    return inspectionItem
 end
 
 local function equipmentValues(item)
@@ -539,8 +565,10 @@ function SiNContracts:maybeRequestGeneration(manager)
     -- at most one offer, so three cycles are the smallest deterministic refill
     -- that satisfies the policy without constructing missions ourselves.
     local batchActive = (self.generationBatchRemaining or 0) > 0
+    local requestInterval = emergency and EMERGENCY_GENERATION_REQUEST_INTERVAL_MS
+        or GENERATION_REQUEST_INTERVAL_MS
     local requestDue = self.lastGenerationRequestMs == nil
-        or now - self.lastGenerationRequestMs >= GENERATION_REQUEST_INTERVAL_MS
+        or now - self.lastGenerationRequestMs >= requestInterval
     if not requestDue then return end
     if not batchActive then
         if not emergency and not refillDue then return end
@@ -550,18 +578,11 @@ function SiNContracts:maybeRequestGeneration(manager)
         if emergency then self.lastLowGenerationMs = now end
     end
 
-    -- Our refill cadence replaces only the native cooldown, not its cap,
-    -- in-flight guard or field/mission eligibility. Recheck the native gate
-    -- after expiring the timer so other mods can still reject generation.
-    local previousTimer = number(fieldValue(manager, {"generationTimer"}))
+    -- This direct helper is retained for deterministic probes and callers
+    -- outside MissionManager:update. The live hook uses the pre-update path
+    -- below so generation remains inside FS25's native lifecycle.
     local nativeCanStart = call(manager, "getCanStartNewMissionGeneration")
-    local timerOverridden = nativeCanStart == false and previousTimer ~= nil and previousTimer >= 0
-    if timerOverridden then
-        manager.generationTimer = -1
-        nativeCanStart = call(manager, "getCanStartNewMissionGeneration")
-    end
     if nativeCanStart ~= true then
-        if timerOverridden then manager.generationTimer = previousTimer end
         local lastGateLog = self.lastGenerationGateLogMs
         if lastGateLog == nil or now - lastGateLog >= 60000 then
             self.lastGenerationGateLogMs = now
@@ -575,7 +596,6 @@ function SiNContracts:maybeRequestGeneration(manager)
     self.lastGenerationRequestMs = now
     local ok, accepted = pcall(manager.startMissionGeneration, manager)
     if not ok or accepted == false then
-        if timerOverridden then manager.generationTimer = previousTimer end
         -- Do not consume the remaining batch slot when the native API rejects
         -- the request; a later update can safely retry after its gate clears.
         logWarning("native replenishment request failed available=%d emergency=%s batchRemaining=%d",
@@ -597,6 +617,382 @@ function SiNContracts:maybeRequestGeneration(manager)
             emergency and LOW_AVAILABLE_THRESHOLD or REFILL_AVAILABLE_THRESHOLD,
             emergency and "low-availability" or "target-refill", GENERATION_BATCH_SIZE)
     end
+end
+
+-- Prepare a native generation cycle before MissionManager:update runs.  This
+-- preserves the fast refill policy without calling startMissionGeneration
+-- after native update/validation has completed (which can leave a newly
+-- registered field mission immediately removed on the following frame).
+function SiNContracts:prepareGenerationForNativeUpdate(manager)
+    if g_currentMission == nil or g_currentMission:getIsServer() ~= true or manager == nil then return nil end
+    local available, missions = self:availableMissionCount(manager)
+    if available >= REFILL_AVAILABLE_THRESHOLD then return nil end
+    local now = nowMs()
+    if now == nil then return nil end
+    if self.lastRefillPolicyMs == nil then self.lastRefillPolicyMs = now - REFILL_RETRY_INTERVAL_MS end
+    if fieldValue(manager, {"missionGenerationInProgress"}) == true then return nil end
+
+    local missionManagerClass = MissionManager or manager
+    local maximum = number(fieldValue(missionManagerClass, {"MAX_MISSIONS"}))
+    if maximum == nil then maximum = number(fieldValue(manager, {"MAX_MISSIONS"})) end
+    if maximum ~= nil then
+        local total = 0
+        for _, _ in pairs(missions) do total = total + 1 end
+        if total >= maximum then
+            self.generationBatchRemaining = 0
+            return nil
+        end
+    end
+
+    local emergency = available < LOW_AVAILABLE_THRESHOLD
+    local refillDue = now - self.lastRefillPolicyMs >= REFILL_RETRY_INTERVAL_MS
+    local lowRetryDue = self.lastLowGenerationMs == nil or now - self.lastLowGenerationMs >= LOW_RETRY_INTERVAL_MS
+    local batchActive = (self.generationBatchRemaining or 0) > 0
+    if not batchActive then
+        if not refillDue and (not emergency or not lowRetryDue) then return nil end
+        self.generationBatchRemaining = GENERATION_BATCH_SIZE
+        self.lastRefillPolicyMs = now
+        if emergency then self.lastLowGenerationMs = now end
+        self:logReplenishmentBatchStarted(now, available, emergency)
+    end
+
+    local requestInterval = emergency and EMERGENCY_GENERATION_REQUEST_INTERVAL_MS
+        or GENERATION_REQUEST_INTERVAL_MS
+    local requestDue = self.lastGenerationRequestMs == nil
+        or now - self.lastGenerationRequestMs >= requestInterval
+    if not requestDue then return nil end
+
+    local nativeCanStart = call(manager, "getCanStartNewMissionGeneration")
+    if nativeCanStart == true then
+        return {previousTimer = nil, armed = false}
+    end
+    local previousTimer = number(fieldValue(manager, {"generationTimer"}))
+    if nativeCanStart == false and previousTimer ~= nil and previousTimer >= 0 then
+        manager.generationTimer = -1
+        return {previousTimer = previousTimer, armed = true}
+    end
+    return nil
+end
+
+function SiNContracts:recordNativeGenerationStart(manager)
+    local now = nowMs()
+    self.lastGenerationRequestMs = now
+    self.lastRefillPolicyMs = now
+    self.generationBatchRemaining = math.max(0, (self.generationBatchRemaining or 1) - 1)
+end
+
+-- A replenishment request only starts FS25's asynchronous generator. It is
+-- not proof that a mission was created. Keep this operator signal bounded so
+-- an empty seasonal candidate pool does not flood a dedicated-server log.
+function SiNContracts:logReplenishmentBatchStarted(now, available, emergency)
+    self.replenishmentBatchStartsSinceLog = (self.replenishmentBatchStartsSinceLog or 0) + 1
+    local last = self.lastReplenishmentBatchLogMs
+    if last ~= nil and now - last < 60000 then return end
+    local batches = self.replenishmentBatchStartsSinceLog
+    self.replenishmentBatchStartsSinceLog = 0
+    self.lastReplenishmentBatchLogMs = now
+    logInfo("native replenishment batch started available=%d threshold=%d mode=%s batchSize=%d batches=%d",
+        available, emergency and LOW_AVAILABLE_THRESHOLD or REFILL_AVAILABLE_THRESHOLD,
+        emergency and "low-availability" or "target-refill", GENERATION_BATCH_SIZE, batches)
+end
+
+-- A native generation cycle may scan every mission type and end without an
+-- offer because the current save/month has no eligible field work. Capture
+-- that fact on the authoritative manager without guessing or creating a
+-- replacement mission. The log is intentionally bounded to one line/minute.
+function SiNContracts:noteNativeGenerationCompletion(manager, availableBefore, wasGenerating)
+    if wasGenerating ~= true or fieldValue(manager, {"missionGenerationInProgress"}) == true then return end
+    local availableAfter = self:availableMissionCount(manager)
+    if availableAfter > (availableBefore or 0) then
+        self.nativeGenerationEmptyCyclesForSupply = 0
+        return
+    end
+    local now = nowMs()
+    if now == nil then return end
+    self.nativeGenerationEmptyCyclesSinceLog = (self.nativeGenerationEmptyCyclesSinceLog or 0) + 1
+    -- This counter is separate from the bounded log counter below. The latter
+    -- resets after emitting one line per minute; recovery must still see three
+    -- consecutive empty native cycles during that minute.
+    self.nativeGenerationEmptyCyclesForSupply = (self.nativeGenerationEmptyCyclesForSupply or 0) + 1
+    -- The first recovery attempt is intentionally delayed until native FS25
+    -- has proven that its current field/month pool is empty.  This avoids
+    -- changing a field merely because registration or replication was slow.
+    if availableAfter < LOW_AVAILABLE_THRESHOLD
+        and self.nativeGenerationEmptyCyclesForSupply >= EMPTY_CYCLES_BEFORE_SUPPLY_RECOVERY then
+        self:maybePrepareNativeFieldSupply(manager, availableAfter, now)
+    end
+    local last = self.lastNativeGenerationEmptyLogMs
+    if last ~= nil and now - last < 60000 then return end
+    local environment = fieldValue(g_currentMission, {"environment"})
+    local period = fieldValue(environment, {"currentPeriod", "period"})
+    local cycles = self.nativeGenerationEmptyCyclesSinceLog
+    self.nativeGenerationEmptyCyclesSinceLog = 0
+    self.lastNativeGenerationEmptyLogMs = now
+    logInfo("native generation completed without offer available=%d exhaustedCycles=%d period=%s",
+        availableAfter, cycles, text(period) or "unavailable")
+end
+
+local function getFieldId(field)
+    return number(call(field, "getId")) or number(fieldValue(field, {"id"}))
+end
+
+local function fieldHasFruit(state)
+    if state == nil then return false end
+    local index = number(fieldValue(state, {"fruitTypeIndex"}))
+    if index == nil or index <= 0 then return false end
+    if FruitType ~= nil and index == number(FruitType.UNKNOWN) then return false end
+    return true
+end
+
+local function fieldIsMature(state)
+    if state == nil or not fieldHasFruit(state) then return false end
+    local fruit = g_fruitTypeManager ~= nil and call(g_fruitTypeManager, "getFruitTypeByIndex", state.fruitTypeIndex) or nil
+    local minimum = number(fieldValue(fruit, {"minHarvestingGrowthState"}))
+    local growth = number(fieldValue(state, {"growthState"})) or 0
+    return minimum ~= nil and growth >= minimum
+end
+
+function SiNContracts:getSupplyOccupiedFields(manager)
+    local occupied = {}
+    local _, missions = self:availableMissionCount(manager)
+    for _, mission in pairs(missions or {}) do
+        local field = call(mission, "getField") or fieldValue(mission, {"field"})
+        local id = getFieldId(field)
+        if id ~= nil then occupied[id] = true end
+    end
+    return occupied
+end
+
+function SiNContracts:getSupplyFieldCandidates(manager, now)
+    local candidates, excluded = {}, {owned = 0, occupied = 0, pending = 0, cooldown = 0, invalid = 0, disabled = 0}
+    local fieldManager = g_fieldManager
+    local occupied = self:getSupplyOccupiedFields(manager)
+    if fieldManager == nil or type(fieldManager.fields) ~= "table" then return candidates, excluded end
+    for _, field in pairs(fieldManager.fields) do
+        local id = getFieldId(field)
+        local state = call(field, "getFieldState")
+        local reason = nil
+        if id == nil or field == nil or field.isMissionAllowed ~= true then
+            reason = "disabled"
+        elseif call(field, "getHasOwner") == true then
+            reason = "owned"
+        elseif occupied[id] == true or field.currentMission ~= nil then
+            reason = "occupied"
+        elseif fieldManager.pendingFieldUpdatesMapping ~= nil and fieldManager.pendingFieldUpdatesMapping[field] == true then
+            reason = "pending"
+        elseif self.supplyAdjustedFields[id] ~= nil
+            and now - (self.supplyAdjustedFields[id].atMs or now) < SUPPLY_FIELD_COOLDOWN_MS then
+            reason = "cooldown"
+        elseif state == nil or state.isValid ~= true then
+            reason = "invalid"
+        end
+        if reason ~= nil then
+            excluded[reason] = (excluded[reason] or 0) + 1
+        else
+            table.insert(candidates, {field = field, id = id, state = state})
+        end
+    end
+    table.sort(candidates, function(a, b) return a.id < b.id end)
+    return candidates, excluded
+end
+
+function SiNContracts:getSupplyActionReason(candidate, action)
+    local state = candidate.state
+    local hasFruit = fieldHasFruit(state)
+    local mature = fieldIsMature(state)
+    if action == "herbicide" then
+        local fruit = hasFruit and g_fruitTypeManager ~= nil
+            and call(g_fruitTypeManager, "getFruitTypeByIndex", state.fruitTypeIndex) or nil
+        if not hasFruit or mature or fieldValue(fruit, {"plantsWeed"}) ~= true then return "not-growing-weedable-crop" end
+        if (number(fieldValue(state, {"weedState"})) or 0) > 0 then return "already-weedy" end
+        return nil
+    elseif action == "fertilize" then
+        if not hasFruit or mature then return "not-growing-crop" end
+        local maximum = number(fieldValue(g_fieldManager, {"sprayLevelMaxValue"}))
+        if maximum == nil or maximum <= 0 then return "spray-level-unavailable" end
+        if (number(fieldValue(state, {"sprayLevel"})) or 0) <= 0 then return "already-needs-fertilizer" end
+        return nil
+    elseif action == "stonePick" then
+        if hasFruit then return "crop-present" end
+        if (number(fieldValue(state, {"stoneLevel"})) or 0) > 0 then return "already-stony" end
+        return nil
+    elseif action == "cultivate" then
+        if hasFruit then return "crop-present" end
+        if FieldGroundType == nil or FieldGroundType.STUBBLE == nil then return "stubble-ground-unavailable" end
+        if state.groundType == FieldGroundType.STUBBLE then return "already-stubble" end
+        return nil
+    elseif action == "plow" then
+        if hasFruit then return "crop-present" end
+        local maximum = number(fieldValue(g_fieldManager, {"plowLevelMaxValue"}))
+        if maximum == nil or maximum <= 0 then return "plow-level-unavailable" end
+        if (number(fieldValue(state, {"plowLevel"})) or 0) <= 0 then return "already-needs-plowing" end
+        return nil
+    end
+    return "unknown-action"
+end
+
+function SiNContracts:queueSupplyFieldUpdate(candidate, action)
+    local state, field = candidate.state, candidate.field
+    local task = call(state, "createFieldUpdateTask")
+    if task == nil or type(task.setField) ~= "function" then return false, "field-update-task-unavailable" end
+    task:setField(field)
+    local changed = false
+    if action == "herbicide" and type(task.setWeedState) == "function" then
+        task:setWeedState(3)
+        changed = true
+    elseif action == "fertilize" and type(task.setSprayLevel) == "function" then
+        -- Remove only one native fertilizer layer. A fully reset field would
+        -- manufacture more work than is needed to make a normal fertilize
+        -- mission eligible. The current spray type remains intact.
+        task:setSprayLevel(math.max(0, (number(fieldValue(state, {"sprayLevel"})) or 1) - 1))
+        changed = true
+    elseif action == "stonePick" and type(task.setStoneLevel) == "function" then
+        task:setStoneLevel(1)
+        changed = true
+    elseif action == "cultivate" and type(task.setGroundType) == "function" then
+        task:setGroundType(FieldGroundType.STUBBLE)
+        changed = true
+    elseif action == "plow" and type(task.setPlowLevel) == "function" then
+        task:setPlowLevel(0)
+        changed = true
+    end
+    if not changed or g_fieldManager == nil or type(g_fieldManager.addFieldUpdateTask) ~= "function" then
+        return false, changed and "field-manager-queue-unavailable" or "action-setter-unavailable"
+    end
+    local ok = pcall(g_fieldManager.addFieldUpdateTask, g_fieldManager, task)
+    return ok, ok and nil or "field-manager-queue-failed"
+end
+
+-- Prepare up to three different unowned fields.  The task begins with the
+-- field's native FieldState, so every non-target layer (fruit, growth, lime,
+-- plow, ground, etc.) is retained.  The only exceptions are the explicitly
+-- requested layer for this ordinary native task.
+function SiNContracts:prepareNativeFieldSupply(manager, available, now, source)
+    if g_currentMission == nil or g_currentMission:getIsServer() ~= true then return 0 end
+    -- FieldManager is always present in a live map. Treat its absence as an
+    -- unsupported runtime rather than producing a recovery diagnostic (and do
+    -- not queue an update) in partial/headless test environments.
+    if g_fieldManager == nil or type(g_fieldManager.fields) ~= "table" then return 0 end
+    local candidates, excluded = self:getSupplyFieldCandidates(manager, now)
+    local prepared, used = 0, {}
+    local actionCount = #SUPPLY_ACTIONS
+    local first = self.supplyActionCursor or 1
+    for offset = 0, actionCount - 1 do
+        if prepared >= SUPPLY_RECOVERY_MAX_FIELDS then break end
+        local actionIndex = ((first + offset - 1) % actionCount) + 1
+        local action = SUPPLY_ACTIONS[actionIndex]
+        for _, candidate in ipairs(candidates) do
+            if prepared >= SUPPLY_RECOVERY_MAX_FIELDS then break end
+            if used[candidate.id] ~= true and self:getSupplyActionReason(candidate, action) == nil then
+                local ok, reason = self:queueSupplyFieldUpdate(candidate, action)
+                if ok then
+                    used[candidate.id] = true
+                    prepared = prepared + 1
+                    self.supplyAdjustedFields[candidate.id] = {atMs = now, action = action}
+                    logInfo("native supply prepared field=%d action=%s sourceFruit=%s sourceGrowth=%s sourceWeed=%s sourceSpray=%s sourceStone=%s sourcePlow=%s",
+                        candidate.id, action, tostring(candidate.state.fruitTypeIndex), tostring(candidate.state.growthState),
+                        tostring(candidate.state.weedState), tostring(candidate.state.sprayLevel),
+                        tostring(candidate.state.stoneLevel), tostring(candidate.state.plowLevel))
+                else
+                    logWarning("native supply skipped field=%d action=%s reason=%s", candidate.id, action, tostring(reason))
+                end
+            end
+        end
+    end
+    self.supplyActionCursor = ((first + prepared - 1) % actionCount) + 1
+    if prepared > 0 then
+        -- Give FieldManager a normal update tick to apply its queued tasks.
+        -- The existing native refill loop will then re-run MissionManager; no
+        -- mission is manufactured or force-registered here.
+        self.nativeGenerationEmptyCyclesSinceLog = 0
+        self.nativeGenerationEmptyCyclesForSupply = 0
+        logInfo("native supply recovery queued source=%s fields=%d available=%d candidates=%d excluded=owned:%d occupied:%d pending:%d cooldown:%d invalid:%d disabled:%d",
+            tostring(source or "automatic"), prepared, available, #candidates, excluded.owned or 0, excluded.occupied or 0, excluded.pending or 0,
+            excluded.cooldown or 0, excluded.invalid or 0, excluded.disabled or 0)
+    else
+        logInfo("native supply recovery found no safe field source=%s available=%d candidates=%d excluded=owned:%d occupied:%d pending:%d cooldown:%d invalid:%d disabled:%d",
+            tostring(source or "automatic"), available, #candidates, excluded.owned or 0, excluded.occupied or 0, excluded.pending or 0,
+            excluded.cooldown or 0, excluded.invalid or 0, excluded.disabled or 0)
+    end
+    return prepared
+end
+
+function SiNContracts:maybePrepareNativeFieldSupply(manager, available, now)
+    if available >= LOW_AVAILABLE_THRESHOLD then return 0 end
+    local last = self.lastSupplyRecoveryMs
+    if last ~= nil and now - last < SUPPLY_RECOVERY_COOLDOWN_MS then return 0 end
+    self.lastSupplyRecoveryMs = now
+    return self:prepareNativeFieldSupply(manager, available, now, "automatic")
+end
+
+local function normalizeSupplyAction(value)
+    local action = type(value) == "string" and string.lower(value) or nil
+    local aliases = {
+        weed = "herbicide", weeding = "herbicide", herbicide = "herbicide",
+        fertilizer = "fertilize", fertiliser = "fertilize", fertilize = "fertilize", fertilizing = "fertilize",
+        stone = "stonePick", stones = "stonePick", stonepick = "stonePick", stonepicking = "stonePick",
+        cultivate = "cultivate", cultivation = "cultivate",
+        plow = "plow", plough = "plow", plowing = "plow"
+    }
+    return action ~= nil and aliases[action] or nil
+end
+
+-- Explicit operator-only local test. It shares all of the normal eligibility,
+-- source-state preservation and FieldUpdateTask code above, but does not wait
+-- for a live board to exhaust. It changes one field at most and still leaves
+-- native FS25 as the only creator of a resulting contract.
+function SiNContracts:consoleCommandContractSupplyTest(actionName)
+    if call(g_currentMission, "getIsServer") ~= true or g_missionManager == nil then
+        return "SiN contract supply test is available on the authoritative server only"
+    end
+    local actionText = type(actionName) == "string" and string.lower(actionName) or nil
+    local now = nowMs() or 0
+    if actionText == "recovery" or actionText == "automatic" then
+        local available = self:availableMissionCount(g_missionManager)
+        local prepared = self:prepareNativeFieldSupply(g_missionManager, available, now, "console-recovery")
+        return string.format("SiN contract supply recovery test queued %d NPC field update(s)", prepared)
+    end
+    local action = normalizeSupplyAction(actionName)
+    if action == nil then
+        return "Usage: sinContractSupplyTest <recovery|herbicide|fertilize|stonePick|cultivate|plow>"
+    end
+    local candidates = self:getSupplyFieldCandidates(g_missionManager, now)
+    for _, candidate in ipairs(candidates) do
+        if self:getSupplyActionReason(candidate, action) == nil then
+            local ok, reason = self:queueSupplyFieldUpdate(candidate, action)
+            if ok then
+                self.supplyAdjustedFields[candidate.id] = {atMs = now, action = action}
+                logInfo("native supply test queued field=%d action=%s sourceFruit=%s sourceGrowth=%s sourceWeed=%s sourceSpray=%s sourceStone=%s sourcePlow=%s",
+                    candidate.id, action, tostring(candidate.state.fruitTypeIndex), tostring(candidate.state.growthState),
+                    tostring(candidate.state.weedState), tostring(candidate.state.sprayLevel),
+                    tostring(candidate.state.stoneLevel), tostring(candidate.state.plowLevel))
+                return string.format("SiN contract supply test queued %s for NPC field %d", action, candidate.id)
+            end
+            logWarning("native supply test skipped field=%d action=%s reason=%s", candidate.id, action, tostring(reason))
+            return string.format("SiN contract supply test could not queue %s: %s", action, tostring(reason))
+        end
+    end
+    return string.format("SiN contract supply test found no safe %s candidate", action)
+end
+
+-- Native MissionManager removes CREATED offers when validation fails.  This is
+-- deliberately diagnostic-only: it records the native decision at the point
+-- it is made, without calling validate itself or changing mission state.
+function SiNContracts:observeValidationFailure(mission, source)
+    if mission == nil then return end
+    local id = missionId(mission) or "unknown"
+    if self.validationFailureIds == nil then self.validationFailureIds = {} end
+    if self.validationFailureIds[id] == true then return end
+    if (self.validationFailureCount or 0) >= MAX_VALIDATION_FAILURE_DIAGNOSTICS then return end
+    self.validationFailureIds[id] = true
+    self.validationFailureCount = (self.validationFailureCount or 0) + 1
+    local field = call(mission, "getField") or mission.field
+    local data = fieldData(mission)
+    local hasOwner = call(field, "getHasOwner")
+    logWarning("native mission validation rejected mission=%s source=%s type=%s status=%s field=%s farmland=%s fieldHasOwner=%s",
+        tostring(id), tostring(source or "unknown"), tostring(missionType(mission)), tostring(statusName(mission)),
+        tostring(data and data.id or "unavailable"), tostring(data and data.farmlandId or "unavailable"),
+        tostring(hasOwner == true))
 end
 
 local function formatEstimateHours(hours)
@@ -676,6 +1072,29 @@ function SiNContracts:consoleCommandContracts()
     return string.format("SiN contracts observed %d native missions", count)
 end
 
+-- Read-only operator probe for the recovery layer.  It deliberately reports
+-- candidates without queuing a FieldUpdateTask; recovery itself is only armed
+-- after repeated native generation exhaustion below the low-offer threshold.
+function SiNContracts:consoleCommandContractSupply()
+    if call(g_currentMission, "getIsServer") ~= true or g_missionManager == nil then
+        return "SiN contract supply is available on the authoritative server only"
+    end
+    local now = nowMs() or 0
+    local candidates, excluded = self:getSupplyFieldCandidates(g_missionManager, now)
+    local counts = {}
+    for _, action in ipairs(SUPPLY_ACTIONS) do counts[action] = 0 end
+    for _, candidate in ipairs(candidates) do
+        for _, action in ipairs(SUPPLY_ACTIONS) do
+            if self:getSupplyActionReason(candidate, action) == nil then counts[action] = counts[action] + 1 end
+        end
+    end
+    logInfo("native supply diagnostic candidates=%d herbicide=%d fertilize=%d stonePick=%d cultivate=%d plow=%d excluded=owned:%d occupied:%d pending:%d cooldown:%d invalid:%d disabled:%d",
+        #candidates, counts.herbicide, counts.fertilize, counts.stonePick, counts.cultivate, counts.plow,
+        excluded.owned or 0, excluded.occupied or 0, excluded.pending or 0, excluded.cooldown or 0,
+        excluded.invalid or 0, excluded.disabled or 0)
+    return string.format("SiN contract supply candidates: %d", #candidates)
+end
+
 local function appendMethod(target, name, callback, marker, preserveReturns)
     if target == nil or type(target[name]) ~= "function" then return false end
     marker = marker or ("__sinContractsHook_" .. name)
@@ -704,7 +1123,17 @@ local function appendMethod(target, name, callback, marker, preserveReturns)
 end
 
 function SiNContracts:installHooks()
-    if self.hooksInstalled == true and self.abstractHooksInstalled == true and self.detailsHookInstalled == true then return end
+    -- Native mission generation, acceptance and lifecycle mutations are
+    -- server-authoritative. Installing wrappers for them on a multiplayer
+    -- client is unnecessary and can interfere with the client's Contracts
+    -- frame before it sends the native start/borrow request. The only client
+    -- hook retained here is the read-only details presentation below.
+    if call(g_currentMission, "getIsServer") ~= true then
+        self:installDetailsHook()
+        return
+    end
+    if self.hooksInstalled == true and self.abstractHooksInstalled == true and self.detailsHookInstalled == true
+        and (AbstractFieldMission == nil or self.validationHookInstalled == true) then return end
     local installed = false
     if MissionManager ~= nil then
         installed = appendMethod(MissionManager, "registerMission", function(manager, mission)
@@ -723,14 +1152,62 @@ function SiNContracts:installHooks()
         installed = appendMethod(MissionManager, "dismissMission", function(manager, mission)
             SiNContracts:observe(mission, "payment_or_dismissed")
         end, nil, true) or installed
-        installed = appendMethod(MissionManager, "update", function(manager)
-            local now = nowMs()
-            if now == nil or self.lastPollMs == nil or now - self.lastPollMs >= POLL_INTERVAL_MS then
-                self.lastPollMs = now
-                self:scan("observed")
+        installed = appendMethod(MissionManager, "markMissionForDeletion", function(manager, mission)
+            SiNContracts:observeValidationFailure(mission, "MissionManager.markMissionForDeletion")
+        end, "__sinContractsHook_markMissionForDeletion") or installed
+        if type(MissionManager.update) == "function" and MissionManager.__sinContractsHook_update ~= true then
+            local nativeUpdate = MissionManager.update
+            MissionManager.update = function(manager, ...)
+                local availableBefore = SiNContracts:availableMissionCount(manager)
+                local wasGenerating = fieldValue(manager, {"missionGenerationInProgress"}) == true
+                local token = SiNContracts:prepareGenerationForNativeUpdate(manager)
+                SiNContracts._generationStartedInUpdate = false
+                if token ~= nil then
+                    local canStart = call(manager, "getCanStartNewMissionGeneration")
+                    if canStart == true then
+                        local ok, accepted = pcall(manager.startMissionGeneration, manager)
+                        if ok and accepted ~= false then
+                            -- Start before native update, so FS25 performs its
+                            -- normal update/validation lifecycle with the
+                            -- generation already in flight.
+                            SiNContracts._generationStartedInUpdate = true
+                        elseif token.armed == true then
+                            manager.generationTimer = token.previousTimer
+                        end
+                    elseif token.armed == true then
+                        manager.generationTimer = token.previousTimer
+                    end
+                end
+                SiNContracts._insideNativeUpdate = true
+                local values = {nativeUpdate(manager, ...)}
+                SiNContracts._insideNativeUpdate = false
+                local started = SiNContracts._generationStartedInUpdate == true
+                if token ~= nil and token.armed == true and not started then
+                    -- The native gate rejected the cycle.  Restore the timer
+                    -- we temporarily expired; native state remains untouched.
+                    manager.generationTimer = token.previousTimer
+                end
+                if started then
+                    SiNContracts:recordNativeGenerationStart(manager)
+                end
+                SiNContracts:noteNativeGenerationCompletion(manager, availableBefore, wasGenerating or started)
+                local now = nowMs()
+                if now == nil or SiNContracts.lastPollMs == nil or now - SiNContracts.lastPollMs >= POLL_INTERVAL_MS then
+                    SiNContracts.lastPollMs = now
+                    SiNContracts:scan("observed")
+                end
+                return unpack(values)
             end
-            self:maybeRequestGeneration(manager)
-        end, nil, true) or installed
+            MissionManager.__sinContractsHook_update = true
+            installed = true
+        elseif MissionManager.__sinContractsHook_update == true then
+            installed = true
+        end
+        installed = appendMethod(MissionManager, "startMissionGeneration", function(manager)
+            if SiNContracts._insideNativeUpdate == true then
+                SiNContracts._generationStartedInUpdate = true
+            end
+        end, "__sinContractsHook_startMissionGeneration", true) or installed
     end
     if AbstractMission ~= nil then
         installed = appendMethod(AbstractMission, "finish", function(mission, finishState)
@@ -742,6 +1219,22 @@ function SiNContracts:installHooks()
         self.abstractHooksInstalled = AbstractMission.__sinContractsHook_finish == true
             and AbstractMission.__sinContractsHook_dismiss == true
     end
+    if AbstractFieldMission ~= nil and type(AbstractFieldMission.validate) == "function"
+        and AbstractFieldMission.__sinContractsHook_validate ~= true then
+        local nativeValidate = AbstractFieldMission.validate
+        AbstractFieldMission.validate = function(...)
+            local values = {nativeValidate(...) }
+            if values[1] == false then
+                SiNContracts:observeValidationFailure(select(1, ...), "AbstractFieldMission.validate")
+            end
+            return unpack(values)
+        end
+        AbstractFieldMission.__sinContractsHook_validate = true
+        self.validationHookInstalled = true
+        installed = true
+    elseif AbstractFieldMission ~= nil and AbstractFieldMission.__sinContractsHook_validate == true then
+        self.validationHookInstalled = true
+    end
     self:installDetailsHook()
     self.hooksInstalled = installed
     if installed then logInfo("native MissionManager hooks installed; guarded replenishment batch=%d efficiency=%.2f", GENERATION_BATCH_SIZE, EFFICIENCY) end
@@ -751,6 +1244,8 @@ function SiNContracts:loadMap()
     self:installHooks()
     if addConsoleCommand ~= nil and self.commandInstalled ~= true then
         addConsoleCommand("sinContracts", "Dump native FS25 contract diagnostics", "consoleCommandContracts", self)
+        addConsoleCommand("sinContractSupply", "Inspect safe native field-work supply candidates", "consoleCommandContractSupply", self)
+        addConsoleCommand("sinContractSupplyTest", "Queue one safe NPC field update for a named native work type", "consoleCommandContractSupplyTest", self)
         self.commandInstalled = true
     end
 end
@@ -760,7 +1255,11 @@ function SiNContracts:update()
 end
 
 function SiNContracts:deleteMap()
-    if self.commandInstalled == true and removeConsoleCommand ~= nil then removeConsoleCommand("sinContracts") end
+    if self.commandInstalled == true and removeConsoleCommand ~= nil then
+        removeConsoleCommand("sinContracts")
+        removeConsoleCommand("sinContractSupply")
+        removeConsoleCommand("sinContractSupplyTest")
+    end
     self.commandInstalled = false
 end
 
@@ -769,7 +1268,15 @@ SiNContracts.fingerprints = {}
 SiNContracts.hooksInstalled = false
 SiNContracts.abstractHooksInstalled = false
 SiNContracts.detailsHookInstalled = false
+SiNContracts.validationHookInstalled = false
+SiNContracts.validationFailureIds = {}
+SiNContracts.validationFailureCount = 0
 SiNContracts.lastRefillPolicyMs = nil
 SiNContracts.lastLowGenerationMs = nil
 SiNContracts.generationBatchRemaining = 0
+SiNContracts.replenishmentBatchStartsSinceLog = 0
+SiNContracts.nativeGenerationEmptyCyclesSinceLog = 0
+SiNContracts.nativeGenerationEmptyCyclesForSupply = 0
+SiNContracts.supplyAdjustedFields = {}
+SiNContracts.supplyActionCursor = 1
 addModEventListener(SiNContracts)

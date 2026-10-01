@@ -11,7 +11,7 @@ from fs25_network_core.production_policy import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MOD = ROOT / "mods/SiN_FS25_ProductionPolicy"
+MOD = ROOT / "mods/SiN_FS25_Policy"
 
 
 class ProductionPolicyTests(unittest.TestCase):
@@ -116,7 +116,8 @@ class ProductionPolicyTests(unittest.TestCase):
     def test_runtime_is_standalone_narrow_and_server_purchase_oriented(self):
         source = (MOD / "scripts/SiNProductionPolicy.lua").read_text(encoding="utf-8")
         self.assertIn("Utils.overwrittenFunction", source)
-        self.assertIn("EconomyManager.getBuyPrice", source)
+        self.assertIn("Do not wrap EconomyManager:getBuyPrice", source)
+        self.assertNotIn("Utils.overwrittenFunction(EconomyManager.getBuyPrice", source)
         self.assertIn("BuyPlaceableData.readStream", source)
         self.assertIn("data:updatePrice()", source)
         self.assertIn("sourcePrice", source)
@@ -154,6 +155,7 @@ class ProductionPolicyTests(unittest.TestCase):
 
     def test_mod_descriptor_and_icon_are_present(self):
         descriptor = (MOD / "modDesc.xml").read_text(encoding="utf-8")
-        self.assertIn("SiN FS25 Production Policy", descriptor)
+        self.assertIn("SiN FS25 Policy", descriptor)
         self.assertIn('filename="scripts/SiNProductionPolicy.lua"', descriptor)
-        self.assertGreater((MOD / "icon_production_policy.dds").stat().st_size, 0)
+        self.assertIn('filename="scripts/SiNVehiclePricingPolicy.lua"', descriptor)
+        self.assertGreater((MOD / "icon_policy.dds").stat().st_size, 0)

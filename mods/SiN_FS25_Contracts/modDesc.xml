@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8" standalone="no"?>
 <modDesc descVersion="92">
     <author>SiN (SimNet)</author>
-    <version>0.1.3.0</version>
+    <version>0.1.6.0</version>
     <iconFilename>icon_contracts.dds</iconFilename>
     <title>
         <en>SiN FS25 Contracts</en>

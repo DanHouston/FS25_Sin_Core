@@ -17,7 +17,7 @@ class ContractsLuaTests(unittest.TestCase):
             """
             Logging = {info = function() end, warning = function() end}
             addModEventListener = function() end
-            g_currentMission = {time = 1000}
+            g_currentMission = {time = 1000, getIsServer = function() return true end}
             """
         )
         lua.execute(SCRIPT.read_text(encoding="utf-8"))
@@ -94,6 +94,26 @@ class ContractsLuaTests(unittest.TestCase):
             assert(MissionManager:startMission(nil, 1, false) == 17)
             assert(MissionManager:cancelMission(nil) == true)
             assert(MissionManager:dismissMission(nil) == true)
+            """
+        )
+
+    def test_client_does_not_wrap_native_mission_manager_actions(self):
+        lua = self._runtime()
+        lua.execute(
+            """
+            g_currentMission = {time = 1000, getIsServer = function() return false end}
+            local starts = 0
+            MissionManager = {}
+            function MissionManager:startMission() starts = starts + 1; return "native-start" end
+            function MissionManager:update() return "native-update" end
+            AbstractFieldMission = {}
+            function AbstractFieldMission:getDetails() return {} end
+            SiNContracts:installHooks()
+            assert(MissionManager.__sinContractsHook_update == nil)
+            assert(MissionManager.__sinContractsHook_startMission == nil)
+            assert(MissionManager:startMission() == "native-start")
+            assert(starts == 1)
+            assert(AbstractFieldMission.__sinContractsHook_getDetails == true)
             """
         )
 
@@ -228,19 +248,351 @@ class ContractsLuaTests(unittest.TestCase):
             -- Consume the initial three-cycle emergency batch.
             MissionManager:update()
             MissionManager.missionGenerationInProgress = false
+            g_currentMission.time = 2000
+            MissionManager:update()
+            MissionManager.missionGenerationInProgress = false
+            g_currentMission.time = 3000
+            MissionManager:update()
+            assert(requests == 3)
+            MissionManager.missionGenerationInProgress = false
+            -- The bounded emergency batch completes in one-second cycles.
+            -- A further low-offer batch is still held for ten seconds.
+            g_currentMission.time = 10999
+            MissionManager:update()
+            assert(requests == 3)
             g_currentMission.time = 11000
             MissionManager:update()
-            MissionManager.missionGenerationInProgress = false
-            g_currentMission.time = 21000
-            MissionManager:update()
-            assert(requests == 3)
-            MissionManager.missionGenerationInProgress = false
-            g_currentMission.time = 30999
-            MissionManager:update()
-            assert(requests == 3)
-            g_currentMission.time = 31000
-            MissionManager:update()
             assert(requests == 4)
+            """
+        )
+
+    def test_emergency_batch_cycles_are_spaced_one_second_apart(self):
+        lua = self._runtime()
+        lua.execute(
+            """
+            g_currentMission = {time = 1000, getIsServer = function() return true end}
+            MissionStatus = {CREATED = "CREATED"}
+            MissionManager = {MAX_MISSIONS = 25, missions = {}, missionGenerationInProgress = false}
+            local requests = 0
+            function MissionManager:getMissions() return self.missions end
+            function MissionManager:getCanStartNewMissionGeneration()
+                return not self.missionGenerationInProgress
+            end
+            function MissionManager:startMissionGeneration()
+                requests = requests + 1
+                self.missionGenerationInProgress = true
+            end
+            function MissionManager:registerMission() end
+            function MissionManager:startMission() return true end
+            function MissionManager:cancelMission() return true end
+            function MissionManager:dismissMission() return true end
+            function MissionManager:update() end
+            SiNContracts:installHooks()
+            MissionManager:update()
+            assert(requests == 1)
+            MissionManager.missionGenerationInProgress = false
+            g_currentMission.time = 1999
+            MissionManager:update()
+            assert(requests == 1)
+            g_currentMission.time = 2000
+            MissionManager:update()
+            assert(requests == 2)
+            """
+        )
+
+    def test_native_generation_exhaustion_is_bounded_and_identifies_period(self):
+        lua = self._runtime()
+        lua.execute(
+            """
+            local messages = {}
+            Logging = {
+                info = function(message) table.insert(messages, message) end,
+                warning = function() end
+            }
+            g_currentMission = {
+                time = 1000,
+                environment = {currentPeriod = 8},
+                getIsServer = function() return true end
+            }
+            MissionManager = {MAX_MISSIONS = 25, missions = {}, missionGenerationInProgress = true}
+            function MissionManager:getMissions() return self.missions end
+            function MissionManager:update() self.missionGenerationInProgress = false end
+            SiNContracts:installHooks()
+            MissionManager:update()
+            local found = false
+            for _, message in ipairs(messages) do
+                if string.find(message, "native generation completed without offer")
+                    and string.find(message, "period=8") then
+                    found = true
+                end
+            end
+            assert(found == true)
+            local count = #messages
+            g_currentMission.time = 2000
+            MissionManager.missionGenerationInProgress = true
+            MissionManager:update()
+            assert(#messages == count)
+            g_currentMission.time = 61000
+            MissionManager.missionGenerationInProgress = true
+            MissionManager:update()
+            assert(#messages == count + 1)
+            assert(string.find(messages[#messages], "exhaustedCycles=2"))
+            """
+        )
+
+    def test_supply_recovery_queues_only_native_field_update_tasks_for_safe_npc_fields(self):
+        lua = self._runtime()
+        lua.execute(
+            """
+            g_currentMission = {time = 1000, getIsServer = function() return true end}
+            MissionStatus = {CREATED = "CREATED"}
+            FruitType = {UNKNOWN = 0}
+            FieldSprayType = {NONE = 0}
+            FieldGroundType = {STUBBLE = 7}
+            local queued = {}
+            local function task()
+                local value = {}
+                function value:setField(field) self.field = field end
+                function value:setWeedState(state) self.weedState = state end
+                function value:setSprayType(valueIn) self.sprayType = valueIn end
+                function value:setSprayLevel(valueIn) self.sprayLevel = valueIn end
+                function value:setStoneLevel(valueIn) self.stoneLevel = valueIn end
+                function value:setGroundType(valueIn) self.groundType = valueIn end
+                function value:setPlowLevel(valueIn) self.plowLevel = valueIn end
+                return value
+            end
+            local function field(id, state, owned)
+                local value = {id = id, isMissionAllowed = true}
+                function value:getId() return self.id end
+                function value:getHasOwner() return owned == true end
+                function value:getFieldState() return state end
+                return value
+            end
+            local cropWeed = {isValid = true, fruitTypeIndex = 1, growthState = 3, weedState = 0, sprayLevel = 2, stoneLevel = 0, plowLevel = 2}
+            function cropWeed:createFieldUpdateTask() return task() end
+            local cropFertilize = {isValid = true, fruitTypeIndex = 2, growthState = 3, weedState = 0, sprayLevel = 2, stoneLevel = 0, plowLevel = 2}
+            function cropFertilize:createFieldUpdateTask() return task() end
+            local fallow = {isValid = true, fruitTypeIndex = 0, growthState = 0, weedState = 0, sprayLevel = 0, stoneLevel = 0, plowLevel = 2}
+            function fallow:createFieldUpdateTask() return task() end
+            local playerState = {isValid = true, fruitTypeIndex = 1, growthState = 3, weedState = 0, sprayLevel = 2, stoneLevel = 0, plowLevel = 2}
+            function playerState:createFieldUpdateTask() return task() end
+            g_fieldManager = {fields = {field(1, cropWeed), field(2, cropFertilize), field(3, fallow), field(4, playerState, true)},
+                              sprayLevelMaxValue = 3, plowLevelMaxValue = 3}
+            function g_fieldManager:addFieldUpdateTask(value) table.insert(queued, value) end
+            g_fruitTypeManager = {}
+            function g_fruitTypeManager:getFruitTypeByIndex(index)
+                if index == 1 then return {plantsWeed = true, minHarvestingGrowthState = 8} end
+                return {plantsWeed = false, minHarvestingGrowthState = 8}
+            end
+            local manager = {missions = {}}
+            function manager:getMissions() return self.missions end
+            local prepared = SiNContracts:maybePrepareNativeFieldSupply(manager, 0, 1000)
+            assert(prepared == 3)
+            assert(#queued == 3)
+            assert(queued[1].field.id == 1 and queued[1].weedState == 3)
+            assert(queued[2].field.id == 2 and queued[2].sprayType == nil and queued[2].sprayLevel == 1)
+            assert(queued[3].field.id == 3 and queued[3].stoneLevel == 1)
+            -- The source descriptors are read-only inputs to createFieldUpdateTask.
+            assert(cropWeed.weedState == 0 and cropFertilize.sprayLevel == 2 and fallow.stoneLevel == 0)
+            for _, queuedTask in ipairs(queued) do assert(queuedTask.field.id ~= 4) end
+            """
+        )
+
+    def test_supply_recovery_requires_three_empty_native_cycles_before_mutation(self):
+        lua = self._runtime()
+        lua.execute(
+            """
+            local queued = 0
+            g_currentMission = {time = 1000, environment = {currentPeriod = 4}, getIsServer = function() return true end}
+            MissionStatus = {CREATED = "CREATED"}
+            FruitType = {UNKNOWN = 0}
+            FieldSprayType = {NONE = 0}
+            local state = {isValid = true, fruitTypeIndex = 1, growthState = 3, weedState = 0, sprayLevel = 1}
+            function state:createFieldUpdateTask()
+                local value = {}
+                function value:setField(field) self.field = field end
+                function value:setWeedState(valueIn) self.weedState = valueIn end
+                return value
+            end
+            local field = {id = 8, isMissionAllowed = true}
+            function field:getId() return self.id end
+            function field:getHasOwner() return false end
+            function field:getFieldState() return state end
+            g_fieldManager = {fields = {field}, sprayLevelMaxValue = 3, plowLevelMaxValue = 3}
+            function g_fieldManager:addFieldUpdateTask() queued = queued + 1 end
+            g_fruitTypeManager = {}
+            function g_fruitTypeManager:getFruitTypeByIndex() return {plantsWeed = true, minHarvestingGrowthState = 8} end
+            local manager = {missions = {}, missionGenerationInProgress = false}
+            function manager:getMissions() return self.missions end
+            SiNContracts:noteNativeGenerationCompletion(manager, 0, true)
+            assert(queued == 0)
+            g_currentMission.time = 2000
+            SiNContracts:noteNativeGenerationCompletion(manager, 0, true)
+            assert(queued == 0)
+            g_currentMission.time = 3000
+            SiNContracts:noteNativeGenerationCompletion(manager, 0, true)
+            assert(queued == 1)
+            """
+        )
+
+    def test_explicit_supply_test_uses_the_same_safe_one_field_queue(self):
+        lua = self._runtime()
+        lua.execute(
+            """
+            g_currentMission = {time = 1000, getIsServer = function() return true end}
+            FruitType = {UNKNOWN = 0}
+            local queued = {}
+            local state = {isValid = true, fruitTypeIndex = 1, growthState = 3, weedState = 0, sprayLevel = 1}
+            function state:createFieldUpdateTask()
+                local task = {}
+                function task:setField(field) self.field = field end
+                function task:setWeedState(value) self.weedState = value end
+                return task
+            end
+            local field = {id = 12, isMissionAllowed = true}
+            function field:getId() return self.id end
+            function field:getHasOwner() return false end
+            function field:getFieldState() return state end
+            g_fieldManager = {fields = {field}, sprayLevelMaxValue = 3, plowLevelMaxValue = 3}
+            function g_fieldManager:addFieldUpdateTask(task) table.insert(queued, task) end
+            g_fruitTypeManager = {}
+            function g_fruitTypeManager:getFruitTypeByIndex() return {plantsWeed = true, minHarvestingGrowthState = 8} end
+            g_missionManager = {missions = {}}
+            function g_missionManager:getMissions() return self.missions end
+            local response = SiNContracts:consoleCommandContractSupplyTest("weeding")
+            assert(string.find(response, "queued herbicide") ~= nil)
+            assert(#queued == 1 and queued[1].field.id == 12 and queued[1].weedState == 3)
+            assert(SiNContracts:consoleCommandContractSupplyTest("herbicide") == "SiN contract supply test found no safe herbicide candidate")
+            assert(string.find(SiNContracts:consoleCommandContractSupplyTest("bad"), "Usage:") ~= nil)
+            """
+        )
+
+    def test_explicit_recovery_test_runs_the_automatic_three_field_rotation(self):
+        lua = self._runtime()
+        lua.execute(
+            """
+            g_currentMission = {time = 1000, getIsServer = function() return true end}
+            FruitType = {UNKNOWN = 0}
+            FieldGroundType = {STUBBLE = 7}
+            local queued = {}
+            local function task()
+                local value = {}
+                function value:setField(field) self.field = field end
+                function value:setWeedState(state) self.weedState = state end
+                function value:setSprayLevel(level) self.sprayLevel = level end
+                function value:setStoneLevel(level) self.stoneLevel = level end
+                return value
+            end
+            local function field(id, state)
+                local value = {id = id, isMissionAllowed = true}
+                function value:getId() return self.id end
+                function value:getHasOwner() return false end
+                function value:getFieldState() return state end
+                return value
+            end
+            local weed = {isValid = true, fruitTypeIndex = 1, growthState = 3, weedState = 0, sprayLevel = 2, stoneLevel = 0, plowLevel = 1}
+            function weed:createFieldUpdateTask() return task() end
+            local fertilize = {isValid = true, fruitTypeIndex = 2, growthState = 3, weedState = 0, sprayLevel = 2, stoneLevel = 0, plowLevel = 1}
+            function fertilize:createFieldUpdateTask() return task() end
+            local stone = {isValid = true, fruitTypeIndex = 0, growthState = 0, weedState = 0, sprayLevel = 0, stoneLevel = 0, plowLevel = 1}
+            function stone:createFieldUpdateTask() return task() end
+            g_fieldManager = {fields = {field(1, weed), field(2, fertilize), field(3, stone)}, sprayLevelMaxValue = 3, plowLevelMaxValue = 3}
+            function g_fieldManager:addFieldUpdateTask(value) table.insert(queued, value) end
+            g_fruitTypeManager = {}
+            function g_fruitTypeManager:getFruitTypeByIndex(index)
+                return {plantsWeed = index == 1, minHarvestingGrowthState = 8}
+            end
+            g_missionManager = {missions = {}}
+            function g_missionManager:getMissions() return self.missions end
+            local response = SiNContracts:consoleCommandContractSupplyTest("recovery")
+            assert(response == "SiN contract supply recovery test queued 3 NPC field update(s)")
+            assert(#queued == 3 and queued[1].weedState == 3 and queued[2].sprayLevel == 1 and queued[3].stoneLevel == 1)
+            """
+        )
+
+    def test_replenishment_never_mutates_native_generation_timer_when_gate_is_closed(self):
+        lua = self._runtime()
+        lua.execute(
+            """
+            g_currentMission = {time = 1000, getIsServer = function() return true end}
+            MissionStatus = {CREATED = "CREATED"}
+            MissionManager = {}
+            MissionManager.MAX_MISSIONS = 25
+            MissionManager.missions = {}
+            MissionManager.generationTimer = 12345
+            local requests = 0
+            function MissionManager:getMissions() return self.missions end
+            function MissionManager:getCanStartNewMissionGeneration() return false end
+            function MissionManager:startMissionGeneration() requests = requests + 1 end
+            function MissionManager:registerMission() end
+            function MissionManager:startMission() return true end
+            function MissionManager:cancelMission() return true end
+            function MissionManager:dismissMission() return true end
+            function MissionManager:update() return 23 end
+            SiNContracts:installHooks()
+            MissionManager:update()
+            assert(requests == 0)
+            assert(MissionManager.generationTimer == 12345)
+            """
+        )
+
+    def test_refill_starts_before_native_update_when_cooldown_is_the_only_gate(self):
+        lua = self._runtime()
+        lua.execute(
+            """
+            g_currentMission = {time = 1000, getIsServer = function() return true end}
+            MissionStatus = {CREATED = "CREATED"}
+            MissionManager = {MAX_MISSIONS = 25, missions = {}, generationTimer = 600000,
+                              missionGenerationInProgress = false}
+            local requests = 0
+            local updateSawRequest = false
+            function MissionManager:getMissions() return self.missions end
+            function MissionManager:getCanStartNewMissionGeneration()
+                return not self.missionGenerationInProgress and #self.missions < self.MAX_MISSIONS
+                    and self.generationTimer < 0
+            end
+            function MissionManager:startMissionGeneration()
+                requests = requests + 1
+                self.missionGenerationInProgress = true
+            end
+            function MissionManager:update()
+                updateSawRequest = self.missionGenerationInProgress == true
+                return 23
+            end
+            function MissionManager:registerMission() end
+            function MissionManager:startMission() return true end
+            function MissionManager:cancelMission() return true end
+            function MissionManager:dismissMission() return true end
+            SiNContracts:installHooks()
+            MissionManager:update()
+            assert(requests == 1)
+            assert(updateSawRequest == true)
+            """
+        )
+
+    def test_native_validation_removal_is_observed_without_mutating_mission(self):
+        lua = self._runtime()
+        lua.execute(
+            """
+            MissionStatus = {CREATED = "CREATED"}
+            MissionManager = {}
+            function MissionManager:registerMission() end
+            function MissionManager:startMission() return true end
+            function MissionManager:cancelMission() return true end
+            function MissionManager:dismissMission() return true end
+            function MissionManager:update() end
+            function MissionManager:markMissionForDeletion(mission) self.marked = mission end
+            local field = {id = 27, farmlandId = 27}
+            function field:getId() return self.id end
+            function field:getHasOwner() return false end
+            local mission = {status = "CREATED", type = "cultivateMission", field = field}
+            function mission:getUniqueId() return "native-validation-removal" end
+            function mission:getField() return self.field end
+            SiNContracts:installHooks()
+            MissionManager:markMissionForDeletion(mission)
+            assert(MissionManager.marked == mission)
+            assert(SiNContracts.validationFailureIds["native-validation-removal"] == true)
+            assert(SiNContracts.validationFailureCount == 1)
             """
         )
 
@@ -383,13 +735,17 @@ class ContractsLuaTests(unittest.TestCase):
             -- Native mission descriptors have filenames/config ids, not live
             -- vehicle objects.  StoreItemUtil exposes the same explicit
             -- workingWidth/speedLimit specs used by the FS25 shop.
+            local canonicalStoreItem = {xmlFilename = "offered.xml"}
             g_storeManager = {}
             function g_storeManager:getItemByXMLFilename(filename)
                 assert(filename == "offered.xml")
-                return {specs = {workingWidth = {width = 12, minWidth = 12}, speedLimit = 10}}
+                return canonicalStoreItem
             end
             StoreItemUtil = {}
-            function StoreItemUtil.loadSpecsFromXML(item) end
+            function StoreItemUtil.loadSpecsFromXML(item)
+                assert(item ~= canonicalStoreItem)
+                item.specs = {workingWidth = {width = 12, minWidth = 12}, speedLimit = 10}
+            end
             AbstractFieldMission = {getDetails = function() return {} end}
             SiNContracts:installDetailsHook()
             local field = {id = 24, areaHa = 15.2, name = "Field 24"}
@@ -412,6 +768,9 @@ class ContractsLuaTests(unittest.TestCase):
             local details = AbstractFieldMission.getDetails(mission)
             assert(#details == 2 and details[1].value == "1.8 h")
             assert(details[2].title == "SiN estimated native $/hour")
+            -- Contract inspection must never mutate the global descriptor
+            -- that the vehicle showroom uses to render its preview/price.
+            assert(canonicalStoreItem.specs == nil)
             """
         )
 
@@ -441,7 +800,7 @@ class ContractsLuaTests(unittest.TestCase):
             """
         )
 
-    def test_refill_expires_only_native_cooldown_and_stops_at_nine(self):
+    def test_refill_respects_native_cooldown_and_stops_at_nine(self):
         lua = self._runtime()
         lua.execute("""
             g_currentMission = {time = 1000, getIsServer = function() return true end}
@@ -463,8 +822,13 @@ class ContractsLuaTests(unittest.TestCase):
             SiNContracts:maybeRequestGeneration(manager)
             assert(#manager.missions == 3 and manager.generationTimer == 600000)
             manager.blocked = false
+            -- The policy does not expire the native cooldown. The native
+            -- manager must signal that a generation cycle is ready.
+            SiNContracts:maybeRequestGeneration(manager)
+            assert(#manager.missions == 3 and manager.generationTimer == 600000)
             for i = 1, 6 do
                 g_currentMission.time = i * 10000
+                manager.generationTimer = -1
                 SiNContracts:maybeRequestGeneration(manager)
                 assert(#manager.missions == 3 + i)
             end
