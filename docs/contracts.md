@@ -106,105 +106,63 @@ offer only when its store metadata lacks an explicit working width, and remains
 unavailable when the native vehicle exposes no positive work area; the observer
 does not infer a width or fabricate an estimate.
 
-## Native offer replenishment
+## Native generation and controlled field-work recovery
 
-The server-side observer starts a bounded batch of up to three native
-`MissionManager` generation cycles when fewer than three `CREATED` offers are
-available. The same batch policy refills any board below nine offers. Because
-native generation is asynchronous, requests within a batch are normally spaced
-by ten seconds; the emergency three-cycle batch below three offers is spaced by
-one second. The retry window starts from the logical batch start, preventing a
-burst of calls before FS25 has registered the previous offer. A
-batch stops as soon as nine offers are visible, or earlier on FS25's mission
-cap/native generation failure. Batch-start diagnostics are bounded to one line
-per minute. The mod never constructs, registers, rewards,
-or persists a custom mission. FS25 remains authoritative for
-`tryGenerateMission`, field validation, vehicle groups, reward calculation,
-mission caps, and save state.
+FS25's `MissionManager` remains the sole authority for contract generation,
+validation, registration, rewards, mission limits, and lifecycle. On the server,
+SiN sets the native `MissionManager.MISSION_GENERATION_INTERVAL` to 10 seconds
+and observes native generation start/completion. It does not override
+`MissionManager:update`, call `startMissionGeneration` itself, or write
+`generationTimer`. There are no SiN refill batches, retry loops, or guaranteed
+offer counts; FS25 decides whether a valid mission can be generated.
 
-Mission generation and lifecycle observer wrappers are installed only on the
-authoritative server. Multiplayer clients retain only the read-only contract
-details presentation hook; they never wrap native `MissionManager:update` or
-`MissionManager:startMission`, preserving the vanilla Borrow Items/Accept
-input path.
+For `plowMission`, `cultivateMission`, `sowMission`, `harvestMission`, and
+`mowMission`, SiN may prefer a different free NPC field only when that mission
+type's native `isAvailableForField` predicate accepts it. The native field
+picker still runs, and native mission generation performs its normal validation.
+No other mission type receives this preference.
 
-For every due refill, the native gate is checked before `MissionManager:update`.
-When the only blocking condition is the native cooldown, the mod temporarily
-expires that timer and starts the native generation cycle before entering the
-native update. FS25 then performs its normal validation and registration while
-the cycle is in flight; the timer is restored if the native call rejects. The
-mod never generates or registers missions itself, and never requests a cycle
-after native update/validation has completed. An in-flight cycle, total mission
-cap, or another native rejection still blocks the request.
-Three cycles are attempts, not three guaranteed offers: FS25 can find no eligible
-work. Below nine, bounded batches continue; at nine, no request is made. While
-fewer than three offers remain, the three cycle attempts are spaced one second
-apart; refilling from three through eight remains deliberately paced at ten
-seconds per cycle.
+If three consecutive native generation cycles finish without increasing the
+available `CREATED` offer count, the server may queue field recovery when fewer
+than nine offers remain. Nine is a soft target: SiN may prepare work that lets
+FS25 generate future offers, but never creates or forces a contract to reach the
+target. Recovery queues at most three ordinary `FieldState` update tasks and is
+subject to the cooldown and NPC-field safety checks.
 
-If a native generation cycle finishes without registering an offer, the
-authoritative server logs a bounded `native generation completed without offer`
-diagnostic with the current period and the count of exhausted cycles. This
-means FS25 found no eligible native mission for the current save/month; it does
-not mean a client failed to receive an existing offer.
+Automatic recovery is limited to:
 
-### Controlled native field-work recovery
+- herbicide: give an eligible growing, non-mature, weed-capable NPC crop a
+  native weed state;
+- fertilize: lower an eligible growing, non-mature NPC crop's fertilizer layer
+  by one native level;
+- stone picking: give an eligible fallow NPC field a low stone level.
 
-When fewer than three offers remain **and three consecutive native generation
-cycles exhaust without an offer**, the authoritative server may prepare up to
-three NPC fields for ordinary native field work. This is a supply recovery
-layer, not a custom mission system: it queues the same native
-`FieldState:createFieldUpdateTask()` / `g_fieldManager:addFieldUpdateTask()`
-path FS25 uses for its own field updates, then waits for the normal native
-`MissionManager` cycle to select, validate, register, equip, price and pay a
-contract.
+Automatic recovery never changes plow or cultivation state. Each task preserves
+the field's unrelated native state and excludes owned, occupied, pending,
+mission-disabled, invalid, mature, or recently recovered fields. If FS25 rejects
+the resulting field state, no contract is forced onto the board.
 
-The rotating recovery mix is:
+`sinContractSupply` is a read-only server console diagnostic. The explicit
+`sinContractSupplyTest` command can exercise supported recovery actions in a
+disposable save; its `recovery` mode simulates the automatic maximum-three-field
+pass without waiting for three empty cycles. It still queues only native field
+update tasks and never creates a mission. The explicit one-field diagnostic
+also accepts cultivate/plow for controlled testing; those actions are never in
+the automatic recovery list and automatic recovery never changes ground/plow
+state.
 
-- herbicide/weeding: a growing, non-mature, weed-capable NPC crop receives a
-  valid weed state;
-- fertilizing/spraying: a growing, non-mature NPC crop has its fertilizer
-  layer reduced by one native level so fertilizing work is possible;
-- stone picking: a fallow NPC field receives a low stone level;
-- cultivating: a fallow NPC field is put into native stubble ground state;
-- plowing: a fallow NPC field has its plow counter reset.
-
-Only the target layer changes. Each queued task starts from the field's current
-native `FieldState`, retaining fruit type, growth state, lime and every other
-unrelated layer. The layer is never applied to player-owned fields, fields with
-an offered/active native mission, fields with a pending native update,
-mission-disabled fields, mature crops, or a field recovered during the previous
-hour. Recovery is capped at three fields per pass and at one pass per minute.
-If FS25 rejects the resulting field state, no offer is forced into the board.
-
-The server writes `native supply prepared` records with source layers, followed
-by a bounded recovery summary. `sinContractSupply` is a read-only dedicated
-server console command that reports the currently safe candidate count by work
-type and exclusion reason; it never queues an update task.
-
-For a disposable single-player or dedicated-server test save,
-`sinContractSupplyTest <herbicide|fertilize|stonePick|cultivate|plow>` queues
-exactly one safe NPC field update for the named work type without waiting for a
-shortage. It uses the same candidate checks and update path as automatic
-recovery, honors the per-field cooldown, and never creates a mission directly.
-After FS25 applies the update, normal native generation must still choose and
-validate the resulting offer.
-
-`sinContractSupplyTest recovery` is the full-pass simulation: it invokes the
-same rotating, maximum-three-field automatic recovery routine without waiting
-for the low-offer/three-empty-cycle gate. It is useful for validating automatic
-selection and queueing in a disposable save with a full contract board; it does
-not make every field ineligible and does not force a tenth offer above the
-nine-offer target.
+Generation exhaustion details, field censuses/samples, construction traces,
+field-state detail, and equipment detail are DEBUG-only. Normal startup and
+operation retain concise cap-adjustment, field-substitution, recovery-summary,
+and mission lifecycle logs.
 
 ## Live diagnostics
 
-The server installs a bounded `sinContracts` console command. It logs a summary
-for every current native mission, including ID, type, status, field/area,
-reward, accepting farm, available lease equipment, estimate and measured actual
-duration. The same records are updated when a lifecycle transition is observed.
-Repeated unchanged polling is suppressed; the in-memory report is bounded to
-128 missions. No native mission field is mutated.
+The server installs a bounded `sinContracts` console command. By default it
+prints a concise mission-count snapshot; per-mission field/state/equipment and
+estimate details are behind the disabled-by-default DEBUG flag. The same
+in-memory records are updated when lifecycle transitions are observed, are
+bounded to 128 missions, and never mutate native mission fields.
 
 Completion is probed only after FS25 has initialized the field mission's
 density-map `completionModifier` and non-empty `completionPartitions`. The
@@ -225,12 +183,32 @@ The official GIANTS references for this surface are
 and
 [AbstractFieldMission](https://gdn.giants-software.com/documentation_scripting_fs25.php?category=35&class=403&version=script).
 
+## Discord native-contract threads
+
+When `SiN_FS25_Server` and `SiN_FS25_Contracts` are installed together, the
+Contracts mod observes native MissionManager registration, successful
+acceptance, successful completion, and cancellation on the authoritative
+server. It emits those facts through the server mod's authenticated event
+mailbox; it does not create or modify missions. The Central service projects
+each mission by server/save/world/mission ID, and JiN publishes one available
+parent card to that server's configured Activity channel with a Discord thread.
+Claimed, completed, and cancelled updates are posted into that contract's
+thread. The accepting farm is reported when the native mission exposes it;
+FS25 does not consistently expose the human player identity, so the bot does
+not guess a name.
+
+The bot needs `View Channel`, `Send Messages`, `Create Public Threads`, and
+`Send Messages in Threads` in the configured Activity channel. Missing thread
+permissions fail the outbox item with a diagnostic rather than silently
+publishing a parent-only card. The channel is the server-specific Activity
+channel configured in the server registry, not the guild-wide `#sin-jobs`
+channel used by Discord-created SiN work contracts.
+
 ## Deployment and limitations
 
 Build `SiN_FS25_Contracts.zip` and install identical bytes on the dedicated
 server and validation clients, alongside the existing SiN server mod. Reload
 the map/save after updating because this is a script mod. It is independent of
-`SiN_FS25_Server`; no mailbox, Central, MongoDB, Discord, or #sin-jobs state is
-created or changed. Future work may add a read-only bridge after these native
-observations are validated, but this slice intentionally does not redesign
-SiN jobs or native contract economics.
+`SiN_FS25_Server`; native contract events use its authenticated mailbox and
+Central/JiN projection described above. This does not redesign SiN jobs or
+native contract economics.

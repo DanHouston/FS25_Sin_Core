@@ -1,46 +1,60 @@
 -- SiN FS25 Contracts: native MissionManager diagnostics, UI estimates and
--- guarded replenishment. FS25 remains authoritative for mission state.
+-- guarded replenishment and mission-aware field preference. FS25 remains
+-- authoritative for mission state and mission construction.
 
 SiNContracts = {}
 local MOD_NAME = "[SiN Contracts] "
 local MAX_RECORDS = 128
 local MAX_EQUIPMENT = 16
 local MAX_VALIDATION_FAILURE_DIAGNOSTICS = 16
+local DEBUG = false
 local EFFICIENCY = 0.70
 local POLL_INTERVAL_MS = 1000
-local LOW_AVAILABLE_THRESHOLD = 3
-local REFILL_AVAILABLE_THRESHOLD = 9
--- Emergency replenishment is deliberately bounded, but a one-minute retry
--- made a depleted board visibly stall when a native generation cycle found no
--- eligible field. Retry the next three-cycle batch after ten seconds instead;
--- the native manager still gates each cycle and no custom mission is created.
-local LOW_RETRY_INTERVAL_MS = 10 * 1000
--- Once the board is below the nine-offer target, keep asking the native
--- manager for another bounded batch after this short retry interval. The
--- native generation gate still decides whether a cycle may actually start.
-local REFILL_RETRY_INTERVAL_MS = 10 * 1000
--- startMissionGeneration is asynchronous on the native manager.  Calling it
--- again on the next update can be accepted while the previous cycle is still
--- registering its offer, which produces a burst of ineffective requests and
--- leaves the board below target.  Space native requests by one generation
--- interval even when the manager does not expose a reliable in-flight flag.
-local GENERATION_REQUEST_INTERVAL_MS = 10 * 1000
--- An empty (or nearly empty) board is player-visible immediately after a
--- native period rollover. Native generation itself remains asynchronous and
--- authoritative; only the spacing between the three bounded attempts is
--- shortened so recovery does not sit empty for tens of seconds.
-local EMERGENCY_GENERATION_REQUEST_INTERVAL_MS = 1000
-local GENERATION_BATCH_SIZE = 3
--- Supply recovery is deliberately a last resort.  A native generation pass is
--- allowed to exhaust three times before the server prepares a few *NPC* fields
--- for ordinary FS25 work.  It never creates a Mission or changes a player
--- field.  The native MissionManager still selects, validates and rewards any
--- resulting offer.
+local RECOVERY_SOFT_TARGET_OFFERS = 9
+-- Keep native FS25 mission generation frequent enough to maintain an active
+-- board, but do not touch MissionManager.generationTimer or its update loop.
+-- finishMissionGeneration() resets the native timer from this class constant.
+local NATIVE_GENERATION_INTERVAL_MS = 10 * 1000
+-- Supply recovery is deliberately bounded. After native FS25 completes three
+-- consecutive generation cycles without adding an offer while the board is
+-- below the target, SiN prepares a few eligible *NPC* fields for ordinary
+-- native field-work missions. SiN never creates/registers a Mission itself.
 local EMPTY_CYCLES_BEFORE_SUPPLY_RECOVERY = 3
 local SUPPLY_RECOVERY_COOLDOWN_MS = 60 * 1000
 local SUPPLY_RECOVERY_MAX_FIELDS = 3
 local SUPPLY_FIELD_COOLDOWN_MS = 60 * 60 * 1000
+-- Automatic recovery is deliberately limited to treatment-style overlays that
+-- do not change the field's crop/ground preparation lifecycle. Cultivate/plow
+-- remain available only to explicit operator diagnostics/tests.
+local AUTOMATIC_SUPPLY_ACTIONS = {"herbicide", "fertilize", "stonePick"}
 local SUPPLY_ACTIONS = {"herbicide", "fertilize", "stonePick", "cultivate", "plow"}
+
+-- Native FS25 caps several common field mission types at only 2-3 concurrent
+-- instances. Diagnostics showed those caps, rather than lack of eligible work,
+-- were constraining board depth. Raise only the evidenced field-work caps; the
+-- global MissionManager.MAX_MISSIONS hard ceiling remains untouched.
+local NATIVE_FIELD_MISSION_CAPS = {
+    hoeMission = 5,
+    weedMission = 5,
+    herbicideMission = 5,
+    fertilizeMission = 5
+}
+
+-- Native getFieldForMission() can hand every mission type the same field for a
+-- generation pass. If that field is not eligible, a rare valid job (for
+-- example harvest) can be missed even when another free NPC field is valid.
+-- For these underrepresented field-work types, preserve the native picker call
+-- (and therefore its cursor/bookkeeping), but prefer a different free NPC field
+-- only when the mission's own isAvailableForField() says it is valid. Native
+-- tryGenerateMission still performs its normal eligibility check and creates the
+-- mission itself.
+local NATIVE_ELIGIBLE_FIELD_PREFERENCE_TYPES = {
+    plowMission = true,
+    cultivateMission = true,
+    sowMission = true,
+    harvestMission = true,
+    mowMission = true
+}
 
 local function logInfo(message, ...)
     if Logging ~= nil and Logging.info ~= nil then
@@ -52,6 +66,10 @@ local function logWarning(message, ...)
     if Logging ~= nil and Logging.warning ~= nil then
         Logging.warning(MOD_NAME .. string.format(message, ...))
     end
+end
+
+local function logDebug(message, ...)
+    if DEBUG then logInfo(message, ...) end
 end
 
 local function number(value)
@@ -185,6 +203,54 @@ local function fieldData(mission)
         farmlandId = number(farmlandId), x = number(x), y = number(y), z = number(z),
         location = text(call(mission, "getLocation"))
     }
+end
+
+local function emitNativeContractLifecycle(owner, mission, record, eventName, finishState)
+    if type(FS25SiNServer) ~= "table" or type(FS25SiNServer.emitServerEvent) ~= "function" then return end
+    local lifecycle = record.lifecycleToPublish
+    if eventName == "generated" then
+        lifecycle = "available"
+    elseif eventName == "accepted" then
+        lifecycle = "accepted"
+    elseif eventName == "cancelled" then
+        lifecycle = "cancelled"
+    elseif eventName == "finished" then
+        local state = string.upper(tostring(record.finishState or finishName(finishState) or ""))
+        if string.find(state, "SUCCESS", 1, true) or string.find(state, "COMPLETED", 1, true) then
+            lifecycle = "completed"
+        end
+    end
+    if lifecycle == nil then return end
+    record.lifecycleToPublish = lifecycle
+    owner.lifecycleEvents = owner.lifecycleEvents or {}
+    local id = tostring(record.missionId)
+    local emitted = owner.lifecycleEvents[id] or {}
+    owner.lifecycleEvents[id] = emitted
+    if emitted[lifecycle] then return end
+
+    local payload = {
+        mission_id = id,
+        mission_type = record.missionType,
+        field_id = record.field and record.field.id,
+        field_name = record.field and record.field.name,
+        area_ha = record.field and record.field.areaHa,
+        farmland_id = record.field and record.field.farmlandId,
+        reward = record.reward,
+        estimated_hours = record.estimatedHours,
+        estimated_dollars_per_hour = record.estimatedNativeDollarsPerHour,
+        accepting_farm_id = record.acceptingFarmId
+    }
+    local player = record.acceptingPlayer
+    if player ~= nil and player ~= "not-exposed-by-native-mission" then payload.accepting_player = player end
+    local ok, written = pcall(FS25SiNServer.emitServerEvent, FS25SiNServer,
+        "native_contract_" .. lifecycle, payload)
+    if ok and written == true then
+        emitted[lifecycle] = true
+        record.lifecycleToPublish = nil
+    elseif not owner.lifecycleWriteWarningLogged then
+        owner.lifecycleWriteWarningLogged = true
+        logWarning("native contract lifecycle mailbox unavailable; Discord contract updates are paused")
+    end
 end
 
 -- WorkAreaSpecialization owns the authoritative implement width. A vehicle's
@@ -442,20 +508,25 @@ function SiNContracts:observe(mission, eventName, finishState)
     end
     if eventName == "accepted" and record.startedMs == nil then record.startedMs = nowMs() end
     self.records[id] = record
+    emitNativeContractLifecycle(self, mission, record, eventName, finishState)
     local fingerprint = table.concat({record.status, tostring(record.acceptingFarmId or ""),
         tostring(record.finishState or ""), tostring(record.lastEvent)}, "|")
     if self.fingerprints[id] ~= fingerprint or eventName == "generated" or eventName == "accepted" then
         self.fingerprints[id] = fingerprint
-        logInfo("mission=%s event=%s type=%s status=%s completion=%s field=%s farmland=%s areaHa=%s location=%s x=%s y=%s z=%s reward=%s farm=%s player=%s estimateHours=%s nativeDollarsPerHour=%s equipment=%d equipmentSource=%s",
-            id, tostring(record.lastEvent), record.missionType, record.status, tostring(record.completion or "unavailable"),
-            tostring(field and field.id or ""), tostring(field and field.farmlandId or ""),
-            tostring(field and field.areaHa or ""), tostring(record.targetLocation or ""),
-            tostring(record.targetX or ""), tostring(record.targetY or ""), tostring(record.targetZ or ""),
-            tostring(reward or ""), tostring(record.acceptingFarmId or ""), tostring(record.acceptingPlayer),
-            tostring(estimatedHours or "unavailable"), tostring(record.estimatedNativeDollarsPerHour or "unavailable"),
-            #equipment, tostring(equipmentSource or "unavailable"))
+        if eventName == "generated" or eventName == "finished" then
+            logInfo("mission %s id=%s type=%s field=%s reward=%s", eventName, id,
+                record.missionType, tostring(field and field.id or "unavailable"), tostring(reward or "unavailable"))
+        else
+            logDebug("mission=%s event=%s type=%s status=%s completion=%s field=%s farmland=%s areaHa=%s location=%s reward=%s farm=%s player=%s estimateHours=%s nativeDollarsPerHour=%s equipment=%d equipmentSource=%s",
+                id, tostring(record.lastEvent), record.missionType, record.status, tostring(record.completion or "unavailable"),
+                tostring(field and field.id or ""), tostring(field and field.farmlandId or ""),
+                tostring(field and field.areaHa or ""), tostring(record.targetLocation or ""), tostring(reward or ""),
+                tostring(record.acceptingFarmId or ""), tostring(record.acceptingPlayer),
+                tostring(estimatedHours or "unavailable"), tostring(record.estimatedNativeDollarsPerHour or "unavailable"),
+                #equipment, tostring(equipmentSource or "unavailable"))
+        end
         for equipmentIndex, item in ipairs(equipment) do
-            logInfo("mission=%s equipment=%d name=%s widthM=%s widthSource=%s speedKmh=%s speedSource=%s capacity=%s",
+            logDebug("mission=%s equipment=%d name=%s widthM=%s widthSource=%s speedKmh=%s speedSource=%s capacity=%s",
                 id, equipmentIndex, tostring(item.name or "unavailable"),
                 tostring(item.workingWidthM or "unavailable"), tostring(item.workingWidthSource or "unavailable"),
                 tostring(item.workingSpeedKmh or "unavailable"),
@@ -512,188 +583,372 @@ function SiNContracts:availableMissionCount(manager)
     return count, missions
 end
 
--- Replenishment delegates to the native MissionManager generation cycle. It
--- never constructs or registers a mission itself, and it is server-only.
-function SiNContracts:maybeRequestGeneration(manager)
-    if g_currentMission == nil or g_currentMission:getIsServer() ~= true or manager == nil then return end
-    local available, missions = self:availableMissionCount(manager)
-    local now = nowMs()
-    if now == nil then return end
-    if self.lastRefillPolicyMs == nil then
-        -- Permit the first deficit check immediately; a board that starts at
-        -- 4-8 offers should not wait ten minutes before its first refill.
-        self.lastRefillPolicyMs = now - REFILL_RETRY_INTERVAL_MS
-    end
-
-    local inProgress = fieldValue(manager, {"missionGenerationInProgress"}) == true
-    if inProgress then return end
-    local missionManagerClass = MissionManager or manager
-    local maximum = number(fieldValue(missionManagerClass, {"MAX_MISSIONS"}))
-    if maximum == nil then maximum = number(fieldValue(manager, {"MAX_MISSIONS"})) end
-    if maximum ~= nil then
-        local total = 0
-        for _, _ in pairs(missions) do total = total + 1 end
-        if total >= maximum then
-            -- The native cap is authoritative; abandon a partially queued
-            -- batch rather than leaving it armed forever at a full board.
-            self.generationBatchRemaining = 0
-            local lastCapLog = self.lastGenerationCapLogMs
-            if lastCapLog == nil or now - lastCapLog >= 60000 then
-                self.lastGenerationCapLogMs = now
-                logInfo("native replenishment blocked available=%d total=%d maximum=%d reason=mission-cap",
-                    available, total, maximum)
-            end
-            return
-        end
-    end
-
-    -- A batch may be in flight while native registration adds offers. Stop as
-    -- soon as the target is reached rather than overshooting it by the full
-    -- three-cycle batch.
-    if available >= REFILL_AVAILABLE_THRESHOLD then
-        self.generationBatchRemaining = 0
-        return
-    end
-
-    local emergency = available < LOW_AVAILABLE_THRESHOLD
-    local refillDue = available < REFILL_AVAILABLE_THRESHOLD
-        and now - self.lastRefillPolicyMs >= REFILL_RETRY_INTERVAL_MS
-    local lowRetryDue = self.lastLowGenerationMs == nil
-        or now - self.lastLowGenerationMs >= LOW_RETRY_INTERVAL_MS
-
-    -- A trigger starts a bounded batch. Each native generation cycle can add
-    -- at most one offer, so three cycles are the smallest deterministic refill
-    -- that satisfies the policy without constructing missions ourselves.
-    local batchActive = (self.generationBatchRemaining or 0) > 0
-    local requestInterval = emergency and EMERGENCY_GENERATION_REQUEST_INTERVAL_MS
-        or GENERATION_REQUEST_INTERVAL_MS
-    local requestDue = self.lastGenerationRequestMs == nil
-        or now - self.lastGenerationRequestMs >= requestInterval
-    if not requestDue then return end
-    if not batchActive then
-        if not emergency and not refillDue then return end
-        if emergency and not lowRetryDue then return end
-        self.generationBatchRemaining = GENERATION_BATCH_SIZE
-        self.lastRefillPolicyMs = now
-        if emergency then self.lastLowGenerationMs = now end
-    end
-
-    -- This direct helper is retained for deterministic probes and callers
-    -- outside MissionManager:update. The live hook uses the pre-update path
-    -- below so generation remains inside FS25's native lifecycle.
-    local nativeCanStart = call(manager, "getCanStartNewMissionGeneration")
-    if nativeCanStart ~= true then
-        local lastGateLog = self.lastGenerationGateLogMs
-        if lastGateLog == nil or now - lastGateLog >= 60000 then
-            self.lastGenerationGateLogMs = now
-            logInfo("native replenishment deferred available=%d reason=%s", available,
-                nativeCanStart == nil and "generation-gate-unavailable" or "native-generation-gate")
-        end
-        return
-    end
-    -- Record the attempt before entering native code so both a rejected call
-    -- and a slow asynchronous native cycle are rate-limited identically.
-    self.lastGenerationRequestMs = now
-    local ok, accepted = pcall(manager.startMissionGeneration, manager)
-    if not ok or accepted == false then
-        -- Do not consume the remaining batch slot when the native API rejects
-        -- the request; a later update can safely retry after its gate clears.
-        logWarning("native replenishment request failed available=%d emergency=%s batchRemaining=%d",
-            available, tostring(emergency), self.generationBatchRemaining or 0)
-        return
-    end
-    -- Treat the successful native request as the batch's progress point.  The
-    -- native offer may not appear in getMissions until a later update, so the
-    -- next logical batch must not begin its retry window from the first
-    -- request in this batch.
-    self.lastRefillPolicyMs = now
-    if emergency then self.lastLowGenerationMs = now end
-    self.generationBatchRemaining = math.max(0, (self.generationBatchRemaining or 1) - 1)
-    -- Emit one bounded line per logical batch rather than one line for every
-    -- native cycle.  The per-cycle state remains diagnostic in mission
-    -- observations, while the operator sees when a refill batch starts.
-    if self.generationBatchRemaining == GENERATION_BATCH_SIZE - 1 then
-        logInfo("native replenishment batch started available=%d threshold=%d mode=%s batchSize=%d", available,
-            emergency and LOW_AVAILABLE_THRESHOLD or REFILL_AVAILABLE_THRESHOLD,
-            emergency and "low-availability" or "target-refill", GENERATION_BATCH_SIZE)
-    end
+local function diagnosticFieldId(field)
+    if field == nil then return nil end
+    return number(call(field, "getId")) or number(fieldValue(field, {"id"}))
 end
 
--- Prepare a native generation cycle before MissionManager:update runs.  This
--- preserves the fast refill policy without calling startMissionGeneration
--- after native update/validation has completed (which can leave a newly
--- registered field mission immediately removed on the following frame).
-function SiNContracts:prepareGenerationForNativeUpdate(manager)
-    if g_currentMission == nil or g_currentMission:getIsServer() ~= true or manager == nil then return nil end
-    local available, missions = self:availableMissionCount(manager)
-    if available >= REFILL_AVAILABLE_THRESHOLD then return nil end
-    local now = nowMs()
-    if now == nil then return nil end
-    if self.lastRefillPolicyMs == nil then self.lastRefillPolicyMs = now - REFILL_RETRY_INTERVAL_MS end
-    if fieldValue(manager, {"missionGenerationInProgress"}) == true then return nil end
+local function joinDiagnosticValues(values)
+    if values == nil or #values == 0 then return "none" end
+    local parts = {}
+    for _, value in ipairs(values) do table.insert(parts, tostring(value)) end
+    return table.concat(parts, ",")
+end
 
-    local missionManagerClass = MissionManager or manager
-    local maximum = number(fieldValue(missionManagerClass, {"MAX_MISSIONS"}))
-    if maximum == nil then maximum = number(fieldValue(manager, {"MAX_MISSIONS"})) end
-    if maximum ~= nil then
-        local total = 0
-        for _, _ in pairs(missions) do total = total + 1 end
-        if total >= maximum then
-            self.generationBatchRemaining = 0
-            return nil
-        end
-    end
+local NATIVE_ELIGIBILITY_TRACE_TYPES = {
+    fertilizeMission = true,
+    weedMission = true,
+    hoeMission = true,
+    herbicideMission = true,
+    plowMission = true,
+    cultivateMission = true,
+    sowMission = true,
+    harvestMission = true,
+    mowMission = true
+}
 
-    local emergency = available < LOW_AVAILABLE_THRESHOLD
-    local refillDue = now - self.lastRefillPolicyMs >= REFILL_RETRY_INTERVAL_MS
-    local lowRetryDue = self.lastLowGenerationMs == nil or now - self.lastLowGenerationMs >= LOW_RETRY_INTERVAL_MS
-    local batchActive = (self.generationBatchRemaining or 0) > 0
-    if not batchActive then
-        if not refillDue and (not emergency or not lowRetryDue) then return nil end
-        self.generationBatchRemaining = GENERATION_BATCH_SIZE
-        self.lastRefillPolicyMs = now
-        if emergency then self.lastLowGenerationMs = now end
-        self:logReplenishmentBatchStarted(now, available, emergency)
-    end
-
-    local requestInterval = emergency and EMERGENCY_GENERATION_REQUEST_INTERVAL_MS
-        or GENERATION_REQUEST_INTERVAL_MS
-    local requestDue = self.lastGenerationRequestMs == nil
-        or now - self.lastGenerationRequestMs >= requestInterval
-    if not requestDue then return nil end
-
-    local nativeCanStart = call(manager, "getCanStartNewMissionGeneration")
-    if nativeCanStart == true then
-        return {previousTimer = nil, armed = false}
-    end
-    local previousTimer = number(fieldValue(manager, {"generationTimer"}))
-    if nativeCanStart == false and previousTimer ~= nil and previousTimer >= 0 then
-        manager.generationTimer = -1
-        return {previousTimer = previousTimer, armed = true}
+local function diagnosticEnumName(enumTable, value)
+    if value == nil or type(enumTable) ~= "table" then return nil end
+    for name, enumValue in pairs(enumTable) do
+        if enumValue == value and type(name) == "string" then return name end
     end
     return nil
 end
 
-function SiNContracts:recordNativeGenerationStart(manager)
-    local now = nowMs()
-    self.lastGenerationRequestMs = now
-    self.lastRefillPolicyMs = now
-    self.generationBatchRemaining = math.max(0, (self.generationBatchRemaining or 1) - 1)
+local function diagnosticFruitName(index)
+    index = number(index)
+    if index == nil or g_fruitTypeManager == nil then return nil end
+    local desc = call(g_fruitTypeManager, "getFruitTypeByIndex", index)
+    return text(fieldValue(desc, {"name", "title"}))
 end
 
--- A replenishment request only starts FS25's asynchronous generator. It is
--- not proof that a mission was created. Keep this operator signal bounded so
--- an empty seasonal candidate pool does not flood a dedicated-server log.
-function SiNContracts:logReplenishmentBatchStarted(now, available, emergency)
-    self.replenishmentBatchStartsSinceLog = (self.replenishmentBatchStartsSinceLog or 0) + 1
-    local last = self.lastReplenishmentBatchLogMs
-    if last ~= nil and now - last < 60000 then return end
-    local batches = self.replenishmentBatchStartsSinceLog
-    self.replenishmentBatchStartsSinceLog = 0
-    self.lastReplenishmentBatchLogMs = now
-    logInfo("native replenishment batch started available=%d threshold=%d mode=%s batchSize=%d batches=%d",
-        available, emergency and LOW_AVAILABLE_THRESHOLD or REFILL_AVAILABLE_THRESHOLD,
-        emergency and "low-availability" or "target-refill", GENERATION_BATCH_SIZE, batches)
+local function diagnosticFieldState(field)
+    if field == nil then return "field=nil" end
+    local state = call(field, "getFieldState")
+    if state == nil then return string.format("field=%s state=unavailable", tostring(diagnosticFieldId(field) or "nil")) end
+
+    local groundType = fieldValue(state, {"groundType"})
+    local plannedFruit = fieldValue(field, {"plannedFruitTypeIndex"})
+    local currentMission = fieldValue(field, {"currentMission"})
+    local hasOwner = call(field, "getHasOwner")
+    local fruitIndex = fieldValue(state, {"fruitTypeIndex"})
+
+    return string.format(
+        "field=%s valid=%s fruit=%s fruitName=%s growth=%s ground=%s groundName=%s plannedFruit=%s plannedFruitName=%s weed=%s spray=%s sprayType=%s lime=%s stone=%s plow=%s missionAllowed=%s grassOnly=%s hasOwner=%s currentMission=%s",
+        tostring(diagnosticFieldId(field) or "nil"),
+        tostring(fieldValue(state, {"isValid"})),
+        tostring(fruitIndex),
+        tostring(diagnosticFruitName(fruitIndex)),
+        tostring(fieldValue(state, {"growthState"})),
+        tostring(groundType),
+        tostring(diagnosticEnumName(FieldGroundType, groundType)),
+        tostring(plannedFruit),
+        tostring(diagnosticFruitName(plannedFruit)),
+        tostring(fieldValue(state, {"weedState", "weedLevel"})),
+        tostring(fieldValue(state, {"sprayLevel"})),
+        tostring(fieldValue(state, {"sprayType"})),
+        tostring(fieldValue(state, {"limeLevel"})),
+        tostring(fieldValue(state, {"stoneLevel"})),
+        tostring(fieldValue(state, {"plowLevel"})),
+        tostring(fieldValue(field, {"isMissionAllowed"})),
+        tostring(fieldValue(field, {"grassMissionOnly"})),
+        tostring(hasOwner),
+        tostring(missionId(currentMission))
+    )
+end
+
+local function diagnosticMissionTypeData(name)
+    if g_missionManager == nil or type(g_missionManager.getMissionTypeDataByName) ~= "function" then return nil, nil end
+    local ok, data = pcall(g_missionManager.getMissionTypeDataByName, g_missionManager, name)
+    if not ok or type(data) ~= "table" then return nil, nil end
+    return number(fieldValue(data, {"numInstances"})), number(fieldValue(data, {"maxNumInstances"}))
+end
+
+-- Diagnostic-only whole-map census. Unlike the per-cycle trace (which records
+-- only the field returned by FieldManager:getFieldForMission), this asks each
+-- native mission class whether every currently free NPC field is eligible.
+-- It does not create, mutate or reserve missions/fields. The census is throttled
+-- to once per minute because isAvailableForField may inspect density-map state.
+local NATIVE_FIELD_CENSUS_TYPES = {
+    "plowMission",
+    "cultivateMission",
+    "sowMission",
+    "harvestMission",
+    "mowMission"
+}
+
+local function diagnosticMissionClass(manager, name)
+    -- MissionManager:getMissionTypeDataByName exposes instance/cap metadata on
+    -- this runtime, but not the classObject.  The live manager.missionTypes
+    -- entries do contain the same class objects used by native generation and
+    -- by our working per-cycle eligibility hooks, so resolve from that list.
+    if manager == nil or type(manager.missionTypes) ~= "table" then return nil end
+    for _, missionType in ipairs(manager.missionTypes) do
+        if text(fieldValue(missionType, {"name"})) == name then
+            return fieldValue(missionType, {"classObject"})
+        end
+    end
+    return nil
+end
+
+local function isFreeNpcMissionField(field)
+    if field == nil then return false end
+    local state = call(field, "getFieldState")
+    if state == nil or fieldValue(state, {"isValid"}) == false then return false end
+    if call(field, "getHasOwner") == true then return false end
+    if fieldValue(field, {"currentMission"}) ~= nil then return false end
+    if fieldValue(field, {"isMissionAllowed"}) == false then return false end
+    return true
+end
+
+local function nativeMissionFieldEligibility(classObject, field)
+    if type(classObject) ~= "table" or field == nil then return false end
+    -- The trace hook stores the unwrapped native predicate here. Use it so a
+    -- preference scan does not masquerade as native tryGenerateMission calls in
+    -- the per-cycle eligibility diagnostic. Fall back to the current function
+    -- during early startup before the trace hook is installed.
+    local predicate = classObject.__sinContractsNative_isAvailableForField
+        or classObject.isAvailableForField
+    if type(predicate) ~= "function" then return false end
+    local ok, result = pcall(predicate, field)
+    return ok and result == true
+end
+
+function SiNContracts:preferEligibleNativeField(manager, missionTypeName, nativeField)
+    if NATIVE_ELIGIBLE_FIELD_PREFERENCE_TYPES[missionTypeName] ~= true
+        or manager == nil
+        or g_fieldManager == nil
+        or type(g_fieldManager.fields) ~= "table" then
+        return nativeField
+    end
+
+    local classObject = diagnosticMissionClass(manager, missionTypeName)
+    if classObject == nil then return nativeField end
+
+    if isFreeNpcMissionField(nativeField) and nativeMissionFieldEligibility(classObject, nativeField) then
+        return nativeField
+    end
+
+    local ordered = {}
+    for _, field in pairs(g_fieldManager.fields) do
+        if isFreeNpcMissionField(field) then table.insert(ordered, field) end
+    end
+    table.sort(ordered, function(a, b)
+        return (number(diagnosticFieldId(a)) or math.huge) < (number(diagnosticFieldId(b)) or math.huge)
+    end)
+
+    -- Start immediately after the native field when possible. This keeps the
+    -- preference deterministic while avoiding a permanent bias toward the
+    -- lowest-numbered eligible field.
+    local nativeId = number(diagnosticFieldId(nativeField))
+    local startIndex = 1
+    if nativeId ~= nil then
+        for i, field in ipairs(ordered) do
+            if number(diagnosticFieldId(field)) == nativeId then
+                startIndex = (i % #ordered) + 1
+                break
+            end
+        end
+    end
+
+    for offset = 0, #ordered - 1 do
+        local index = ((startIndex - 1 + offset) % #ordered) + 1
+        local field = ordered[index]
+        if field ~= nativeField and nativeMissionFieldEligibility(classObject, field) then
+            logInfo("native field preference type=%s nativeField=%s preferredField=%s",
+                missionTypeName,
+                tostring(diagnosticFieldId(nativeField) or "nil"),
+                tostring(diagnosticFieldId(field) or "nil"))
+            return field
+        end
+    end
+
+    return nativeField
+end
+
+function SiNContracts:emitNativeFieldCensus(manager, availableAfter)
+    if call(g_currentMission, "getIsServer") ~= true
+        or manager == nil
+        or g_fieldManager == nil
+        or type(g_fieldManager.fields) ~= "table" then
+        return
+    end
+
+    local now = nowMs()
+    if now ~= nil and self.lastNativeFieldCensusLogMs ~= nil
+        and now - self.lastNativeFieldCensusLogMs < 60000 then
+        return
+    end
+    self.lastNativeFieldCensusLogMs = now
+
+    local candidates = {}
+    local totalFields = 0
+    local owned = 0
+    local occupied = 0
+    local disabled = 0
+    local invalid = 0
+
+    for _, field in pairs(g_fieldManager.fields) do
+        totalFields = totalFields + 1
+        local state = call(field, "getFieldState")
+        local isValid = state ~= nil and fieldValue(state, {"isValid"}) ~= false
+        local hasOwner = call(field, "getHasOwner") == true
+        local currentMission = fieldValue(field, {"currentMission"})
+        local missionAllowed = fieldValue(field, {"isMissionAllowed"}) ~= false
+
+        if not isValid then
+            invalid = invalid + 1
+        elseif hasOwner then
+            owned = owned + 1
+        elseif currentMission ~= nil then
+            occupied = occupied + 1
+        elseif not missionAllowed then
+            disabled = disabled + 1
+        else
+            table.insert(candidates, field)
+        end
+    end
+
+    logInfo("native field census available=%d total=%d npcFree=%d excluded=owned:%d occupied:%d disabled:%d invalid:%d",
+        availableAfter, totalFields, #candidates, owned, occupied, disabled, invalid)
+
+    for _, name in ipairs(NATIVE_FIELD_CENSUS_TYPES) do
+        local classObject = diagnosticMissionClass(manager, name)
+        local eligibleIds = {}
+        local eligibleStates = {}
+        local errors = 0
+
+        if type(classObject) == "table" and type(classObject.isAvailableForField) == "function" then
+            for _, field in ipairs(candidates) do
+                local ok, result = pcall(classObject.isAvailableForField, field)
+                if not ok then
+                    errors = errors + 1
+                elseif result == true then
+                    local id = diagnosticFieldId(field)
+                    table.insert(eligibleIds, id ~= nil and tostring(id) or "nil")
+                    if #eligibleStates < 5 then
+                        table.insert(eligibleStates, diagnosticFieldState(field))
+                    end
+                end
+            end
+        else
+            errors = -1
+        end
+
+        logInfo("native field census type=%s eligible=%d/%d fields=%s errors=%s",
+            name, #eligibleIds, #candidates,
+            #eligibleIds > 0 and table.concat(eligibleIds, ",") or "none",
+            errors == -1 and "class-unavailable" or tostring(errors))
+
+        if #eligibleStates > 0 then
+            logInfo("native field census samples type=%s states=%s",
+                name, table.concat(eligibleStates, " | "))
+        end
+    end
+end
+
+function SiNContracts:applyNativeMissionTypeCaps()
+    if call(g_currentMission, "getIsServer") ~= true
+        or g_missionManager == nil
+        or type(g_missionManager.getMissionTypeDataByName) ~= "function" then
+        return false
+    end
+
+    local allReady = true
+    for missionTypeName, desiredMax in pairs(NATIVE_FIELD_MISSION_CAPS) do
+        local ok, data = pcall(g_missionManager.getMissionTypeDataByName, g_missionManager, missionTypeName)
+        if not ok or type(data) ~= "table" then
+            allReady = false
+        else
+            local oldMax = number(fieldValue(data, {"maxNumInstances"}))
+            if oldMax == nil then
+                allReady = false
+            elseif oldMax < desiredMax then
+                data.maxNumInstances = desiredMax
+                logInfo("native mission type cap adjusted type=%s old=%d new=%d", missionTypeName, oldMax, desiredMax)
+            end
+        end
+    end
+
+    self.nativeMissionTypeCapsApplied = allReady
+    return allReady
+end
+
+local function appendEligibilityCheck(attempt, kind, result, field)
+    if attempt == nil then return end
+    attempt.eligibility = attempt.eligibility or {}
+    table.insert(attempt.eligibility, {
+        kind = kind,
+        result = result,
+        fieldState = field ~= nil and diagnosticFieldState(field) or nil
+    })
+end
+
+-- Native FS25 already starts mission-generation cycles from MissionManager:update.
+-- SiN does not race that gate or call startMissionGeneration itself. Instead,
+-- these observers bracket the native cycle and classify its outcome.
+function SiNContracts:onNativeGenerationStarted(manager)
+    if call(g_currentMission, "getIsServer") ~= true or manager == nil then return end
+    local available = self:availableMissionCount(manager)
+    self.nativeGenerationObservation = {
+        availableBefore = available,
+        startedAtMs = nowMs(),
+        attempts = {},
+        currentAttempt = nil
+    }
+end
+
+function SiNContracts:emitNativeGenerationDiagnostics(manager, observation, availableAfter)
+    if observation == nil or availableAfter >= RECOVERY_SOFT_TARGET_OFFERS then return end
+    if availableAfter > (observation.availableBefore or 0) then return end
+
+    local attempts = observation.attempts or {}
+    if #attempts == 0 then
+        logInfo("native generation diagnostic available=%d attempts=none", availableAfter)
+        return
+    end
+
+    local parts = {}
+    local eligibilityParts = {}
+    for _, attempt in ipairs(attempts) do
+        local fields = attempt.fieldSelections or {}
+        table.insert(parts, string.format("%s(fields=%s)",
+            tostring(attempt.name or "unknown"), joinDiagnosticValues(fields)))
+
+        if NATIVE_ELIGIBILITY_TRACE_TYPES[attempt.name] == true then
+            local detail = {}
+            table.insert(detail, string.format("instances=%s/%s",
+                tostring(attempt.numInstances or "?"), tostring(attempt.maxNumInstances or "?")))
+            if attempt.canRunResult ~= nil then
+                table.insert(detail, "canRun=" .. tostring(attempt.canRunResult))
+            else
+                table.insert(detail, "canRun=not-called")
+            end
+            for _, check in ipairs(attempt.eligibility or {}) do
+                local value = string.format("%s=%s", tostring(check.kind), tostring(check.result))
+                if check.fieldState ~= nil then value = value .. "{" .. check.fieldState .. "}" end
+                table.insert(detail, value)
+            end
+            table.insert(eligibilityParts, string.format("%s[%s]", tostring(attempt.name), table.concat(detail, ",")))
+        end
+    end
+    logInfo("native generation diagnostic available=%d attempts=%s",
+        availableAfter, table.concat(parts, ";"))
+    if #eligibilityParts > 0 then
+        logInfo("native eligibility diagnostic available=%d details=%s",
+            availableAfter, table.concat(eligibilityParts, ";"))
+    end
+    self:emitNativeFieldCensus(manager, availableAfter)
+end
+
+function SiNContracts:onNativeGenerationFinished(manager)
+    if call(g_currentMission, "getIsServer") ~= true or manager == nil then return end
+    local observation = self.nativeGenerationObservation
+    if observation == nil then return end
+    local availableAfter = self:availableMissionCount(manager)
+    if DEBUG then self:emitNativeGenerationDiagnostics(manager, observation, availableAfter) end
+    self.nativeGenerationObservation = nil
+    self:noteNativeGenerationCompletion(manager, observation.availableBefore, true)
 end
 
 -- A native generation cycle may scan every mission type and end without an
@@ -717,7 +972,7 @@ function SiNContracts:noteNativeGenerationCompletion(manager, availableBefore, w
     -- The first recovery attempt is intentionally delayed until native FS25
     -- has proven that its current field/month pool is empty.  This avoids
     -- changing a field merely because registration or replication was slow.
-    if availableAfter < LOW_AVAILABLE_THRESHOLD
+    if availableAfter < RECOVERY_SOFT_TARGET_OFFERS
         and self.nativeGenerationEmptyCyclesForSupply >= EMPTY_CYCLES_BEFORE_SUPPLY_RECOVERY then
         self:maybePrepareNativeFieldSupply(manager, availableAfter, now)
     end
@@ -728,7 +983,7 @@ function SiNContracts:noteNativeGenerationCompletion(manager, availableBefore, w
     local cycles = self.nativeGenerationEmptyCyclesSinceLog
     self.nativeGenerationEmptyCyclesSinceLog = 0
     self.lastNativeGenerationEmptyLogMs = now
-    logInfo("native generation completed without offer available=%d exhaustedCycles=%d period=%s",
+    logDebug("native generation completed without offer available=%d exhaustedCycles=%d period=%s",
         availableAfter, cycles, text(period) or "unavailable")
 end
 
@@ -831,6 +1086,30 @@ function SiNContracts:getSupplyActionReason(candidate, action)
     return "unknown-action"
 end
 
+function SiNContracts:logSupplyActionRejections(candidates)
+    local parts = {}
+    for _, action in ipairs(AUTOMATIC_SUPPLY_ACTIONS) do
+        local reasons = {}
+        local eligible = 0
+        for _, candidate in ipairs(candidates or {}) do
+            local reason = self:getSupplyActionReason(candidate, action)
+            if reason == nil then
+                eligible = eligible + 1
+            else
+                reasons[reason] = (reasons[reason] or 0) + 1
+            end
+        end
+        local reasonParts = {}
+        for reason, count in pairs(reasons) do
+            table.insert(reasonParts, string.format("%s:%d", tostring(reason), count))
+        end
+        table.sort(reasonParts)
+        table.insert(parts, string.format("%s eligible=%d rejected=%s",
+            action, eligible, #reasonParts > 0 and table.concat(reasonParts, ",") or "none"))
+    end
+    logDebug("native supply rejection diagnostic %s", table.concat(parts, "; "))
+end
+
 function SiNContracts:queueSupplyFieldUpdate(candidate, action)
     local state, field = candidate.state, candidate.field
     local task = call(state, "createFieldUpdateTask")
@@ -875,12 +1154,11 @@ function SiNContracts:prepareNativeFieldSupply(manager, available, now, source)
     if g_fieldManager == nil or type(g_fieldManager.fields) ~= "table" then return 0 end
     local candidates, excluded = self:getSupplyFieldCandidates(manager, now)
     local prepared, used = 0, {}
-    local actionCount = #SUPPLY_ACTIONS
-    local first = self.supplyActionCursor or 1
-    for offset = 0, actionCount - 1 do
+    -- Automatic recovery is intentionally restricted to weed/fertilizer/stone
+    -- overlays. It never changes ground type or plow state, leaving native
+    -- FS25/NPC progression fully responsible for cultivate/plow/sow/harvest.
+    for _, action in ipairs(AUTOMATIC_SUPPLY_ACTIONS) do
         if prepared >= SUPPLY_RECOVERY_MAX_FIELDS then break end
-        local actionIndex = ((first + offset - 1) % actionCount) + 1
-        local action = SUPPLY_ACTIONS[actionIndex]
         for _, candidate in ipairs(candidates) do
             if prepared >= SUPPLY_RECOVERY_MAX_FIELDS then break end
             if used[candidate.id] ~= true and self:getSupplyActionReason(candidate, action) == nil then
@@ -889,7 +1167,7 @@ function SiNContracts:prepareNativeFieldSupply(manager, available, now, source)
                     used[candidate.id] = true
                     prepared = prepared + 1
                     self.supplyAdjustedFields[candidate.id] = {atMs = now, action = action}
-                    logInfo("native supply prepared field=%d action=%s sourceFruit=%s sourceGrowth=%s sourceWeed=%s sourceSpray=%s sourceStone=%s sourcePlow=%s",
+                    logDebug("native supply prepared field=%d action=%s sourceFruit=%s sourceGrowth=%s sourceWeed=%s sourceSpray=%s sourceStone=%s sourcePlow=%s",
                         candidate.id, action, tostring(candidate.state.fruitTypeIndex), tostring(candidate.state.growthState),
                         tostring(candidate.state.weedState), tostring(candidate.state.sprayLevel),
                         tostring(candidate.state.stoneLevel), tostring(candidate.state.plowLevel))
@@ -899,26 +1177,25 @@ function SiNContracts:prepareNativeFieldSupply(manager, available, now, source)
             end
         end
     end
-    self.supplyActionCursor = ((first + prepared - 1) % actionCount) + 1
     if prepared > 0 then
         -- Give FieldManager a normal update tick to apply its queued tasks.
-        -- The existing native refill loop will then re-run MissionManager; no
-        -- mission is manufactured or force-registered here.
+        -- The normal native MissionManager cycle later decides whether this
+        -- state supports an offer; no mission is manufactured or registered.
         self.nativeGenerationEmptyCyclesSinceLog = 0
         self.nativeGenerationEmptyCyclesForSupply = 0
-        logInfo("native supply recovery queued source=%s fields=%d available=%d candidates=%d excluded=owned:%d occupied:%d pending:%d cooldown:%d invalid:%d disabled:%d",
-            tostring(source or "automatic"), prepared, available, #candidates, excluded.owned or 0, excluded.occupied or 0, excluded.pending or 0,
-            excluded.cooldown or 0, excluded.invalid or 0, excluded.disabled or 0)
+        logInfo("native supply recovery queued source=%s fields=%d available=%d",
+            tostring(source or "automatic"), prepared, available)
     else
-        logInfo("native supply recovery found no safe field source=%s available=%d candidates=%d excluded=owned:%d occupied:%d pending:%d cooldown:%d invalid:%d disabled:%d",
+        logDebug("native supply recovery found no safe field source=%s available=%d candidates=%d excluded=owned:%d occupied:%d pending:%d cooldown:%d invalid:%d disabled:%d",
             tostring(source or "automatic"), available, #candidates, excluded.owned or 0, excluded.occupied or 0, excluded.pending or 0,
             excluded.cooldown or 0, excluded.invalid or 0, excluded.disabled or 0)
+        self:logSupplyActionRejections(candidates)
     end
     return prepared
 end
 
 function SiNContracts:maybePrepareNativeFieldSupply(manager, available, now)
-    if available >= LOW_AVAILABLE_THRESHOLD then return 0 end
+    if available >= RECOVERY_SOFT_TARGET_OFFERS then return 0 end
     local last = self.lastSupplyRecoveryMs
     if last ~= nil and now - last < SUPPLY_RECOVERY_COOLDOWN_MS then return 0 end
     self.lastSupplyRecoveryMs = now
@@ -962,7 +1239,7 @@ function SiNContracts:consoleCommandContractSupplyTest(actionName)
             local ok, reason = self:queueSupplyFieldUpdate(candidate, action)
             if ok then
                 self.supplyAdjustedFields[candidate.id] = {atMs = now, action = action}
-                logInfo("native supply test queued field=%d action=%s sourceFruit=%s sourceGrowth=%s sourceWeed=%s sourceSpray=%s sourceStone=%s sourcePlow=%s",
+                logDebug("native supply test queued field=%d action=%s sourceFruit=%s sourceGrowth=%s sourceWeed=%s sourceSpray=%s sourceStone=%s sourcePlow=%s",
                     candidate.id, action, tostring(candidate.state.fruitTypeIndex), tostring(candidate.state.growthState),
                     tostring(candidate.state.weedState), tostring(candidate.state.sprayLevel),
                     tostring(candidate.state.stoneLevel), tostring(candidate.state.plowLevel))
@@ -1052,7 +1329,7 @@ function SiNContracts:consoleCommandContracts()
     table.sort(ids)
     for _, id in ipairs(ids) do
         local r = self.records[id]
-        logInfo("diagnostic mission=%s type=%s status=%s completion=%s field=%s farmland=%s areaHa=%s location=%s x=%s y=%s z=%s reward=%s farm=%s player=%s estimateHours=%s nativeDollarsPerHour=%s actualHours=%s equipment=%d",
+        logDebug("diagnostic mission=%s type=%s status=%s completion=%s field=%s farmland=%s areaHa=%s location=%s x=%s y=%s z=%s reward=%s farm=%s player=%s estimateHours=%s nativeDollarsPerHour=%s actualHours=%s equipment=%d",
             id, tostring(r.missionType), tostring(r.status), tostring(r.completion or "unavailable"), tostring(r.field and r.field.id or ""),
             tostring(r.field and r.field.farmlandId or ""), tostring(r.field and r.field.areaHa or ""),
             tostring(r.targetLocation or ""), tostring(r.targetX or ""), tostring(r.targetY or ""), tostring(r.targetZ or ""),
@@ -1061,7 +1338,7 @@ function SiNContracts:consoleCommandContracts()
             tostring(r.estimatedNativeDollarsPerHour or "unavailable"), tostring(r.actualHours or "unavailable"),
             #(r.equipment or {}))
         for equipmentIndex, item in ipairs(r.equipment or {}) do
-            logInfo("diagnostic mission=%s equipment=%d name=%s widthM=%s widthSource=%s speedKmh=%s speedSource=%s capacity=%s",
+            logDebug("diagnostic mission=%s equipment=%d name=%s widthM=%s widthSource=%s speedKmh=%s speedSource=%s capacity=%s",
                 id, equipmentIndex, tostring(item.name or "unavailable"),
                 tostring(item.workingWidthM or "unavailable"), tostring(item.workingWidthSource or "unavailable"),
                 tostring(item.workingSpeedKmh or "unavailable"),
@@ -1074,7 +1351,7 @@ end
 
 -- Read-only operator probe for the recovery layer.  It deliberately reports
 -- candidates without queuing a FieldUpdateTask; recovery itself is only armed
--- after repeated native generation exhaustion below the low-offer threshold.
+-- after repeated native generation exhaustion below the recovery soft target.
 function SiNContracts:consoleCommandContractSupply()
     if call(g_currentMission, "getIsServer") ~= true or g_missionManager == nil then
         return "SiN contract supply is available on the authoritative server only"
@@ -1122,6 +1399,367 @@ local function appendMethod(target, name, callback, marker, preserveReturns)
     return true
 end
 
+function SiNContracts:installNativeEligibilityTraceHooks(manager)
+    if manager == nil or type(manager.missionTypes) ~= "table" then return false end
+    local installed = false
+
+    for _, missionType in ipairs(manager.missionTypes) do
+        local name = text(fieldValue(missionType, {"name"}))
+        local classObject = fieldValue(missionType, {"classObject"})
+        if name ~= nil and NATIVE_ELIGIBILITY_TRACE_TYPES[name] == true and type(classObject) == "table" then
+            if type(classObject.canRun) == "function" and classObject.__sinContractsTrace_canRun ~= true then
+                local nativeCanRun = classObject.canRun
+                classObject.canRun = function(...)
+                    local values = {nativeCanRun(...)}
+                    local observation = SiNContracts.nativeGenerationObservation
+                    local attempt = observation ~= nil and observation.currentAttempt or nil
+                    if attempt ~= nil and attempt.name == name then
+                        attempt.canRunResult = values[1]
+                        appendEligibilityCheck(attempt, "canRun", values[1], nil)
+                    end
+                    return unpack(values)
+                end
+                classObject.__sinContractsTrace_canRun = true
+                installed = true
+            end
+
+            if type(classObject.isAvailableForField) == "function" and classObject.__sinContractsTrace_isAvailableForField ~= true then
+                local nativeIsAvailableForField = classObject.isAvailableForField
+                classObject.__sinContractsNative_isAvailableForField = nativeIsAvailableForField
+                classObject.isAvailableForField = function(...)
+                    local args = {...}
+                    local values = {nativeIsAvailableForField(unpack(args))}
+                    local observation = SiNContracts.nativeGenerationObservation
+                    local attempt = observation ~= nil and observation.currentAttempt or nil
+                    if attempt ~= nil and attempt.name == name then
+                        local field = args[1] == classObject and args[2] or args[1]
+                        appendEligibilityCheck(attempt, "available", values[1], field)
+                    end
+                    return unpack(values)
+                end
+                classObject.__sinContractsTrace_isAvailableForField = true
+                installed = true
+            end
+        end
+    end
+
+    return installed
+end
+
+
+-- Harvest can pass isAvailableForField() and still return nil from its native
+-- tryGenerateMission().  Trace the remaining native construction path without
+-- changing any return values or mission state.  This intentionally records
+-- whether the HarvestMission constructor and init path were reached so we can
+-- distinguish field eligibility from later crop/equipment/sell-point/init gates.
+function SiNContracts:installNativeHarvestConstructionTraceHook(manager)
+    local classObject = diagnosticMissionClass(manager, "harvestMission")
+    if type(classObject) ~= "table" then return false end
+    local installed = false
+
+    -- Harvest generation can reject a valid field before constructing a mission.
+    -- Trace the native vehicle-variant lookup because harvest missions use the
+    -- crop-specific variant to find a compatible mission vehicle group.
+    if type(classObject.getVehicleVariant) == "function" and classObject.__sinContractsTrace_getVehicleVariant ~= true then
+        local nativeGetVehicleVariant = classObject.getVehicleVariant
+        classObject.__sinContractsNative_getVehicleVariant = nativeGetVehicleVariant
+        classObject.getVehicleVariant = function(...)
+            local values = {nativeGetVehicleVariant(...)}
+            local trace = SiNContracts.nativeHarvestConstructionTrace
+            if trace ~= nil then
+                trace.vehicleVariantCalled = true
+                trace.vehicleVariant = values[1]
+                local args = {...}
+                local receiver = args[1]
+                if type(receiver) == "table" then
+                    trace.vehicleVariantFruit = fieldValue(receiver, {"fruitTypeIndex"})
+                end
+            end
+            return unpack(values)
+        end
+        classObject.__sinContractsTrace_getVehicleVariant = true
+        installed = true
+    elseif classObject.__sinContractsTrace_getVehicleVariant == true then
+        installed = true
+    end
+
+    if type(classObject.new) == "function" and classObject.__sinContractsTrace_new ~= true then
+        local nativeNew = classObject.new
+        classObject.new = function(...)
+            local values = {nativeNew(...)}
+            local trace = SiNContracts.nativeHarvestConstructionTrace
+            if trace ~= nil then
+                trace.newCalled = true
+                trace.missionObject = values[1]
+                trace.newReturned = values[1] ~= nil
+            end
+            return unpack(values)
+        end
+        classObject.__sinContractsTrace_new = true
+        installed = true
+    elseif classObject.__sinContractsTrace_new == true then
+        installed = true
+    end
+
+    -- HarvestMission may inherit init from AbstractFieldMission. Access through
+    -- the class table resolves the inherited function; assigning this wrapper
+    -- creates only a HarvestMission-specific override and preserves the native
+    -- implementation and result tuple.
+    if type(classObject.init) == "function" and classObject.__sinContractsTrace_init ~= true then
+        local nativeInit = classObject.init
+        classObject.init = function(mission, field, ...)
+            local values = {nativeInit(mission, field, ...)}
+            local trace = SiNContracts.nativeHarvestConstructionTrace
+            if trace ~= nil then
+                trace.initCalled = true
+                trace.initResult = values[1]
+                trace.initFieldId = diagnosticFieldId(field)
+                trace.missionObject = mission or trace.missionObject
+            end
+            return unpack(values)
+        end
+        classObject.__sinContractsTrace_init = true
+        installed = true
+    elseif classObject.__sinContractsTrace_init == true then
+        installed = true
+    end
+
+    if type(classObject.tryGenerateMission) == "function"
+        and classObject.__sinContractsTrace_tryGenerateMission ~= true then
+        local nativeTryGenerateMission = classObject.tryGenerateMission
+        classObject.tryGenerateMission = function(...)
+            local beforeInstances, maxInstances = diagnosticMissionTypeData("harvestMission")
+            local trace = {
+                newCalled = false,
+                newReturned = false,
+                initCalled = false,
+                initResult = nil,
+                initFieldId = nil,
+                missionObject = nil,
+                vehicleVariantCalled = false,
+                vehicleVariant = nil,
+                vehicleVariantFruit = nil,
+                instancesBefore = beforeInstances,
+                maxInstances = maxInstances
+            }
+            SiNContracts.nativeHarvestConstructionTrace = trace
+
+            local ok, values = pcall(function(...)
+                return {nativeTryGenerateMission(...)}
+            end, ...)
+
+            SiNContracts.nativeHarvestConstructionTrace = nil
+            if not ok then
+                logWarning("native harvest construction trace native tryGenerateMission failed error=%s", tostring(values))
+                error(values)
+            end
+
+            local returnedMission = values[1]
+            local afterInstances = diagnosticMissionTypeData("harvestMission")
+            local field = nil
+            if returnedMission ~= nil then
+                field = fieldValue(returnedMission, {"field"}) or call(returnedMission, "getField")
+            elseif trace.missionObject ~= nil then
+                field = fieldValue(trace.missionObject, {"field"}) or call(trace.missionObject, "getField")
+            end
+
+            local observation = SiNContracts.nativeGenerationObservation
+            local attempt = observation ~= nil and observation.currentAttempt or nil
+            local selectedFields = attempt ~= nil and joinDiagnosticValues(attempt.fieldSelections or {}) or "unavailable"
+            local fieldId = diagnosticFieldId(field) or trace.initFieldId
+            local currentMission = field ~= nil and fieldValue(field, {"currentMission"}) or nil
+
+            -- Resolve the field selected by native generation so we can report
+            -- the vehicle-group inventory that would be available for its crop.
+            local selectedField = field
+            local selectedFieldId = fieldId
+            if selectedField == nil and attempt ~= nil and attempt.fieldSelections ~= nil and #attempt.fieldSelections > 0 then
+                selectedFieldId = tonumber(attempt.fieldSelections[#attempt.fieldSelections])
+                if selectedFieldId ~= nil and g_fieldManager ~= nil and type(g_fieldManager.getFieldById) == "function" then
+                    selectedField = g_fieldManager:getFieldById(selectedFieldId)
+                end
+            end
+
+            local diagnosticVariant = trace.vehicleVariant
+            local diagnosticFruit = trace.vehicleVariantFruit
+            if selectedField ~= nil then
+                local state = call(selectedField, "getFieldState")
+                if state ~= nil then
+                    diagnosticFruit = diagnosticFruit or fieldValue(state, {"fruitTypeIndex"})
+                    if diagnosticVariant == nil and type(classObject.__sinContractsNative_getVehicleVariant) == "function" then
+                        local okVariant, value = pcall(classObject.__sinContractsNative_getVehicleVariant, {fruitTypeIndex=diagnosticFruit})
+                        if okVariant then diagnosticVariant = value end
+                    end
+                end
+            end
+
+            local fieldSize = "unknown"
+            local areaHa = selectedField ~= nil and call(selectedField, "getAreaHa") or nil
+            if type(areaHa) == "number" then
+                fieldSize = "small"
+                if AbstractFieldMission ~= nil and type(AbstractFieldMission.FIELD_SIZE_LARGE) == "number" and areaHa > AbstractFieldMission.FIELD_SIZE_LARGE then
+                    fieldSize = "large"
+                elseif AbstractFieldMission ~= nil and type(AbstractFieldMission.FIELD_SIZE_MEDIUM) == "number" and areaHa > AbstractFieldMission.FIELD_SIZE_MEDIUM then
+                    fieldSize = "medium"
+                end
+            end
+
+            local groupCount, matchingGroupCount = 0, 0
+            local groupVariants = {}
+            local harvestVehicles = g_missionManager ~= nil and g_missionManager.missionVehicles ~= nil and g_missionManager.missionVehicles["harvestMission"] or nil
+            local groups = harvestVehicles ~= nil and harvestVehicles[fieldSize] or nil
+            if type(groups) == "table" then
+                for _, group in ipairs(groups) do
+                    groupCount = groupCount + 1
+                    local variant = group.variant
+                    table.insert(groupVariants, tostring(variant or "nil"))
+                    if diagnosticVariant == nil or variant == nil or variant == diagnosticVariant then
+                        matchingGroupCount = matchingGroupCount + 1
+                    end
+                end
+            end
+
+            logInfo(
+                "native harvest construction selectedFields=%s returned=%s newCalled=%s newReturned=%s initCalled=%s initResult=%s field=%s fieldCurrentMission=%s instances=%s/%s->%s variantCalled=%s variant=%s fruit=%s fieldSize=%s areaHa=%s vehicleGroups=%s matchingGroups=%s groupVariants=%s",
+                tostring(selectedFields),
+                tostring(returnedMission ~= nil),
+                tostring(trace.newCalled),
+                tostring(trace.newReturned),
+                tostring(trace.initCalled),
+                tostring(trace.initResult),
+                tostring(selectedFieldId or "nil"),
+                tostring(missionId(currentMission)),
+                tostring(trace.instancesBefore or "?"),
+                tostring(trace.maxInstances or "?"),
+                tostring(afterInstances or "?"),
+                tostring(trace.vehicleVariantCalled),
+                tostring(diagnosticVariant or "nil"),
+                tostring(diagnosticFruit or "nil"),
+                tostring(fieldSize),
+                tostring(areaHa or "nil"),
+                tostring(groupCount),
+                tostring(matchingGroupCount),
+                #groupVariants > 0 and table.concat(groupVariants, ",") or "none"
+            )
+
+            return unpack(values)
+        end
+        classObject.__sinContractsTrace_tryGenerateMission = true
+        installed = true
+    elseif classObject.__sinContractsTrace_tryGenerateMission == true then
+        installed = true
+    end
+
+    return installed
+end
+
+function SiNContracts:installNativeFieldPreferenceHooks()
+    if g_fieldManager == nil or type(g_fieldManager.getFieldForMission) ~= "function" then return false end
+    local installed = false
+    if g_fieldManager.__sinContractsFieldPreferenceHook ~= true then
+        local nativeGetFieldForMission = g_fieldManager.getFieldForMission
+        g_fieldManager.getFieldForMission = function(fieldManager, ...)
+            local nativeField = nativeGetFieldForMission(fieldManager, ...)
+            local missionTypeName = SiNContracts.currentNativeMissionType
+            if missionTypeName ~= nil then
+                return SiNContracts:preferEligibleNativeField(g_missionManager, missionTypeName, nativeField)
+            end
+            return nativeField
+        end
+        g_fieldManager.__sinContractsFieldPreferenceHook = true
+        installed = true
+    end
+    if g_missionManager ~= nil and type(g_missionManager.missionTypes) == "table" then
+        for _, missionType in ipairs(g_missionManager.missionTypes) do
+            local name = text(fieldValue(missionType, {"name"}))
+            local classObject = fieldValue(missionType, {"classObject"})
+            if name ~= nil and NATIVE_ELIGIBLE_FIELD_PREFERENCE_TYPES[name] == true
+                and type(classObject) == "table" and type(classObject.tryGenerateMission) == "function"
+                and classObject.__sinContractsPreferenceTryGenerateMission ~= true then
+                local nativeTryGenerateMission = classObject.tryGenerateMission
+                classObject.tryGenerateMission = function(...)
+                    local previous = SiNContracts.currentNativeMissionType
+                    SiNContracts.currentNativeMissionType = name
+                    local values = {nativeTryGenerateMission(...) }
+                    SiNContracts.currentNativeMissionType = previous
+                    return unpack(values)
+                end
+                classObject.__sinContractsPreferenceTryGenerateMission = true
+                installed = true
+            end
+        end
+    end
+    return installed or g_fieldManager.__sinContractsFieldPreferenceHook == true
+end
+
+function SiNContracts:installNativeGenerationTraceHooks()
+    -- Production has no generation tracing. DEBUG retains the investigation
+    -- trace only for a controlled diagnostic build/session.
+    if not DEBUG then return self:installNativeFieldPreferenceHooks() end
+    local installed = false
+    installed = self:installNativeEligibilityTraceHooks(g_missionManager) or installed
+    installed = self:installNativeHarvestConstructionTraceHook(g_missionManager) or installed
+
+    if MissionManager ~= nil and type(MissionManager.generateMission) == "function"
+        and MissionManager.__sinContractsTrace_generateMission ~= true then
+        local nativeGenerateMission = MissionManager.generateMission
+        MissionManager.generateMission = function(manager, ...)
+            local observation = SiNContracts.nativeGenerationObservation
+            local attempt = nil
+            if observation ~= nil and call(g_currentMission, "getIsServer") == true then
+                local index = number(fieldValue(manager, {"currentMissionTypeIndex"}))
+                local missionType = index ~= nil and manager.missionTypes ~= nil and manager.missionTypes[index] or nil
+                local attemptName = text(fieldValue(missionType, {"name"})) or "unknown"
+                local numInstances, maxNumInstances = diagnosticMissionTypeData(attemptName)
+                attempt = {
+                    name = attemptName,
+                    index = index,
+                    fieldSelections = {},
+                    eligibility = {},
+                    numInstances = numInstances,
+                    maxNumInstances = maxNumInstances
+                }
+                table.insert(observation.attempts, attempt)
+                observation.currentAttempt = attempt
+            end
+
+            local values = {nativeGenerateMission(manager, ...)}
+
+            if observation ~= nil and observation.currentAttempt == attempt then
+                observation.currentAttempt = nil
+            end
+            return unpack(values)
+        end
+        MissionManager.__sinContractsTrace_generateMission = true
+        installed = true
+    elseif MissionManager ~= nil and MissionManager.__sinContractsTrace_generateMission == true then
+        installed = true
+    end
+
+    if g_fieldManager ~= nil and type(g_fieldManager.getFieldForMission) == "function"
+        and g_fieldManager.__sinContractsTrace_getFieldForMission ~= true then
+        local nativeGetFieldForMission = g_fieldManager.getFieldForMission
+        g_fieldManager.getFieldForMission = function(fieldManager, ...)
+            local nativeField = nativeGetFieldForMission(fieldManager, ...)
+            local observation = SiNContracts.nativeGenerationObservation
+            local attempt = observation ~= nil and observation.currentAttempt or nil
+            local field = nativeField
+            if attempt ~= nil then
+                field = SiNContracts:preferEligibleNativeField(g_missionManager, attempt.name, nativeField)
+                local id = diagnosticFieldId(field)
+                table.insert(attempt.fieldSelections, id ~= nil and id or "nil")
+            end
+            return field
+        end
+        g_fieldManager.__sinContractsTrace_getFieldForMission = true
+        installed = true
+    elseif g_fieldManager ~= nil and g_fieldManager.__sinContractsTrace_getFieldForMission == true then
+        installed = true
+    end
+
+    return installed
+end
+
 function SiNContracts:installHooks()
     -- Native mission generation, acceptance and lifecycle mutations are
     -- server-authoritative. Installing wrappers for them on a multiplayer
@@ -1132,10 +1770,19 @@ function SiNContracts:installHooks()
         self:installDetailsHook()
         return
     end
+    local fieldPreferenceReady = g_fieldManager == nil or type(g_fieldManager.getFieldForMission) ~= "function"
+        or g_fieldManager.__sinContractsFieldPreferenceHook == true
     if self.hooksInstalled == true and self.abstractHooksInstalled == true and self.detailsHookInstalled == true
-        and (AbstractFieldMission == nil or self.validationHookInstalled == true) then return end
-    local installed = false
+        and (AbstractFieldMission == nil or self.validationHookInstalled == true)
+        and fieldPreferenceReady then return end
+    local installed = self:installNativeGenerationTraceHooks()
     if MissionManager ~= nil then
+        installed = appendMethod(MissionManager, "startMissionGeneration", function(manager)
+            SiNContracts:onNativeGenerationStarted(manager)
+        end, "__sinContractsHook_startMissionGeneration", true) or installed
+        installed = appendMethod(MissionManager, "finishMissionGeneration", function(manager)
+            SiNContracts:onNativeGenerationFinished(manager)
+        end, "__sinContractsHook_finishMissionGeneration", true) or installed
         installed = appendMethod(MissionManager, "registerMission", function(manager, mission)
             SiNContracts:observe(mission, "generated")
         end, nil, true) or installed
@@ -1155,59 +1802,6 @@ function SiNContracts:installHooks()
         installed = appendMethod(MissionManager, "markMissionForDeletion", function(manager, mission)
             SiNContracts:observeValidationFailure(mission, "MissionManager.markMissionForDeletion")
         end, "__sinContractsHook_markMissionForDeletion") or installed
-        if type(MissionManager.update) == "function" and MissionManager.__sinContractsHook_update ~= true then
-            local nativeUpdate = MissionManager.update
-            MissionManager.update = function(manager, ...)
-                local availableBefore = SiNContracts:availableMissionCount(manager)
-                local wasGenerating = fieldValue(manager, {"missionGenerationInProgress"}) == true
-                local token = SiNContracts:prepareGenerationForNativeUpdate(manager)
-                SiNContracts._generationStartedInUpdate = false
-                if token ~= nil then
-                    local canStart = call(manager, "getCanStartNewMissionGeneration")
-                    if canStart == true then
-                        local ok, accepted = pcall(manager.startMissionGeneration, manager)
-                        if ok and accepted ~= false then
-                            -- Start before native update, so FS25 performs its
-                            -- normal update/validation lifecycle with the
-                            -- generation already in flight.
-                            SiNContracts._generationStartedInUpdate = true
-                        elseif token.armed == true then
-                            manager.generationTimer = token.previousTimer
-                        end
-                    elseif token.armed == true then
-                        manager.generationTimer = token.previousTimer
-                    end
-                end
-                SiNContracts._insideNativeUpdate = true
-                local values = {nativeUpdate(manager, ...)}
-                SiNContracts._insideNativeUpdate = false
-                local started = SiNContracts._generationStartedInUpdate == true
-                if token ~= nil and token.armed == true and not started then
-                    -- The native gate rejected the cycle.  Restore the timer
-                    -- we temporarily expired; native state remains untouched.
-                    manager.generationTimer = token.previousTimer
-                end
-                if started then
-                    SiNContracts:recordNativeGenerationStart(manager)
-                end
-                SiNContracts:noteNativeGenerationCompletion(manager, availableBefore, wasGenerating or started)
-                local now = nowMs()
-                if now == nil or SiNContracts.lastPollMs == nil or now - SiNContracts.lastPollMs >= POLL_INTERVAL_MS then
-                    SiNContracts.lastPollMs = now
-                    SiNContracts:scan("observed")
-                end
-                return unpack(values)
-            end
-            MissionManager.__sinContractsHook_update = true
-            installed = true
-        elseif MissionManager.__sinContractsHook_update == true then
-            installed = true
-        end
-        installed = appendMethod(MissionManager, "startMissionGeneration", function(manager)
-            if SiNContracts._insideNativeUpdate == true then
-                SiNContracts._generationStartedInUpdate = true
-            end
-        end, "__sinContractsHook_startMissionGeneration", true) or installed
     end
     if AbstractMission ~= nil then
         installed = appendMethod(AbstractMission, "finish", function(mission, finishState)
@@ -1237,10 +1831,15 @@ function SiNContracts:installHooks()
     end
     self:installDetailsHook()
     self.hooksInstalled = installed
-    if installed then logInfo("native MissionManager hooks installed; guarded replenishment batch=%d efficiency=%.2f", GENERATION_BATCH_SIZE, EFFICIENCY) end
+    if installed then logInfo("native MissionManager hooks installed; observing generation cycles interval=%dms recoveryTarget=%d efficiency=%.2f", NATIVE_GENERATION_INTERVAL_MS, RECOVERY_SOFT_TARGET_OFFERS, EFFICIENCY) end
 end
 
 function SiNContracts:loadMap()
+    if call(g_currentMission, "getIsServer") == true and MissionManager ~= nil then
+        MissionManager.MISSION_GENERATION_INTERVAL = NATIVE_GENERATION_INTERVAL_MS
+        logInfo("native mission generation interval configured interval=%dms", NATIVE_GENERATION_INTERVAL_MS)
+        self:applyNativeMissionTypeCaps()
+    end
     self:installHooks()
     if addConsoleCommand ~= nil and self.commandInstalled ~= true then
         addConsoleCommand("sinContracts", "Dump native FS25 contract diagnostics", "consoleCommandContracts", self)
@@ -1252,6 +1851,20 @@ end
 
 function SiNContracts:update()
     self:installHooks()
+    if call(g_currentMission, "getIsServer") ~= true or g_missionManager == nil then return end
+    if self.nativeMissionTypeCapsApplied ~= true then
+        self:applyNativeMissionTypeCaps()
+    end
+
+    local now = nowMs()
+    if now == nil then return end
+    if self.lastPollMs ~= nil and now - self.lastPollMs < POLL_INTERVAL_MS then return end
+    self.lastPollMs = now
+
+    -- Native MissionManager owns generation cadence and lifecycle. The hooks on
+    -- startMissionGeneration/finishMissionGeneration classify empty cycles and
+    -- trigger bounded supply recovery when needed. This poll remains read-only.
+    self:scan("observed")
 end
 
 function SiNContracts:deleteMap()
@@ -1271,12 +1884,8 @@ SiNContracts.detailsHookInstalled = false
 SiNContracts.validationHookInstalled = false
 SiNContracts.validationFailureIds = {}
 SiNContracts.validationFailureCount = 0
-SiNContracts.lastRefillPolicyMs = nil
-SiNContracts.lastLowGenerationMs = nil
-SiNContracts.generationBatchRemaining = 0
-SiNContracts.replenishmentBatchStartsSinceLog = 0
+SiNContracts.nativeGenerationObservation = nil
 SiNContracts.nativeGenerationEmptyCyclesSinceLog = 0
 SiNContracts.nativeGenerationEmptyCyclesForSupply = 0
 SiNContracts.supplyAdjustedFields = {}
-SiNContracts.supplyActionCursor = 1
 addModEventListener(SiNContracts)

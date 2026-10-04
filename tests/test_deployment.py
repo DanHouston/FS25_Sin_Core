@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from zipfile import ZipFile
+from zipfile import ZipFile, ZIP_DEFLATED
 
 from fs25_network_core.lua_validation import LuaValidationError, validate_fs25_lua_source
 from fs25_network_core.release_validation import validate_release_directory
@@ -96,10 +96,11 @@ class DeploymentPackagingTests(unittest.TestCase):
                 })
                 contract_source = archive.read("scripts/SiNContracts.lua").decode("utf-8")
                 self.assertIn("MissionManager", contract_source)
-                self.assertNotIn("FS25SiNServer", contract_source)
+                self.assertIn("FS25SiNServer.emitServerEvent", contract_source)
+                self.assertIn('"native_contract_" .. lifecycle', contract_source)
             with ZipFile(output / "SiN_FS25_Policy.zip") as archive:
                 self.assertEqual(set(archive.namelist()), {
-                    "modDesc.xml", "scripts/SiNProductionPolicy.lua", "scripts/SiNVehiclePricingPolicy.lua", "config/production-policy.xml", "config/construction-policy.xml", "config/vehicle-pricing-policy.xml", "icon_policy.dds"
+                    "modDesc.xml", "scripts/SiNProductionPolicy.lua", "scripts/SiNVehiclePricingPolicy.lua", "scripts/SiNSellCoveragePolicy.lua", "scripts/SiNBuyingStationPolicy.lua", "config/production-policy.xml", "config/construction-policy.xml", "config/vehicle-pricing-policy.xml", "icon_policy.dds"
                 })
                 production_source = archive.read("scripts/SiNProductionPolicy.lua").decode("utf-8")
                 self.assertIn("Do not wrap EconomyManager:getBuyPrice", production_source)
@@ -354,4 +355,54 @@ class DeploymentPackagingTests(unittest.TestCase):
         self.assertIn('G:\\My Drive\\SiN Mods\\sin-fs25-01', publisher)
         self.assertIn('Get-ChildItem -LiteralPath $sourceResolved -Filter "*.zip" -File', publisher)
         self.assertIn('manifest_schema = "sin.fs25-modpack/1"', publisher)
-        self.assertIn('Compress-Archive -LiteralPath $manifestPath, $stageMods', publisher)
+        self.assertIn('Compress-Archive -LiteralPath $manifestPath, $packMods', publisher)
+        self.assertIn('$destinationMods = Join-Path $destinationResolved "mods"', publisher)
+        self.assertIn('$destinationModsList = @(Get-ChildItem -LiteralPath $destinationMods', publisher)
+        self.assertIn('added_mod_count = $addedNames.Count', publisher)
+        self.assertIn('updated_mod_count = $updatedNames.Count', publisher)
+        self.assertNotIn('Move-Item -LiteralPath $stageMods -Destination (Join-Path $Destination "mods")', publisher)
+
+    def test_modpack_publish_updates_only_changed_mods_and_retains_destination_only_mods(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("pwsh")
+        if powershell is None:
+            self.skipTest("PowerShell is not installed on this runner")
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "server-mods"
+            destination = root / "publication"
+            destination_mods = destination / "mods"
+            source.mkdir()
+            destination_mods.mkdir(parents=True)
+
+            def make_zip(path, content):
+                with ZipFile(path, "w", ZIP_DEFLATED) as archive:
+                    archive.writestr("payload.txt", content)
+
+            make_zip(source / "SiN_FS25_Policy.zip", "policy-v2")
+            make_zip(source / "NewMod.zip", "new-mod")
+            make_zip(destination_mods / "SiN_FS25_Policy.zip", "policy-v1")
+            make_zip(destination_mods / "DestinationOnly.zip", "retain-me")
+
+            command = [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                       str(self.root / "scripts" / "Publish-SiN-Modpack.ps1"),
+                       "-SourceMods", str(source), "-Destination", str(destination),
+                       "-ServerKey", "test", "-ServerName", "Test", "-PackName", "test-pack.zip"]
+            first = subprocess.run(command, capture_output=True, text=True, check=False)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            summary = json.loads(first.stdout)
+            self.assertEqual(summary["mod_count"], 3)
+            self.assertEqual(summary["added_mod_count"], 1)
+            self.assertEqual(summary["updated_mod_count"], 1)
+            self.assertTrue((destination_mods / "DestinationOnly.zip").is_file())
+            with ZipFile(destination / "test-pack.zip") as archive:
+                names = set(archive.namelist())
+                self.assertIn("manifest.json", names)
+                self.assertIn("mods/SiN_FS25_Policy.zip", names)
+                self.assertIn("mods/NewMod.zip", names)
+                self.assertIn("mods/DestinationOnly.zip", names)
+
+            second = subprocess.run(command, capture_output=True, text=True, check=False)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            unchanged = json.loads(second.stdout)
+            self.assertEqual(unchanged["added_mod_count"], 0)
+            self.assertEqual(unchanged["updated_mod_count"], 0)

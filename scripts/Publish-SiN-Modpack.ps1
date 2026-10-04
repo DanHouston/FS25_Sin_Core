@@ -37,9 +37,13 @@ $destinationParent = Split-Path -Parent $Destination
 if (-not $destinationParent) { throw "Destination must be a directory path: $Destination" }
 New-Item -ItemType Directory -Force -Path $destinationParent | Out-Null
 $destinationResolved = [IO.Path]::GetFullPath($Destination)
+$destinationMods = Join-Path $destinationResolved "mods"
 $sourcePrefix = $sourceResolved.TrimEnd('\') + '\'
 if ($destinationResolved.StartsWith($sourcePrefix, [StringComparison]::OrdinalIgnoreCase)) {
     throw "Destination must not be inside the server mod folder."
+}
+if ([IO.Path]::GetFullPath($destinationMods).Equals($sourceResolved, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Destination mods folder must differ from the server mod folder."
 }
 
 $mods = @(Get-ChildItem -LiteralPath $sourceResolved -Filter "*.zip" -File | Sort-Object Name)
@@ -48,20 +52,57 @@ if ($mods.Count -eq 0) { throw "No .zip mods found in $sourceResolved" }
 $runId = [guid]::NewGuid().ToString("N")
 $stage = Join-Path $destinationParent (".sin-modpack-stage-" + $runId)
 $backup = Join-Path $destinationParent (".sin-modpack-backup-" + $runId)
-$stageMods = Join-Path $stage "mods"
+$incomingMods = Join-Path $stage "incoming-mods"
+$packMods = Join-Path $stage "mods"
 $destinationPack = Join-Path $Destination $PackName
+$updatedNames = @()
+$addedNames = @()
+$metadataReplaced = @()
 
 try {
-    New-Item -ItemType Directory -Force -Path $stageMods | Out-Null
-    $records = @()
+    New-Item -ItemType Directory -Force -Path $incomingMods | Out-Null
+    New-Item -ItemType Directory -Force -Path $backup | Out-Null
+
+    # Validate and stage only the source ZIPs. Existing destination-only mods
+    # remain part of the approved pack and are never removed by this publisher.
     foreach ($mod in $mods) {
         Assert-Zip $mod.FullName
-        $target = Join-Path $stageMods $mod.Name
+        $target = Join-Path $incomingMods $mod.Name
         Copy-Item -LiteralPath $mod.FullName -Destination $target
+    }
+
+    New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+    New-Item -ItemType Directory -Force -Path $destinationMods | Out-Null
+
+    foreach ($mod in $mods) {
+        $incoming = Join-Path $incomingMods $mod.Name
+        $target = Join-Path $destinationMods $mod.Name
+        if ((Test-Path -LiteralPath $target -PathType Leaf) -and (Get-Sha256 $target) -eq (Get-Sha256 $incoming)) {
+            continue
+        }
+        if (Test-Path -LiteralPath $target -PathType Leaf) {
+            Copy-Item -LiteralPath $target -Destination (Join-Path $backup $mod.Name)
+            $updatedNames += $mod.Name
+        } else {
+            $addedNames += $mod.Name
+        }
+        Move-Item -LiteralPath $incoming -Destination $target -Force
+    }
+
+    # Build the new manifest and pack from the complete merged destination,
+    # not just the changed inputs, so untouched mods remain available to clients.
+    $destinationModsList = @(Get-ChildItem -LiteralPath $destinationMods -Filter "*.zip" -File | Sort-Object Name)
+    if ($destinationModsList.Count -eq 0) { throw "No .zip mods found in $destinationMods" }
+    New-Item -ItemType Directory -Force -Path $packMods | Out-Null
+    $records = @()
+    foreach ($mod in $destinationModsList) {
+        Assert-Zip $mod.FullName
+        $packMod = Join-Path $packMods $mod.Name
+        Copy-Item -LiteralPath $mod.FullName -Destination $packMod
         $records += [ordered]@{
             filename = $mod.Name
-            size = [int64](Get-Item -LiteralPath $target).Length
-            sha256 = Get-Sha256 $target
+            size = [int64](Get-Item -LiteralPath $mod.FullName).Length
+            sha256 = Get-Sha256 $mod.FullName
         }
     }
 
@@ -77,22 +118,18 @@ try {
     [IO.File]::WriteAllText($manifestPath, $manifestJson, (New-Object Text.UTF8Encoding($false)))
 
     $stagePack = Join-Path $stage $PackName
-    Compress-Archive -LiteralPath $manifestPath, $stageMods -DestinationPath $stagePack -CompressionLevel Fastest
+    Compress-Archive -LiteralPath $manifestPath, $packMods -DestinationPath $stagePack -CompressionLevel Fastest
     Assert-Zip $stagePack
 
-    New-Item -ItemType Directory -Force -Path $backup | Out-Null
-    if (Test-Path -LiteralPath $Destination -PathType Container) {
-        foreach ($name in @("mods", "manifest.json", $PackName)) {
-            $old = Join-Path $Destination $name
-            if (Test-Path -LiteralPath $old) { Move-Item -LiteralPath $old -Destination $backup }
+    foreach ($name in @("manifest.json", $PackName)) {
+        $old = Join-Path $Destination $name
+        if (Test-Path -LiteralPath $old -PathType Leaf) {
+            Move-Item -LiteralPath $old -Destination (Join-Path $backup $name)
         }
-    } else {
-        New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+        $metadataReplaced += $name
+        $staged = if ($name -eq "manifest.json") { $manifestPath } else { $stagePack }
+        Move-Item -LiteralPath $staged -Destination (Join-Path $Destination $name)
     }
-
-    Move-Item -LiteralPath $stageMods -Destination (Join-Path $Destination "mods")
-    Move-Item -LiteralPath $manifestPath -Destination (Join-Path $Destination "manifest.json")
-    Move-Item -LiteralPath $stagePack -Destination $destinationPack
     Remove-Item -LiteralPath $backup -Recurse -Force
 
     $publishedManifest = Join-Path $Destination "manifest.json"
@@ -100,22 +137,31 @@ try {
         destination = $Destination
         server_key = $ServerKey
         mod_count = $records.Count
+        added_mod_count = $addedNames.Count
+        updated_mod_count = $updatedNames.Count
         manifest = $publishedManifest
         manifest_sha256 = Get-Sha256 $publishedManifest
         modpack = $destinationPack
         modpack_sha256 = Get-Sha256 $destinationPack
     } | ConvertTo-Json
 } catch {
-    if (Test-Path -LiteralPath $backup -PathType Container) {
-        New-Item -ItemType Directory -Force -Path $Destination | Out-Null
-        foreach ($name in @("mods", "manifest.json", $PackName)) {
-            $old = Join-Path $Destination $name
-            $saved = Join-Path $backup $name
-            if (Test-Path -LiteralPath $saved) {
-                if (Test-Path -LiteralPath $old) { Remove-Item -LiteralPath $old -Recurse -Force }
-                Move-Item -LiteralPath $saved -Destination $old
-            }
+    New-Item -ItemType Directory -Force -Path $destinationMods | Out-Null
+    foreach ($name in $updatedNames) {
+        $target = Join-Path $destinationMods $name
+        $saved = Join-Path $backup $name
+        if (Test-Path -LiteralPath $saved -PathType Leaf) {
+            Move-Item -LiteralPath $saved -Destination $target -Force
         }
+    }
+    foreach ($name in $addedNames) {
+        $target = Join-Path $destinationMods $name
+        if (Test-Path -LiteralPath $target -PathType Leaf) { Remove-Item -LiteralPath $target -Force }
+    }
+    foreach ($name in $metadataReplaced) {
+        $target = Join-Path $Destination $name
+        $saved = Join-Path $backup $name
+        if (Test-Path -LiteralPath $target -PathType Leaf) { Remove-Item -LiteralPath $target -Force }
+        if (Test-Path -LiteralPath $saved -PathType Leaf) { Move-Item -LiteralPath $saved -Destination $target -Force }
     }
     throw
 } finally {

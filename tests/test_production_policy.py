@@ -158,4 +158,5 @@ class ProductionPolicyTests(unittest.TestCase):
         self.assertIn("SiN FS25 Policy", descriptor)
         self.assertIn('filename="scripts/SiNProductionPolicy.lua"', descriptor)
         self.assertIn('filename="scripts/SiNVehiclePricingPolicy.lua"', descriptor)
+        self.assertIn('filename="scripts/SiNSellCoveragePolicy.lua"', descriptor)
         self.assertGreater((MOD / "icon_policy.dds").stat().st_size, 0)

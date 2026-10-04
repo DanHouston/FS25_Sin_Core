@@ -23,6 +23,39 @@ class ContractsLuaTests(unittest.TestCase):
         lua.execute(SCRIPT.read_text(encoding="utf-8"))
         return lua
 
+    def test_native_lifecycle_is_exported_once_through_server_mailbox(self):
+        lua = self._runtime()
+        lua.execute("""
+            local emitted = {}
+            FS25SiNServer = {emitServerEvent = function(self, eventType, payload)
+                table.insert(emitted, {eventType = eventType, payload = payload})
+                return true
+            end}
+            MissionFinishState = {SUCCESS = 1}
+            local field = {id = 12, areaHa = 3.5, name = "Field 12", farmlandId = 2}
+            function field:getId() return self.id end
+            function field:getAreaHa() return self.areaHa end
+            function field:getName() return self.name end
+            local mission = {status = "CREATED", type = {name = "harvestMission"}, reward = 4000}
+            function mission:getUniqueId() return "mission-7" end
+            function mission:getField() return field end
+            function mission:getReward() return self.reward end
+            SiNContracts:observe(mission, "generated")
+            SiNContracts:observe(mission, "generated")
+            mission.status = "RUNNING"
+            mission.farmId = 2
+            SiNContracts:observe(mission, "accepted")
+            mission.status = "FINISHED"
+            SiNContracts:observe(mission, "finished", MissionFinishState.SUCCESS)
+            assert(#emitted == 3)
+            assert(emitted[1].eventType == "native_contract_available")
+            assert(emitted[1].payload.mission_id == "mission-7")
+            assert(emitted[1].payload.field_id == 12)
+            assert(emitted[2].eventType == "native_contract_accepted")
+            assert(emitted[2].payload.accepting_farm_id == 2)
+            assert(emitted[3].eventType == "native_contract_completed")
+        """)
+
     def test_unprepared_mission_does_not_probe_or_poison_native_completion(self):
         lua = self._runtime()
         lua.execute(
@@ -96,6 +129,32 @@ class ContractsLuaTests(unittest.TestCase):
             assert(MissionManager:dismissMission(nil) == true)
             """
         )
+
+    def test_native_generation_cadence_is_ten_seconds(self):
+        lua = self._runtime()
+        lua.execute("""
+            MissionManager = {}
+            SiNContracts:loadMap()
+            assert(MissionManager.MISSION_GENERATION_INTERVAL == 10000)
+        """)
+
+    def test_field_preference_uses_native_eligibility_for_configured_types_only(self):
+        lua = self._runtime()
+        lua.execute("""
+            local function field(id)
+                local value = {id = id, state = {isValid = true}}
+                function value:getId() return self.id end
+                function value:getHasOwner() return false end
+                function value:getFieldState() return self.state end
+                return value
+            end
+            local nativeField, eligibleField = field(1), field(2)
+            g_fieldManager = {fields = {nativeField, eligibleField}}
+            local classObject = {isAvailableForField = function(candidate) return candidate.id == 2 end}
+            local manager = {missionTypes = {{name = "harvestMission", classObject = classObject}}}
+            assert(SiNContracts:preferEligibleNativeField(manager, "harvestMission", nativeField) == eligibleField)
+            assert(SiNContracts:preferEligibleNativeField(manager, "fertilizeMission", nativeField) == nativeField)
+        """)
 
     def test_client_does_not_wrap_native_mission_manager_actions(self):
         lua = self._runtime()
@@ -187,120 +246,7 @@ class ContractsLuaTests(unittest.TestCase):
             """
         )
 
-    def test_low_offer_count_requests_three_native_generation_cycles(self):
-        lua = self._runtime()
-        lua.execute(
-            """
-            g_currentMission = {time = 1000, getIsServer = function() return true end}
-            MissionStatus = {CREATED = "CREATED"}
-            MissionManager = {}
-            MissionManager.MAX_MISSIONS = 25
-            MissionManager.missions = {{status = "CREATED"}, {status = "CREATED"}}
-            MissionManager.missionGenerationInProgress = false
-            local requests = 0
-            function MissionManager:getMissions() return self.missions end
-            function MissionManager:getCanStartNewMissionGeneration() return true end
-            function MissionManager:startMissionGeneration() requests = requests + 1; self.missionGenerationInProgress = true end
-            function MissionManager:registerMission() end
-            function MissionManager:startMission() return true end
-            function MissionManager:cancelMission() return true end
-            function MissionManager:dismissMission() return true end
-            function MissionManager:update() return 23 end
-            SiNContracts:installHooks()
-            MissionManager:update()
-            assert(requests == 1)
-            assert(MissionManager.missionGenerationInProgress == true)
-            MissionManager.missionGenerationInProgress = false
-            g_currentMission.time = 11000
-            MissionManager:update()
-            assert(requests == 2)
-            MissionManager.missionGenerationInProgress = false
-            g_currentMission.time = 21000
-            MissionManager:update()
-            assert(requests == 3)
-            MissionManager.missionGenerationInProgress = false
-            g_currentMission.time = 31000
-            MissionManager:update()
-            assert(requests == 4)
-            """
-        )
-
-    def test_low_offer_retry_is_bounded_to_ten_seconds(self):
-        lua = self._runtime()
-        lua.execute(
-            """
-            g_currentMission = {time = 1000, getIsServer = function() return true end}
-            MissionStatus = {CREATED = "CREATED"}
-            MissionManager = {}
-            MissionManager.MAX_MISSIONS = 25
-            MissionManager.missions = {{status = "CREATED"}}
-            MissionManager.missionGenerationInProgress = false
-            local requests = 0
-            function MissionManager:getMissions() return self.missions end
-            function MissionManager:getCanStartNewMissionGeneration() return true end
-            function MissionManager:startMissionGeneration() requests = requests + 1; self.missionGenerationInProgress = true end
-            function MissionManager:registerMission() end
-            function MissionManager:startMission() return true end
-            function MissionManager:cancelMission() return true end
-            function MissionManager:dismissMission() return true end
-            function MissionManager:update() return 23 end
-            SiNContracts:installHooks()
-            -- Consume the initial three-cycle emergency batch.
-            MissionManager:update()
-            MissionManager.missionGenerationInProgress = false
-            g_currentMission.time = 2000
-            MissionManager:update()
-            MissionManager.missionGenerationInProgress = false
-            g_currentMission.time = 3000
-            MissionManager:update()
-            assert(requests == 3)
-            MissionManager.missionGenerationInProgress = false
-            -- The bounded emergency batch completes in one-second cycles.
-            -- A further low-offer batch is still held for ten seconds.
-            g_currentMission.time = 10999
-            MissionManager:update()
-            assert(requests == 3)
-            g_currentMission.time = 11000
-            MissionManager:update()
-            assert(requests == 4)
-            """
-        )
-
-    def test_emergency_batch_cycles_are_spaced_one_second_apart(self):
-        lua = self._runtime()
-        lua.execute(
-            """
-            g_currentMission = {time = 1000, getIsServer = function() return true end}
-            MissionStatus = {CREATED = "CREATED"}
-            MissionManager = {MAX_MISSIONS = 25, missions = {}, missionGenerationInProgress = false}
-            local requests = 0
-            function MissionManager:getMissions() return self.missions end
-            function MissionManager:getCanStartNewMissionGeneration()
-                return not self.missionGenerationInProgress
-            end
-            function MissionManager:startMissionGeneration()
-                requests = requests + 1
-                self.missionGenerationInProgress = true
-            end
-            function MissionManager:registerMission() end
-            function MissionManager:startMission() return true end
-            function MissionManager:cancelMission() return true end
-            function MissionManager:dismissMission() return true end
-            function MissionManager:update() end
-            SiNContracts:installHooks()
-            MissionManager:update()
-            assert(requests == 1)
-            MissionManager.missionGenerationInProgress = false
-            g_currentMission.time = 1999
-            MissionManager:update()
-            assert(requests == 1)
-            g_currentMission.time = 2000
-            MissionManager:update()
-            assert(requests == 2)
-            """
-        )
-
-    def test_native_generation_exhaustion_is_bounded_and_identifies_period(self):
+    def test_verbose_native_generation_diagnostics_are_debug_only(self):
         lua = self._runtime()
         lua.execute(
             """
@@ -317,26 +263,17 @@ class ContractsLuaTests(unittest.TestCase):
             MissionManager = {MAX_MISSIONS = 25, missions = {}, missionGenerationInProgress = true}
             function MissionManager:getMissions() return self.missions end
             function MissionManager:update() self.missionGenerationInProgress = false end
-            SiNContracts:installHooks()
-            MissionManager:update()
-            local found = false
-            for _, message in ipairs(messages) do
-                if string.find(message, "native generation completed without offer")
-                    and string.find(message, "period=8") then
-                    found = true
-                end
-            end
-            assert(found == true)
-            local count = #messages
-            g_currentMission.time = 2000
-            MissionManager.missionGenerationInProgress = true
-            MissionManager:update()
-            assert(#messages == count)
-            g_currentMission.time = 61000
-            MissionManager.missionGenerationInProgress = true
-            MissionManager:update()
-            assert(#messages == count + 1)
-            assert(string.find(messages[#messages], "exhaustedCycles=2"))
+            SiNContracts:onNativeGenerationStarted(MissionManager)
+            MissionManager.missionGenerationInProgress = false
+            SiNContracts:onNativeGenerationFinished(MissionManager)
+            assert(#messages == 0)
+            SiNContracts.records["debug-only"] = {
+                missionType = "harvestMission", status = "CREATED", equipment = {},
+                field = {id = 1, name = "Field 1"}
+            }
+            SiNContracts:consoleCommandContracts()
+            assert(#messages == 1)
+            assert(string.find(messages[1], "diagnostic snapshot missions=0") ~= nil)
             """
         )
 
@@ -435,6 +372,22 @@ class ContractsLuaTests(unittest.TestCase):
             """
         )
 
+    def test_supply_recovery_soft_target_is_nine_offers(self):
+        lua = self._runtime()
+        lua.execute(
+            """
+            g_currentMission = {time = 1000, getIsServer = function() return true end}
+            g_fieldManager = {fields = {}}
+            local manager = {missions = {}}
+            for i = 1, 9 do manager.missions[i] = {status = "CREATED"} end
+            function manager:getMissions() return self.missions end
+            assert(SiNContracts:maybePrepareNativeFieldSupply(manager, 9, 1000) == 0)
+            assert(SiNContracts.lastSupplyRecoveryMs == nil)
+            assert(SiNContracts:maybePrepareNativeFieldSupply(manager, 8, 1000) == 0)
+            assert(SiNContracts.lastSupplyRecoveryMs == 1000)
+            """
+        )
+
     def test_explicit_supply_test_uses_the_same_safe_one_field_queue(self):
         lua = self._runtime()
         lua.execute(
@@ -510,7 +463,7 @@ class ContractsLuaTests(unittest.TestCase):
             """
         )
 
-    def test_replenishment_never_mutates_native_generation_timer_when_gate_is_closed(self):
+    def test_native_manager_owns_generation_and_timer_state(self):
         lua = self._runtime()
         lua.execute(
             """
@@ -521,52 +474,23 @@ class ContractsLuaTests(unittest.TestCase):
             MissionManager.missions = {}
             MissionManager.generationTimer = 12345
             local requests = 0
+            local nativeUpdateCalls = 0
+            local nativeUpdate = function() nativeUpdateCalls = nativeUpdateCalls + 1; return 23 end
+            MissionManager.update = nativeUpdate
             function MissionManager:getMissions() return self.missions end
-            function MissionManager:getCanStartNewMissionGeneration() return false end
+            function MissionManager:getCanStartNewMissionGeneration() return true end
             function MissionManager:startMissionGeneration() requests = requests + 1 end
             function MissionManager:registerMission() end
             function MissionManager:startMission() return true end
             function MissionManager:cancelMission() return true end
             function MissionManager:dismissMission() return true end
-            function MissionManager:update() return 23 end
             SiNContracts:installHooks()
-            MissionManager:update()
+            assert(MissionManager.update == nativeUpdate)
+            assert(MissionManager.__sinContractsHook_update == nil)
+            assert(MissionManager:update() == 23)
+            assert(nativeUpdateCalls == 1)
             assert(requests == 0)
             assert(MissionManager.generationTimer == 12345)
-            """
-        )
-
-    def test_refill_starts_before_native_update_when_cooldown_is_the_only_gate(self):
-        lua = self._runtime()
-        lua.execute(
-            """
-            g_currentMission = {time = 1000, getIsServer = function() return true end}
-            MissionStatus = {CREATED = "CREATED"}
-            MissionManager = {MAX_MISSIONS = 25, missions = {}, generationTimer = 600000,
-                              missionGenerationInProgress = false}
-            local requests = 0
-            local updateSawRequest = false
-            function MissionManager:getMissions() return self.missions end
-            function MissionManager:getCanStartNewMissionGeneration()
-                return not self.missionGenerationInProgress and #self.missions < self.MAX_MISSIONS
-                    and self.generationTimer < 0
-            end
-            function MissionManager:startMissionGeneration()
-                requests = requests + 1
-                self.missionGenerationInProgress = true
-            end
-            function MissionManager:update()
-                updateSawRequest = self.missionGenerationInProgress == true
-                return 23
-            end
-            function MissionManager:registerMission() end
-            function MissionManager:startMission() return true end
-            function MissionManager:cancelMission() return true end
-            function MissionManager:dismissMission() return true end
-            SiNContracts:installHooks()
-            MissionManager:update()
-            assert(requests == 1)
-            assert(updateSawRequest == true)
             """
         )
 
@@ -593,51 +517,6 @@ class ContractsLuaTests(unittest.TestCase):
             assert(MissionManager.marked == mission)
             assert(SiNContracts.validationFailureIds["native-validation-removal"] == true)
             assert(SiNContracts.validationFailureCount == 1)
-            """
-        )
-
-    def test_nine_offer_refill_retries_quickly_until_target_and_respects_native_gate(self):
-        lua = self._runtime()
-        lua.execute(
-            """
-            g_currentMission = {time = 1000, getIsServer = function() return true end}
-            MissionStatus = {CREATED = "CREATED"}
-            MissionManager = {}
-            MissionManager.missions = {{status = "CREATED"}}
-            MissionManager.missionGenerationInProgress = false
-            local requests = 0
-            function MissionManager:getMissions() return self.missions end
-            function MissionManager:getCanStartNewMissionGeneration() return true end
-            function MissionManager:startMissionGeneration()
-                requests = requests + 1
-                table.insert(self.missions, {status = "CREATED"})
-                self.missionGenerationInProgress = true
-            end
-            function MissionManager:registerMission() end
-            function MissionManager:startMission() return true end
-            function MissionManager:cancelMission() return true end
-            function MissionManager:dismissMission() return true end
-            function MissionManager:update() return 23 end
-            SiNContracts:installHooks()
-            MissionManager:update()
-            assert(requests == 1)
-            MissionManager.missionGenerationInProgress = false
-            g_currentMission.time = 11000
-            MissionManager:update()
-            assert(requests == 2)
-            MissionManager.missionGenerationInProgress = false
-            g_currentMission.time = 21000
-            MissionManager:update()
-            assert(requests == 3)
-            MissionManager.missionGenerationInProgress = false
-            -- Three cycles raised availability from 1 to 4. The next batch
-            -- starts after the bounded ten-second refill retry.
-            g_currentMission.time = 30999
-            MissionManager:update()
-            assert(requests == 3)
-            g_currentMission.time = 31000
-            MissionManager:update()
-            assert(requests == 4)
             """
         )
 
@@ -799,40 +678,3 @@ class ContractsLuaTests(unittest.TestCase):
             assert(record.estimatedHours == nil)
             """
         )
-
-    def test_refill_respects_native_cooldown_and_stops_at_nine(self):
-        lua = self._runtime()
-        lua.execute("""
-            g_currentMission = {time = 1000, getIsServer = function() return true end}
-            MissionStatus = {CREATED = "CREATED"}
-            local manager = {missions = {}, generationTimer = 600000, missionGenerationInProgress = false,
-                             MAX_MISSIONS = 25, blocked = false}
-            function manager:getMissions() return self.missions end
-            function manager:getCanStartNewMissionGeneration()
-                return not self.blocked and not self.missionGenerationInProgress
-                    and #self.missions < self.MAX_MISSIONS and self.generationTimer < 0
-            end
-            function manager:startMissionGeneration()
-                assert(self:getCanStartNewMissionGeneration())
-                table.insert(self.missions, {status = "CREATED"})
-                self.generationTimer = 600000
-            end
-            for i = 1, 3 do table.insert(manager.missions, {status = "CREATED"}) end
-            manager.blocked = true
-            SiNContracts:maybeRequestGeneration(manager)
-            assert(#manager.missions == 3 and manager.generationTimer == 600000)
-            manager.blocked = false
-            -- The policy does not expire the native cooldown. The native
-            -- manager must signal that a generation cycle is ready.
-            SiNContracts:maybeRequestGeneration(manager)
-            assert(#manager.missions == 3 and manager.generationTimer == 600000)
-            for i = 1, 6 do
-                g_currentMission.time = i * 10000
-                manager.generationTimer = -1
-                SiNContracts:maybeRequestGeneration(manager)
-                assert(#manager.missions == 3 + i)
-            end
-            g_currentMission.time = 100000
-            SiNContracts:maybeRequestGeneration(manager)
-            assert(#manager.missions == 9 and manager.generationTimer == 600000)
-        """)

@@ -183,7 +183,7 @@ def _validate_contracts_archive(path: Path) -> None:
 
 
 def _validate_policy_archive(path: Path) -> None:
-    expected = {"modDesc.xml", "scripts/SiNProductionPolicy.lua", "scripts/SiNVehiclePricingPolicy.lua", "config/production-policy.xml", "config/construction-policy.xml", "config/vehicle-pricing-policy.xml", "icon_policy.dds"}
+    expected = {"modDesc.xml", "scripts/SiNProductionPolicy.lua", "scripts/SiNVehiclePricingPolicy.lua", "scripts/SiNSellCoveragePolicy.lua", "scripts/SiNBuyingStationPolicy.lua", "config/production-policy.xml", "config/construction-policy.xml", "config/vehicle-pricing-policy.xml", "icon_policy.dds"}
     try:
         with ZipFile(path) as archive:
             names = set(_safe_archive_names(archive, path.name))
@@ -198,7 +198,7 @@ def _validate_policy_archive(path: Path) -> None:
                 raise ReleaseValidationError("SiN_FS25_Policy.zip has invalid XML") from error
             if descriptor.get("descVersion") != "92" or descriptor.findtext("iconFilename") != "icon_policy.dds":
                 raise ReleaseValidationError("SiN_FS25_Policy.zip has invalid modDesc.xml")
-            if [node.get("filename") for node in descriptor.findall("./extraSourceFiles/sourceFile")] != ["scripts/SiNProductionPolicy.lua", "scripts/SiNVehiclePricingPolicy.lua"]:
+            if [node.get("filename") for node in descriptor.findall("./extraSourceFiles/sourceFile")] != ["scripts/SiNProductionPolicy.lua", "scripts/SiNVehiclePricingPolicy.lua", "scripts/SiNSellCoveragePolicy.lua", "scripts/SiNBuyingStationPolicy.lua"]:
                 raise ReleaseValidationError("SiN_FS25_Policy.zip has unexpected source files")
             if policy.tag != "productionPolicy" or policy.get("schemaVersion") != "1":
                 raise ReleaseValidationError("SiN_FS25_Policy.zip has an invalid production policy schema")
@@ -208,6 +208,8 @@ def _validate_policy_archive(path: Path) -> None:
                 raise ReleaseValidationError("SiN_FS25_Policy.zip has an invalid vehicle policy schema")
             validate_fs25_lua_source(archive.read("scripts/SiNProductionPolicy.lua"), "scripts/SiNProductionPolicy.lua")
             validate_fs25_lua_source(archive.read("scripts/SiNVehiclePricingPolicy.lua"), "scripts/SiNVehiclePricingPolicy.lua")
+            validate_fs25_lua_source(archive.read("scripts/SiNSellCoveragePolicy.lua"), "scripts/SiNSellCoveragePolicy.lua")
+            validate_fs25_lua_source(archive.read("scripts/SiNBuyingStationPolicy.lua"), "scripts/SiNBuyingStationPolicy.lua")
     except BadZipFile as error:
         raise ReleaseValidationError("SiN_FS25_Policy.zip is not a valid ZIP archive") from error
 

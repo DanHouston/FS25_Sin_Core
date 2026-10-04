@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+import re
 
 from fs25_network_core.contracts import (
     equipment_performance,
@@ -53,7 +54,8 @@ class ContractsModTests(unittest.TestCase):
         self.assertIn("preserveReturns", source)
         self.assertIn("pcall(callback, ...)", source)
         self.assertIn("payment_or_dismissed", source)
-        self.assertNotIn("FS25SiNServer", source)
+        self.assertIn("FS25SiNServer.emitServerEvent", source)
+        self.assertIn('"native_contract_" .. lifecycle', source)
         self.assertNotIn("mission:finish(", source)
         self.assertNotIn("g_missionManager:startMission(", source)
 
@@ -86,22 +88,33 @@ class ContractsModTests(unittest.TestCase):
         self.assertIn("FIELD_SIZE_MEDIUM", source)
         self.assertIn('Never use generic size.width', source)
 
-    def test_native_replenishment_policy_is_guarded_and_thresholded(self):
+    def test_native_generation_architecture_is_observer_only_and_ten_seconds(self):
         source = (MOD / "scripts/SiNContracts.lua").read_text(encoding="utf-8")
-        self.assertIn("LOW_AVAILABLE_THRESHOLD = 3", source)
-        self.assertIn("REFILL_AVAILABLE_THRESHOLD = 9", source)
-        self.assertIn("LOW_RETRY_INTERVAL_MS = 10 * 1000", source)
-        self.assertIn("REFILL_RETRY_INTERVAL_MS = 10 * 1000", source)
-        self.assertIn("GENERATION_REQUEST_INTERVAL_MS = 10 * 1000", source)
-        self.assertIn("GENERATION_BATCH_SIZE = 3", source)
-        self.assertIn("generationBatchRemaining", source)
-        self.assertIn("lastGenerationRequestMs", source)
-        self.assertIn("getCanStartNewMissionGeneration", source)
-        self.assertIn("native replenishment deferred", source)
-        self.assertIn("native-generation-gate", source)
-        self.assertIn("reason=mission-cap", source)
-        self.assertIn("startMissionGeneration", source)
-        self.assertIn("g_currentMission:getIsServer() ~= true", source)
+        self.assertIn("NATIVE_GENERATION_INTERVAL_MS = 10 * 1000", source)
+        self.assertIn("MissionManager.MISSION_GENERATION_INTERVAL = NATIVE_GENERATION_INTERVAL_MS", source)
+        self.assertIn('appendMethod(MissionManager, "startMissionGeneration"', source)
+        self.assertNotRegex(source, r"function\s+MissionManager\s*:\s*update\s*\(")
+        self.assertNotRegex(source, r"\b[A-Za-z_]\w*\.generationTimer\s*=")
+        self.assertNotRegex(source, r"\b[A-Za-z_]\w*:startMissionGeneration\s*\(")
+        self.assertNotIn("maybeRequestGeneration", source)
+        self.assertNotIn("LOW_AVAILABLE_THRESHOLD", source)
+        self.assertNotIn("generationBatchRemaining", source)
+
+    def test_automatic_recovery_policy_and_preferred_mission_types_are_explicit(self):
+        source = (MOD / "scripts/SiNContracts.lua").read_text(encoding="utf-8")
+        self.assertRegex(source, r"AUTOMATIC_SUPPLY_ACTIONS\s*=\s*\{\s*\"herbicide\",\s*\"fertilize\",\s*\"stonePick\"\s*\}")
+        self.assertIn("RECOVERY_SOFT_TARGET_OFFERS = 9", source)
+        preference_block = re.search(
+            r"NATIVE_ELIGIBLE_FIELD_PREFERENCE_TYPES\s*=\s*\{([^}]+)\}", source, re.S)
+        self.assertIsNotNone(preference_block)
+        for mission_type in ("plowMission", "cultivateMission", "sowMission", "harvestMission", "mowMission"):
+            self.assertRegex(preference_block.group(1), rf"{mission_type}\s*=\s*true")
+        self.assertIn("EMPTY_CYCLES_BEFORE_SUPPLY_RECOVERY = 3", source)
+        self.assertIn("DEBUG = false", source)
+        self.assertIn("if DEBUG then logInfo(message, ...) end", source)
+        self.assertIn('logDebug("diagnostic mission=', source)
+        self.assertIn('logDebug("native supply test queued', source)
+        self.assertNotIn('logInfo("diagnostic mission=', source)
 
     def test_native_details_ui_is_return_preserving_and_fail_closed(self):
         source = (MOD / "scripts/SiNContracts.lua").read_text(encoding="utf-8")

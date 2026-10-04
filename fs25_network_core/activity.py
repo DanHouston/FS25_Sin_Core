@@ -16,12 +16,14 @@ class ActivityOutbox:
                                          str(world_id or "legacy"), str(source_event_id))).encode("utf-8")).hexdigest()
 
     def enqueue(self, source_event_id, server_key, activity_type, message, save_key=None,
-                world_id=None, destination="activity"):
+                world_id=None, destination="activity", metadata=None):
         scoped_id = self._scoped_id(source_event_id, server_key, save_key, world_id)
         doc = {"_id": scoped_id, "activity_id": scoped_id, "source_event_id": source_event_id,
                "server_key": server_key, "save_key": save_key, "activity_type": activity_type, "message": message,
                "destination": str(destination or "activity"),
                "created_at": datetime.now(timezone.utc), "status": "pending", "attempts": 0}
+        if isinstance(metadata, dict):
+            doc["metadata"] = dict(metadata)
         if world_id:
             doc["world_id"] = str(world_id)
         try: self.db.activity_outbox.insert_one(doc)
@@ -111,13 +113,21 @@ class ActivityPublisher:
                 raise ValueError("activity channel cannot calculate guild permissions")
             bot_member = await self._channel_member(channel)
             permissions = permissions_for(bot_member)
-            missing = [name for name in ("view_channel", "send_messages") if not getattr(permissions, name, False)]
+            required_permissions = ["view_channel", "send_messages"]
+            if str(record.get("activity_type", "")).startswith("native_contract_"):
+                required_permissions.extend(("create_public_threads", "send_messages_in_threads"))
+            missing = [name for name in required_permissions if not getattr(permissions, name, False)]
             if missing:
-                permanent = True
-                raise ValueError("missing channel permissions: " + ", ".join(missing))
+                self._record_failure(record,
+                                     ValueError("missing channel permissions: " + ", ".join(missing)),
+                                     True)
+                return
             # FS25/Discord-originated text is untrusted community content;
             # never let a mirrored message create Discord mentions.
-            await channel.send(record["message"], allowed_mentions=discord.AllowedMentions.none())
+            if str(record.get("activity_type", "")).startswith("native_contract_"):
+                await self._publish_native_contract(channel, record)
+            else:
+                await channel.send(record["message"], allowed_mentions=discord.AllowedMentions.none())
             self.outbox.db.activity_outbox.update_one({"_id": record["_id"], "status": "pending"}, {"$set": {"status": "published", "published_at": datetime.now(timezone.utc)}, "$inc": {"attempts": 1}})
             LOG.info("[SiN Activity] published type=%s serverKey=%s", record["activity_type"], record["server_key"])
             if record.get("activity_type") == "chat_message":
@@ -134,6 +144,51 @@ class ActivityPublisher:
         except Exception as error:
             LOG.exception("[SiN Activity] unexpected publish failure type=%s serverKey=%s", record.get("activity_type"), record.get("server_key"))
             self._record_failure(record, error, permanent)
+
+    async def _publish_native_contract(self, channel, record):
+        """Publish one parent card and route later lifecycle facts to its thread.
+
+        The Central projection holds the parent/thread identifiers.  Thus a
+        retry after Discord accepted the parent but before the outbox was
+        marked published resumes from that parent rather than creating another
+        availability card.
+        """
+        metadata = record.get("metadata") or {}
+        contract_id = metadata.get("native_contract_id")
+        lifecycle = metadata.get("lifecycle")
+        if not contract_id or not lifecycle:
+            raise ValueError("native contract outbox metadata is missing")
+        contract = self.outbox.db.native_contracts.find_one({"_id": contract_id})
+        if not contract:
+            raise ValueError("native contract projection is unavailable")
+        mentions = discord.AllowedMentions.none()
+        if lifecycle == "available":
+            parent_id = contract.get("discord_parent_message_id")
+            parent = None
+            if parent_id:
+                parent = await channel.fetch_message(int(parent_id))
+            if parent is None:
+                parent = await channel.send(record["message"], allowed_mentions=mentions)
+                self.outbox.db.native_contracts.update_one(
+                    {"_id": contract_id}, {"$set": {"discord_parent_channel_id": str(channel.id),
+                                                        "discord_parent_message_id": str(parent.id)}})
+                contract["discord_parent_message_id"] = str(parent.id)
+            if not contract.get("discord_thread_id"):
+                mission = str(contract.get("mission_type") or "Contract").replace("Mission", "").replace("_", " ").title()
+                field = contract.get("field_name") or ("Field " + str(contract.get("field_id") or "unknown"))
+                thread = await parent.create_thread(name=(f"Contract • {field} • {mission}")[:100])
+                self.outbox.db.native_contracts.update_one(
+                    {"_id": contract_id}, {"$set": {"discord_thread_id": str(thread.id)}})
+            return
+        thread_id = contract.get("discord_thread_id")
+        if not thread_id:
+            raise RuntimeError("native contract thread is not available yet")
+        thread = self.bot.get_channel(int(thread_id))
+        if thread is None:
+            thread = await self.bot.fetch_channel(int(thread_id))
+        if not hasattr(thread, "send"):
+            raise ValueError("native contract thread is not sendable")
+        await thread.send(record["message"], allowed_mentions=mentions)
 
     def _record_failure(self, record, error, permanent=False):
         attempts = int(record.get("attempts", 0)) + 1

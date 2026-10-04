@@ -10,13 +10,14 @@ destination filesystem.
 
 ## Output
 
-For the default server paths the command creates or replaces only these three
-managed items:
+For the default server paths the command updates only changed/new source ZIPs
+under `mods\`, then rebuilds the manifest and combined ZIP:
 
 ```text
 G:\\My Drive\\SiN Mods\\sin-fs25-01\\
     mods\\
-        every ZIP from the server mod folder
+        new or changed ZIPs are copied from the server mod folder;
+        existing destination-only ZIPs are retained
     manifest.json
     SiN Test Server 01-Modpack.zip
 ```
@@ -46,9 +47,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 ```
 
 The command fails if the source folder is missing, contains no ZIPs, contains
-an invalid ZIP, or is the destination itself. It stages and validates the
-complete output before replacing the managed items, and prints the manifest and
-combined-ZIP hashes on success. Existing unrelated files in the destination
+an invalid ZIP, or aliases the destination `mods\` folder. A ZIP is copied only
+when its filename is new or its SHA-256 differs from the destination copy.
+Destination ZIPs absent from the source are retained and included in the rebuilt
+manifest and pack; remove obsolete mods from the destination `mods\` folder
+manually when you intend to retire them. The script validates every ZIP in the
+merged set, stages the rebuilt manifest/pack, and rolls back changed mod files
+and metadata if publishing fails. It prints total, added, and updated mod counts
+plus manifest and combined-ZIP hashes on success. Unrelated destination files
 are left alone.
 
 The old approval/capture/refresh publisher is no longer part of the operator

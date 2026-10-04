@@ -626,7 +626,9 @@ class PairingAgent:
         event = dict(root.attrib)
         event["payload"] = {key: value for key, value in event.items() if key not in required}
         if event["event_type"] not in {"heartbeat", "player_connected", "player_disconnected",
-                                        "player_activity_minute", "chat_message", "map_geometry"}:
+                                        "player_activity_minute", "chat_message", "map_geometry",
+                                        "native_contract_available", "native_contract_accepted",
+                                        "native_contract_completed", "native_contract_cancelled"}:
             raise ValueError("unsupported event type")
         if event["event_type"] == "map_geometry":
             event["payload"] = cls._parse_map_geometry(root)

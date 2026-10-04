@@ -142,6 +142,9 @@ class Database:
         self.db.chat_messages.create_index([("server_key", 1), ("created_at", -1)])
         self.db.contracts.create_index("contract_id", unique=True)
         self.db.contracts.create_index([("status", 1), ("created_at", -1)])
+        self.db.native_contracts.create_index(
+            [("server_key", 1), ("save_key", 1), ("world_id", 1), ("mission_id", 1)], unique=True)
+        self.db.native_contracts.create_index([("lifecycle", 1), ("updated_at", -1)])
         self.db.invoices.create_index("invoice_id", unique=True)
         self.db.invoices.create_index([("recipient_discord_id", 1), ("status", 1)])
         self.db.community_events.create_index("event_id", unique=True)

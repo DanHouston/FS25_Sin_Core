@@ -13,13 +13,15 @@ from .business_workflows import ChatService
 from .business_workflows import TransferService
 from .banking_engine import BankingEngine
 from .map_service import MapModel, MapStore, MapValidationError
+from .native_contracts import NativeContractService
 from pymongo.errors import DuplicateKeyError
 
 LOG = logging.getLogger(__name__)
 CHAT_EVENT_TYPE = "chat_message"
 MAP_EVENT_TYPE = "map_geometry"
 SUPPORTED_EVENTS = {"heartbeat", "player_connected", "player_disconnected", ACTIVITY_EVENT_TYPE,
-                    CHAT_EVENT_TYPE, MAP_EVENT_TYPE}
+                    CHAT_EVENT_TYPE, MAP_EVENT_TYPE, "native_contract_available",
+                    "native_contract_accepted", "native_contract_completed", "native_contract_cancelled"}
 
 
 def scoped_event_id(server_key, save_key, event_id, world_id=None):
@@ -56,6 +58,7 @@ class CentralEventProcessor:
         self.chat = ChatService(database)
         self.transfers = TransferService(database, self.authorization)
         self.banking = BankingEngine(database)
+        self.native_contracts = NativeContractService(database)
 
     def _map_event_is_ahead_of_active_runtime(self, server_key, payload):
         """Return true when geometry belongs to a runtime not active yet.
@@ -178,6 +181,23 @@ class CentralEventProcessor:
                      save_key=save_key, world_id=processed_world_id)
                 LOG.info("[SiN Chat] Activity message accepted eventId=%s server=%s save=%s world=%s",
                          event_id, record["server_key"], save_key, processed_world_id or "legacy")
+        elif event_type.startswith("native_contract_"):
+            raw_payload = event.get("payload") or {}
+            if not isinstance(raw_payload, dict):
+                raise EventValidationError("native contract payload must be an object")
+            lifecycle = event_type.removeprefix("native_contract_")
+            try:
+                contract = self.native_contracts.ingest(record["server_key"], save_key,
+                                                        processed_world_id, event_id, lifecycle, raw_payload)
+            except (TypeError, ValueError) as error:
+                raise EventValidationError(str(error)) from None
+            message = self.native_contract_message(contract)
+            ActivityOutbox(self.database).enqueue(
+                event_id, record["server_key"], event_type, message, save_key=save_key,
+                world_id=processed_world_id, metadata={"native_contract_id": contract["_id"],
+                                                       "lifecycle": lifecycle})
+            result = {"status": "accepted", "native_contract_id": contract["_id"],
+                      "lifecycle": lifecycle, "save_key": save_key}
         elif event_type == "player_connected":
             raw_payload = event.get("payload") or {}
             if not isinstance(raw_payload, dict):
@@ -257,6 +277,30 @@ class CentralEventProcessor:
         result.setdefault("status", "accepted")
         result.setdefault("save_key", save_key)
         return result
+
+    @staticmethod
+    def native_contract_message(contract):
+        mission = str(contract.get("mission_type") or "Contract").replace("Mission", "")
+        mission = mission.replace("_", " ").strip().title() or "Contract"
+        field = contract.get("field_name") or ("Field " + str(contract.get("field_id") or "unknown"))
+        lifecycle = contract.get("lifecycle")
+        if lifecycle == "available":
+            lines = [f"📋 **Contract Available — {mission}**", f"**{field}**"]
+            if contract.get("area_ha") is not None: lines[-1] += f" · {contract['area_ha']:.2f} ha"
+            if contract.get("reward") is not None: lines.append(f"**Reward:** ${contract['reward']:,.0f}")
+            if contract.get("estimated_hours") is not None:
+                lines.append(f"**Estimate:** {contract['estimated_hours']:.2f} h")
+            lines.append("Accept it in FS25. This thread records when it is claimed.")
+            return "\n".join(lines)
+        actor = contract.get("accepting_player")
+        farm = contract.get("accepting_farm_id")
+        if actor in (None, "", "not-exposed-by-native-mission"):
+            actor = f"Farm {farm}" if farm else "A player/farm (identity unavailable)"
+        elif farm:
+            actor = f"{actor} (Farm {farm})"
+        labels = {"accepted": "✅ **Claimed in FS25**", "completed": "🏁 **Completed in FS25**",
+                  "cancelled": "↩️ **Cancelled in FS25**"}
+        return f"{labels.get(lifecycle, 'ℹ️ **Contract updated**')}\n{actor}"
 
     def activity_message(self, server, save_key, payload, session_summary=None):
         if str(payload.get("user_id", "")) == "1" and str(payload.get("farm_id", "")) == "0" \

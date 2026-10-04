@@ -198,7 +198,12 @@ def build_policy_mod(destination):
     icon_name = descriptor_xml.findtext("iconFilename")
     source_names = [node.get("filename") for node in descriptor_xml.findall("./extraSourceFiles/sourceFile")]
     config_names = ["config/production-policy.xml", "config/construction-policy.xml", "config/vehicle-pricing-policy.xml"]
-    expected_sources = ["scripts/SiNProductionPolicy.lua", "scripts/SiNVehiclePricingPolicy.lua"]
+    expected_sources = [
+        "scripts/SiNProductionPolicy.lua",
+        "scripts/SiNVehiclePricingPolicy.lua",
+        "scripts/SiNSellCoveragePolicy.lua",
+        "scripts/SiNBuyingStationPolicy.lua",
+    ]
     if icon_name != "icon_policy.dds" or not (source / icon_name).is_file() or source_names != expected_sources:
         raise ValueError("SiN_FS25_Policy descriptor is invalid")
     names_to_package = ["modDesc.xml", *source_names, *config_names, icon_name]
