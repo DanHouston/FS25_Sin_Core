@@ -199,7 +199,7 @@ class ActivityPublisher:
                 base = contract.get("discord_parent_base_message") or str(parent.content).split(
                     "\n\n**Current status:**", 1)[0]
                 label = {"accepted": "Claimed", "completed": "Completed",
-                         "cancelled": "Cancelled"}.get(lifecycle, "Updated")
+                         "cancelled": "Cancelled", "expired": "Expired"}.get(lifecycle, "Updated")
                 heading = base.replace("Contract Available", f"Contract {label}", 1)
                 await parent.edit(content=f"{heading}\n\n**Current status:** {record['message']}",
                                   allowed_mentions=mentions)

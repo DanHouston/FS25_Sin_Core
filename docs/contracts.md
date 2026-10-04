@@ -1,9 +1,9 @@
 # SiN FS25 Contracts
 
-`SiN_FS25_Contracts` is a standalone diagnostic and guarded replenishment layer
-for the native FS25 contract system. It does not register mission types,
-construct missions, alter rewards, start or cancel work, issue payment, or copy
-mission authority into SiN. FS25 remains the source of truth.
+`SiN_FS25_Contracts` observes and applies bounded offer economics to the
+native FS25 contract system. It does not register mission types, construct
+missions, start or cancel work, issue payment, or copy mission authority into
+SiN. FS25 remains the source of truth for mission generation and lifecycle.
 
 ## Native runtime surface
 
@@ -38,6 +38,7 @@ Lifecycle observation uses these native boundaries:
 | successful `MissionManager:startMission` | `accepted` |
 | `AbstractMission:finish` | `finished` with native finish state |
 | `MissionManager:cancelMission` | `cancelled` |
+| native `AbstractMission:delete` after `isTimedOut()` on a `CREATED` offer | `expired` |
 | `AbstractMission:dismiss` / `MissionManager:dismissMission` | `payment_or_dismissed` |
 | periodic `MissionManager:update` scan | status/progress observation |
 
@@ -60,7 +61,7 @@ reports:
 ```text
 estimated hours = area hectares * 10
                   / (working width metres * working speed km/h * 0.70)
-estimated native $/hour = native reward / estimated hours
+estimated gross $/hour = offered reward / estimated hours
 ```
 
 `0.70` is an explicit efficiency assumption covering turns, overlap,
@@ -73,7 +74,7 @@ native finish observation. Transport and other non-field missions remain
 observable but are normally not time-estimable without a native route metric.
 
 The native contract details panel is extended, when the same metrics are
-available, with `SiN estimated work time` and `SiN estimated native $/hour`.
+available, with `SiN estimated work time` and `SiN estimated gross $/hour`.
 The wrapper preserves every native return value and appends no rows when the
 area, width, speed or reward is unavailable. Before acceptance the mod asks
 the documented `MissionManager:getVehicleGroupFromIdentifier(missionType,
@@ -106,10 +107,40 @@ offer only when its store metadata lacks an explicit working width, and remains
 unavailable when the native vehicle exposes no positive work area; the observer
 does not infer a width or fabricate an estimate.
 
+## Reward and equipment borrowing policy
+
+On a **newly generated** field offer, SiN reads the native reward and the
+same paired implement width/speed estimate described above. If the estimate
+exists, it raises the gross reward to at least `$20,000 × estimated hours`,
+rounded up to a whole dollar; it never reduces a native reward. Without a
+reliable estimate, the native reward is unchanged. This is gross pay before
+equipment, supplies, or other native deductions, not a guaranteed net hourly
+profit.
+
+For a new offer with a native lease vehicle group, borrowing equipment costs
+at least the greatest of the native cost, `$1,000`, or `10%` of that offer's
+adjusted gross reward. If there is no leasable vehicle group, native cost is
+unchanged. FS25's own `getVehicleCosts` and `getTotalReward` paths still show
+and deduct the cost; SiN neither edits farm balances nor pays the contract.
+The adjusted reward is carried in FS25's existing `AbstractMission.reward`
+savegame/network stream field, and the field-mission reward getter uses that
+same value at payout. Clients and the dedicated server therefore see the same
+offer value through native sync. If a modded mission's reward getter ignores
+that saved value, SiN logs a warning and leaves its native pricing unchanged
+instead of advertising a reward the payout path cannot honor.
+
+Already saved/offered contracts are not repriced on restart: their Discord
+cards may already be public, and FS25's normal mission update stream does not
+carry a changed reward. Letting such offers expire naturally is safe. If a
+farmer accepts and cancels one, FS25 may or may not generate replacement work
+for the field; a replacement, if offered, is a **new mission** with the new
+policy, not a guaranteed refresh of the cancelled one. Existing accepted work
+is not modified to force a new gross reward.
+
 ## Native generation and controlled field-work recovery
 
 FS25's `MissionManager` remains the sole authority for contract generation,
-validation, registration, rewards, mission limits, and lifecycle. On the server,
+validation, registration, mission limits, and lifecycle. On the server,
 SiN sets the native `MissionManager.MISSION_GENERATION_INTERVAL` to 10 seconds
 and observes native generation start/completion. It does not override
 `MissionManager:update`, call `startMissionGeneration` itself, or write
@@ -187,16 +218,21 @@ and
 
 When `FS25_SiN_Server` and `SiN_FS25_Contracts` are installed together, the
 Contracts mod observes native MissionManager registration, successful
-acceptance, successful completion, and cancellation on the authoritative
+acceptance, successful completion, cancellation, and native offer timeout on the authoritative
 server. It emits those facts through the server mod's authenticated event
 mailbox; it does not create or modify missions. The Central service projects
 each mission by server/save/world/mission ID, and JiN publishes one available
 parent card to that server's configured Activity channel with a Discord thread.
-Claimed, completed, and cancelled updates are posted into that contract's
+Claimed, completed, cancelled, and expired updates are posted into that contract's
 thread and refresh the parent card's current status. The accepting farm is
 reported when the native mission exposes it;
 FS25 does not consistently expose the human player identity, so the bot does
 not guess a name.
+
+An expired offer is marked `Expired` in the parent and thread; the thread is
+not deleted or archived. Only a `CREATED` mission for which native
+`isTimedOut()` returns true is marked expired. Deletion for an unrelated
+validation failure is not mislabeled as timeout.
 
 On map load, the server scans native offers already on the board and queues
 their availability once. A running mission is backfilled in availability-then-
@@ -221,7 +257,7 @@ bytes on the dedicated server and validation clients. Update the mailbox agent
 and Central/JiN service together with them, then reload the map/save. Native
 contract events use the server mod's authenticated mailbox and the Central/JiN
 projection described above. This does not redesign SiN jobs or native contract
-economics. After startup, confirm `native contract lifecycle listener
+lifecycle. After startup, confirm `native contract lifecycle listener
 installed`, followed by `queued type=native_contract_available` and JiN's
 `published type=native_contract_available` before treating Discord delivery
 as live-validated.

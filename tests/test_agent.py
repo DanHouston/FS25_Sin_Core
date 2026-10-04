@@ -26,10 +26,11 @@ class AgentTests(unittest.TestCase):
             "server_key": "sin-fs25-01", "save_id": "8",
             "event_type": f"native_contract_{name}",
             "payload": {"mission_id": "mission-1"}
-        }) for name in ("completed", "accepted", "available")]
+        }) for name in ("expired", "completed", "accepted", "available")]
         ordered = sorted(events, key=PairingAgent._event_sort_key)
         self.assertEqual([event["event_type"] for _, event in ordered], [
-            "native_contract_available", "native_contract_accepted", "native_contract_completed"])
+            "native_contract_available", "native_contract_accepted",
+            "native_contract_completed", "native_contract_expired"])
 
     def test_pair_once_writes_response_without_requiring_request_xml(self):
         opener = MagicMock(return_value=Response())

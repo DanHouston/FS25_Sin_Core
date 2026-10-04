@@ -3,7 +3,7 @@ import hashlib
 from datetime import datetime, timezone
 
 
-LIFECYCLES = {"available", "accepted", "completed", "cancelled"}
+LIFECYCLES = {"available", "accepted", "completed", "cancelled", "expired"}
 
 
 def contract_key(server_key, save_key, world_id, mission_id):

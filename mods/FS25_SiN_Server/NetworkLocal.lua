@@ -368,13 +368,20 @@ function FS25SiNServer:installNativeContractLifecycleListener()
 end
 
 function FS25SiNServer:onNativeContractLifecycle(envelope)
-    if g_currentMission == nil or g_currentMission:getIsServer() ~= true or type(envelope) ~= "table" then return end
+    if g_currentMission == nil or g_currentMission:getIsServer() ~= true then return end
+    -- Accept either an unpacked envelope or the one-element publish argument
+    -- table. The latter must not be mistaken for a malformed lifecycle event.
+    if type(envelope) == "table" and envelope.eventType == nil and type(envelope[1]) == "table" then
+        envelope = envelope[1]
+    end
+    if type(envelope) ~= "table" then return end
     local eventType = envelope.eventType
     local allowed = {
         native_contract_available=true,
         native_contract_accepted=true,
         native_contract_completed=true,
-        native_contract_cancelled=true
+        native_contract_cancelled=true,
+        native_contract_expired=true
     }
     local source = envelope.payload
     if allowed[eventType] ~= true or type(source) ~= "table" or source.mission_id == nil then return end

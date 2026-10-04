@@ -11,8 +11,11 @@ local DEBUG = false
 -- Shared MessageCenter contract with FS25_SiN_Server. Mod globals are not a
 -- cross-mod API; this stable, namespaced integer is the local event channel.
 local SIN_NATIVE_CONTRACT_LIFECYCLE_MESSAGE = 0x53494E43
-local CONTRACT_LIFECYCLE_ORDER = {"available", "accepted", "completed", "cancelled"}
+local CONTRACT_LIFECYCLE_ORDER = {"available", "accepted", "completed", "cancelled", "expired"}
 local EFFICIENCY = 0.70
+local MIN_GROSS_DOLLARS_PER_HOUR = 20000
+local MIN_EQUIPMENT_COST = 1000
+local MIN_EQUIPMENT_REWARD_SHARE = 0.10
 local POLL_INTERVAL_MS = 1000
 local RECOVERY_SOFT_TARGET_OFFERS = 9
 -- Keep native FS25 mission generation frequent enough to maintain an active
@@ -224,6 +227,7 @@ local function emitNativeContractLifecycle(owner, mission, record, eventName, fi
         or string.find(finish, "CANCELLED", 1, true) ~= nil
     local started = eventName == "accepted" or status == "PREPARING" or status == "RUNNING"
         or ((status == "FINISHED" or eventName == "finished") and (succeeded or cancelled))
+    local expired = eventName == "expired" and status == "CREATED"
     local available = eventName == "generated" or status == "CREATED" or started or cancelled
     -- A load-time scan sees missions that native FS25 restored before this
     -- mod's hooks ran. Backfill their current lifecycle through the same
@@ -234,6 +238,7 @@ local function emitNativeContractLifecycle(owner, mission, record, eventName, fi
         pending.completed = true
     end
     if cancelled and not emitted.cancelled then pending.cancelled = true end
+    if expired and not emitted.expired then pending.expired = true end
 
     -- Dispatch in lifecycle order. A failed availability write must not be
     -- replaced by acceptance/completion, since Discord needs the parent card
@@ -280,8 +285,12 @@ local function emitNativeContractLifecycle(owner, mission, record, eventName, fi
             end
             if not emitted[lifecycle] and g_messageCenter ~= nil and type(g_messageCenter.publish) == "function" then
                 local envelope = {eventType=eventType, payload=payload, acknowledge=acknowledge}
-                pcall(g_messageCenter.publish, g_messageCenter,
+                local ok, publishError = pcall(g_messageCenter.publish, g_messageCenter,
                     SIN_NATIVE_CONTRACT_LIFECYCLE_MESSAGE, {envelope})
+                if not ok and not owner.lifecyclePublishErrorLogged then
+                    logWarning("native contract lifecycle publish failed error=%s", tostring(publishError))
+                    owner.lifecyclePublishErrorLogged = true
+                end
             end
             if not emitted[lifecycle] then
                 if not owner.lifecycleBridgeUnavailableLogged then
@@ -426,7 +435,9 @@ local function vehicleSize(mission, field)
 end
 
 local function equipmentData(mission, field)
-    local source = fieldValue(mission, {"vehicles", "vehicleGroup", "vehicleGroups", "leaseVehicles"})
+    -- Native AbstractMission:init() resolves this list before registration.
+    -- Use the actual offered descriptors before a leased vehicle is spawned.
+    local source = fieldValue(mission, {"vehiclesToLoad", "vehicles", "vehicleGroup", "vehicleGroups", "leaseVehicles"})
     local result = {}
     local sourceName = nil
     if type(source) == "string" then sourceName = source end
@@ -508,6 +519,85 @@ local function estimate(field, equipment)
     local hours = field.areaHa * 10 / (selected.width * selected.speed * EFFICIENCY)
     return hours, {workingWidthM = selected.width, workingSpeedKmh = selected.speed,
         equipmentName = selected.name, efficiency = EFFICIENCY}
+end
+
+-- Reward is fixed while the offer is being created, before Object:register()
+-- streams it to clients. AbstractMission.reward is already saved and streamed
+-- by FS25; AbstractFieldMission:getReward() is used again at native payout.
+-- Only newly generated, time-estimable field offers are adjusted. Existing
+-- saved/posted offers are left alone, so a restart cannot silently change a
+-- Discord card or a contract somebody has already accepted.
+function SiNContracts:applyNewOfferRewardFloor(mission)
+    if call(g_currentMission, "getIsServer") ~= true or mission == nil
+        or statusName(mission) ~= "CREATED" or mission.field == nil then return end
+    local field = fieldData(mission)
+    local equipment = equipmentData(mission, field)
+    local hours = estimate(field, equipment)
+    local nativeReward = number(call(mission, "getReward"))
+    if nativeReward == nil or nativeReward <= 0 then return end
+    local adjusted = nativeReward
+    if hours ~= nil and hours > 0 then
+        adjusted = math.max(nativeReward, math.ceil(hours * MIN_GROSS_DOLLARS_PER_HOUR))
+    end
+    local previousSavedReward = mission.reward
+    mission.reward = adjusted
+    -- A modded subclass may replace getReward without using the native field
+    -- getter. Do not advertise an amount that its payout method will ignore.
+    local effectiveReward = number(call(mission, "getReward"))
+    if effectiveReward == nil or effectiveReward + 0.01 < adjusted then
+        mission.reward = previousSavedReward
+        logWarning("reward floor skipped type=%s reason=native-reward-getter-ignores-saved-reward",
+            missionType(mission))
+        return
+    end
+    if adjusted > nativeReward then
+        logInfo("reward floor type=%s field=%s native=%.0f adjusted=%.0f estimateHours=%.2f",
+            missionType(mission), tostring(field and field.id or "unavailable"),
+            nativeReward, adjusted, hours)
+    end
+end
+
+function SiNContracts:installMoneyPolicyHooks()
+    if AbstractFieldMission ~= nil and type(AbstractFieldMission.getReward) == "function"
+        and AbstractFieldMission.__sinContractsRewardFloorHook ~= true then
+        local nativeGetReward = AbstractFieldMission.getReward
+        AbstractFieldMission.getReward = function(mission, ...)
+            local native = nativeGetReward(mission, ...)
+            local saved = number(mission.reward)
+            if type(native) == "number" and saved ~= nil and saved > native then return saved end
+            return native
+        end
+        AbstractFieldMission.__sinContractsRewardFloorHook = true
+    end
+    if AbstractMission ~= nil and type(AbstractMission.getVehicleCosts) == "function"
+        and AbstractMission.__sinContractsVehicleCostHook ~= true then
+        local nativeGetVehicleCosts = AbstractMission.getVehicleCosts
+        AbstractMission.getVehicleCosts = function(mission, ...)
+            local native = nativeGetVehicleCosts(mission, ...)
+            local vehicles = mission.vehiclesToLoad
+            if type(native) ~= "number" or mission.field == nil
+                or type(vehicles) ~= "table" or #vehicles == 0
+                or number(mission.reward) == nil or mission.reward <= 0 then
+                return native
+            end
+            local reward = number(call(mission, "getReward"))
+            if reward == nil or reward <= 0 then return native end
+            return math.max(native, MIN_EQUIPMENT_COST,
+                math.ceil(reward * MIN_EQUIPMENT_REWARD_SHARE))
+        end
+        AbstractMission.__sinContractsVehicleCostHook = true
+    end
+    if call(g_currentMission, "getIsServer") == true and AbstractMission ~= nil
+        and type(AbstractMission.init) == "function"
+        and AbstractMission.__sinContractsOfferRewardInitHook ~= true then
+        local nativeInit = AbstractMission.init
+        AbstractMission.init = function(mission, ...)
+            local result = nativeInit(mission, ...)
+            if result == true then SiNContracts:applyNewOfferRewardFloor(mission) end
+            return result
+        end
+        AbstractMission.__sinContractsOfferRewardInitHook = true
+    end
 end
 
 function SiNContracts:observe(mission, eventName, finishState)
@@ -624,6 +714,16 @@ function SiNContracts:retryPendingLifecycle()
         if next(record.pendingLifecycles or {}) ~= nil then
             emitNativeContractLifecycle(self, nil, record, "retry")
         end
+    end
+end
+
+function SiNContracts:observeExpiredBeforeDelete(mission)
+    -- MissionManager:updateMissions() deletes invalid CREATED offers through
+    -- mission:delete(). Only a verified native timeout is called "expired";
+    -- field invalidation for any other reason is not misreported as timeout.
+    if mission ~= nil and statusName(mission) == "CREATED"
+        and call(mission, "isTimedOut") == true then
+        self:observe(mission, "expired")
     end
 end
 
@@ -1355,12 +1455,12 @@ function SiNContracts:appendNativeUiDetails(mission, details)
     -- getDetails may be called more than once by a frame refresh. Do not add
     -- duplicate rows if another wrapper has already passed this list through.
     for _, row in pairs(details) do
-        if type(row) == "table" and (row.title == "SiN estimated work time" or row.title == "SiN estimated native $/hour") then
+        if type(row) == "table" and (row.title == "SiN estimated work time" or row.title == "SiN estimated gross $/hour") then
             return
         end
     end
     table.insert(details, {title = "SiN estimated work time", value = formatEstimateHours(estimatedHours)})
-    table.insert(details, {title = "SiN estimated native $/hour", value = formatEstimateMoney(reward / estimatedHours)})
+    table.insert(details, {title = "SiN estimated gross $/hour", value = formatEstimateMoney(reward / estimatedHours)})
 end
 
 function SiNContracts:installDetailsHook()
@@ -1826,6 +1926,7 @@ function SiNContracts:installHooks()
     -- client is unnecessary and can interfere with the client's Contracts
     -- frame before it sends the native start/borrow request. The only client
     -- hook retained here is the read-only details presentation below.
+    self:installMoneyPolicyHooks()
     if call(g_currentMission, "getIsServer") ~= true then
         self:installDetailsHook()
         return
@@ -1843,9 +1944,20 @@ function SiNContracts:installHooks()
         installed = appendMethod(MissionManager, "finishMissionGeneration", function(manager)
             SiNContracts:onNativeGenerationFinished(manager)
         end, "__sinContractsHook_finishMissionGeneration", true) or installed
-        installed = appendMethod(MissionManager, "registerMission", function(manager, mission)
-            SiNContracts:observe(mission, "generated")
-        end, nil, true) or installed
+        if type(MissionManager.registerMission) == "function"
+            and MissionManager.__sinContractsHook_registerMission ~= true then
+            local nativeRegister = MissionManager.registerMission
+            MissionManager.registerMission = function(manager, mission, ...)
+                -- Last pre-registration chance to price the completed native
+                -- offer before Object:register() streams it to clients.
+                SiNContracts:applyNewOfferRewardFloor(mission)
+                local values = {nativeRegister(manager, mission, ...)}
+                SiNContracts:observe(mission, "generated")
+                return unpack(values)
+            end
+            MissionManager.__sinContractsHook_registerMission = true
+            installed = true
+        end
         installed = appendMethod(MissionManager, "startMission", function(manager, mission)
             if mission ~= nil and (mission.activeMissionId ~= nil or call(mission, "getWasStarted") == true) then
                 SiNContracts:observe(mission, "accepted")
@@ -1864,6 +1976,16 @@ function SiNContracts:installHooks()
         end, "__sinContractsHook_markMissionForDeletion") or installed
     end
     if AbstractMission ~= nil then
+        if type(AbstractMission.delete) == "function"
+            and AbstractMission.__sinContractsExpiryDeleteHook ~= true then
+            local nativeDelete = AbstractMission.delete
+            AbstractMission.delete = function(mission, ...)
+                SiNContracts:observeExpiredBeforeDelete(mission)
+                return nativeDelete(mission, ...)
+            end
+            AbstractMission.__sinContractsExpiryDeleteHook = true
+            installed = true
+        end
         installed = appendMethod(AbstractMission, "finish", function(mission, finishState)
             SiNContracts:observe(mission, "finished", finishState)
         end, "__sinContractsHook_finish") or installed
@@ -1897,6 +2019,7 @@ end
 function SiNContracts:loadMap()
     self.records, self.fingerprints, self.lifecycleEvents = {}, {}, {}
     self.recordCount, self.lastPollMs, self.lifecycleBridgeUnavailableLogged = 0, nil, nil
+    self.lifecyclePublishErrorLogged = nil
     if call(g_currentMission, "getIsServer") == true and MissionManager ~= nil then
         MissionManager.MISSION_GENERATION_INTERVAL = NATIVE_GENERATION_INTERVAL_MS
         logInfo("native mission generation interval configured interval=%dms", NATIVE_GENERATION_INTERVAL_MS)

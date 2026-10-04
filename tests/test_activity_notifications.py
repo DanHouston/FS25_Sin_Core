@@ -105,6 +105,29 @@ class ActivityNotificationTests(unittest.IsolatedAsyncioTestCase):
         thread.send.assert_awaited_once_with("Claimed by SiN Harvest",
                                              allowed_mentions=unittest.mock.ANY)
 
+    async def test_native_contract_expiration_keeps_thread_and_marks_parent_expired(self):
+        database = MagicMock()
+        parent = MagicMock(id=101, content="Contract Available - Harvest\nField 12")
+        parent.edit = AsyncMock()
+        thread = MagicMock(id=202)
+        thread.send = AsyncMock()
+        channel = MagicMock(id=303)
+        channel.fetch_message = AsyncMock(return_value=parent)
+        bot = MagicMock()
+        bot.get_channel.return_value = thread
+        publisher = ActivityPublisher(bot, database)
+        database.db.native_contracts.find_one.return_value = {
+            "_id": "contract-key", "discord_parent_message_id": "101",
+            "discord_parent_base_message": "Contract Available - Harvest\nField 12",
+            "discord_thread_id": "202"}
+        await publisher._publish_native_contract(channel, {
+            "metadata": {"native_contract_id": "contract-key", "lifecycle": "expired"},
+            "message": "Expired in FS25"})
+        parent.edit.assert_awaited_once_with(
+            content="Contract Expired - Harvest\nField 12\n\n**Current status:** Expired in FS25",
+            allowed_mentions=unittest.mock.ANY)
+        thread.send.assert_awaited_once_with("Expired in FS25", allowed_mentions=unittest.mock.ANY)
+
     async def test_native_contract_requires_thread_permissions(self):
         database = MagicMock()
         channel = MagicMock()

@@ -604,7 +604,8 @@ class PairingAgent:
             lifecycle_order = {"native_contract_available": 0,
                                "native_contract_accepted": 1,
                                "native_contract_completed": 2,
-                               "native_contract_cancelled": 2}
+                               "native_contract_cancelled": 2,
+                               "native_contract_expired": 2}
             scope = (str(event.get("server_key", "")), str(event.get("save_id", "")),
                      "native_contract", str(payload.get("mission_id", "")))
             return (scope, lifecycle_order.get(event_type, 3), 0, path.name)
@@ -638,7 +639,8 @@ class PairingAgent:
         if event["event_type"] not in {"heartbeat", "player_connected", "player_disconnected",
                                         "player_activity_minute", "chat_message", "map_geometry",
                                         "native_contract_available", "native_contract_accepted",
-                                        "native_contract_completed", "native_contract_cancelled"}:
+                                        "native_contract_completed", "native_contract_cancelled",
+                                        "native_contract_expired"}:
             raise ValueError("unsupported event type")
         if event["event_type"] == "map_geometry":
             event["payload"] = cls._parse_map_geometry(root)

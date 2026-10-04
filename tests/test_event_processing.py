@@ -110,6 +110,25 @@ class EventProcessingTests(unittest.TestCase):
         self.assertIn("SiN Harvest", message)
         self.assertNotIn("Farm 4", message)
 
+    def test_native_contract_expiration_is_not_attributed_to_a_player(self):
+        message = self.processor.native_contract_message({"lifecycle": "expired"})
+        self.assertIn("Expired in FS25", message)
+        self.assertIn("no longer available", message)
+        self.assertNotIn("Farm", message)
+
+    def test_native_contract_expiration_flows_to_activity_outbox(self):
+        self.processor.native_contracts = MagicMock()
+        self.processor.native_contracts.ingest.return_value = {
+            "_id": "contract-key", "lifecycle": "expired", "mission_id": "mission-7"}
+        event = self.event("native_contract_expired")
+        event["payload"] = {"mission_id": "mission-7", "mission_type": "harvestMission"}
+        result = self.processor.process(event)
+        self.assertEqual(result["lifecycle"], "expired")
+        self.assertEqual(result["native_contract_id"], "contract-key")
+        outbox = self.database.db.activity_outbox.insert_one.call_args.args[0]
+        self.assertEqual(outbox["activity_type"], "native_contract_expired")
+        self.assertEqual(outbox["metadata"]["lifecycle"], "expired")
+
     def test_duplicate_processed_event_key_is_safe(self):
         self.database.db.processed_server_events.insert_one.side_effect = DuplicateKeyError("duplicate key")
         result = self.processor.process(self.event("heartbeat"))

@@ -24,6 +24,184 @@ class ContractsLuaTests(unittest.TestCase):
         lua.execute(SCRIPT.read_text(encoding="utf-8"))
         return lua
 
+    def test_new_field_offer_uses_native_saved_reward_and_lease_cost_floor(self):
+        lua = self._runtime()
+        lua.execute("""
+            MissionStatus = {CREATED = 1, RUNNING = 2}
+            local field = {id = 9, areaHa = 10}
+            function field:getId() return self.id end
+            function field:getAreaHa() return self.areaHa end
+            AbstractMission = {}
+            function AbstractMission:init()
+                self.vehiclesToLoad = {{workingWidth = 10, workingSpeed = 10}}
+                return true
+            end
+            function AbstractMission:getVehicleCosts() return 959 end
+            AbstractFieldMission = {}
+            setmetatable(AbstractFieldMission, {__index = AbstractMission})
+            function AbstractFieldMission:getReward() return 5000 end
+            SiNContracts:installMoneyPolicyHooks()
+            local mission = setmetatable({status = MissionStatus.CREATED, field = field},
+                {__index = AbstractFieldMission})
+            assert(mission:init() == true)
+            assert(mission.reward == 28572)
+            assert(mission:getReward() == 28572)
+            assert(mission:getVehicleCosts() == 2858)
+            mission.status = MissionStatus.RUNNING
+            assert(mission:getReward() == 28572)
+            assert(mission:getVehicleCosts() == 2858)
+        """)
+
+    def test_high_native_reward_is_not_lowered_and_no_equipment_means_no_lease(self):
+        lua = self._runtime()
+        lua.execute("""
+            local field = {areaHa = 1}
+            function field:getAreaHa() return self.areaHa end
+            AbstractMission = {}
+            function AbstractMission:init()
+                self.vehiclesToLoad = {{workingWidth = 10, workingSpeed = 10}}
+                return true
+            end
+            function AbstractMission:getVehicleCosts() return 12000 end
+            AbstractFieldMission = {}
+            setmetatable(AbstractFieldMission, {__index = AbstractMission})
+            function AbstractFieldMission:getReward() return 100000 end
+            SiNContracts:installMoneyPolicyHooks()
+            local mission = setmetatable({status = "CREATED", field = field},
+                {__index = AbstractFieldMission})
+            assert(mission:init() == true)
+            assert(mission.reward == 100000)
+            assert(mission:getVehicleCosts() == 12000)
+            mission.vehiclesToLoad = nil
+            assert(mission:getVehicleCosts() == 12000)
+        """)
+
+    def test_restored_offer_is_not_silently_repriced(self):
+        lua = self._runtime()
+        lua.execute("""
+            local field = {areaHa = 10}
+            function field:getAreaHa() return self.areaHa end
+            AbstractMission = {}
+            function AbstractMission:getVehicleCosts() return 959 end
+            AbstractFieldMission = {}
+            setmetatable(AbstractFieldMission, {__index = AbstractMission})
+            function AbstractFieldMission:getReward() return 5000 end
+            SiNContracts:installMoneyPolicyHooks()
+            local mission = setmetatable({status = "CREATED", field = field,
+                reward = 0, vehiclesToLoad = {{workingWidth = 10, workingSpeed = 10}}},
+                {__index = AbstractFieldMission})
+            assert(mission:getReward() == 5000)
+            assert(mission:getVehicleCosts() == 959)
+            SiNContracts:observe(mission, "observed")
+            assert(mission.reward == 0)
+        """)
+
+    def test_new_offer_without_reliable_hours_keeps_native_reward_and_raises_lease_minimum(self):
+        lua = self._runtime()
+        lua.execute("""
+            local field = {areaHa = 5}
+            function field:getAreaHa() return self.areaHa end
+            AbstractMission = {}
+            function AbstractMission:init()
+                self.vehiclesToLoad = {{filename = "unknown.xml"}}
+                return true
+            end
+            function AbstractMission:getVehicleCosts() return 959 end
+            AbstractFieldMission = {}
+            setmetatable(AbstractFieldMission, {__index = AbstractMission})
+            function AbstractFieldMission:getReward() return 4000 end
+            SiNContracts:installMoneyPolicyHooks()
+            local mission = setmetatable({status = "CREATED", field = field},
+                {__index = AbstractFieldMission})
+            assert(mission:init() == true)
+            assert(mission.reward == 4000)
+            assert(mission:getReward() == 4000)
+            assert(mission:getVehicleCosts() == 1000)
+        """)
+
+    def test_modded_reward_getter_that_ignores_saved_reward_fails_closed(self):
+        lua = self._runtime()
+        lua.execute("""
+            local field = {areaHa = 10}
+            function field:getAreaHa() return self.areaHa end
+            AbstractMission = {}
+            function AbstractMission:init()
+                self.vehiclesToLoad = {{workingWidth = 10, workingSpeed = 10}}
+                return true
+            end
+            function AbstractMission:getVehicleCosts() return 959 end
+            AbstractFieldMission = {}
+            setmetatable(AbstractFieldMission, {__index = AbstractMission})
+            function AbstractFieldMission:getReward() return 5000 end
+            SiNContracts:installMoneyPolicyHooks()
+            local mission = setmetatable({status = "CREATED", field = field,
+                reward = 0, getReward = function() return 5000 end},
+                {__index = AbstractFieldMission})
+            assert(mission:init() == true)
+            assert(mission.reward == 0)
+            assert(mission:getReward() == 5000)
+            assert(mission:getVehicleCosts() == 959)
+        """)
+
+    def test_new_reward_is_set_before_native_registration_and_streaming(self):
+        lua = self._runtime()
+        lua.execute("""
+            local field = {id = 31, areaHa = 7}
+            function field:getId() return self.id end
+            function field:getAreaHa() return self.areaHa end
+            AbstractMission = {}
+            function AbstractMission:getVehicleCosts() return 959 end
+            AbstractFieldMission = {}
+            setmetatable(AbstractFieldMission, {__index = AbstractMission})
+            function AbstractFieldMission:getReward() return 2000 end
+            MissionManager = {}
+            function MissionManager:registerMission(mission, missionType)
+                assert(mission.reward == 20000)
+                assert(mission:getReward() == 20000)
+                mission.type = missionType
+                return "native-registered"
+            end
+            SiNContracts:installHooks()
+            local mission = setmetatable({status = "CREATED", field = field,
+                vehiclesToLoad = {{workingWidth = 10, workingSpeed = 10}}},
+                {__index = AbstractFieldMission})
+            function mission:getUniqueId() return "new-offer-31" end
+            assert(MissionManager:registerMission(mission, {name = "harvestMission"}) == "native-registered")
+        """)
+
+    def test_native_timeout_marks_unaccepted_offer_expired_once(self):
+        lua = self._runtime()
+        lua.execute("""
+            MissionStatus = {CREATED = 1, RUNNING = 2}
+            local emitted, deleted = {}, 0
+            FS25SiNServer = {emitServerEvent = function(_, eventType)
+                table.insert(emitted, eventType)
+                return true
+            end}
+            AbstractMission = {}
+            function AbstractMission:delete() deleted = deleted + 1 end
+            local mission = setmetatable({status = MissionStatus.CREATED, reward = 1000,
+                type = {name = "hoeMission"}}, {__index = AbstractMission})
+            function mission:getUniqueId() return "timed-out-offer" end
+            function mission:getReward() return self.reward end
+            function mission:isTimedOut() return true end
+            SiNContracts:installHooks()
+            mission:delete()
+            assert(deleted == 1)
+            assert(#emitted == 2)
+            assert(emitted[1] == "native_contract_available")
+            assert(emitted[2] == "native_contract_expired")
+            SiNContracts:observeExpiredBeforeDelete(mission)
+            assert(#emitted == 2)
+            mission.status = MissionStatus.CREATED
+            function mission:isTimedOut() return false end
+            SiNContracts:observeExpiredBeforeDelete(mission)
+            assert(#emitted == 2)
+            mission.status = MissionStatus.RUNNING
+            SiNContracts:observeExpiredBeforeDelete(mission)
+            assert(#emitted == 2)
+        """)
+
     def test_native_lifecycle_is_exported_once_through_server_mailbox(self):
         lua = self._runtime()
         lua.execute("""
@@ -136,6 +314,26 @@ class ContractsLuaTests(unittest.TestCase):
             assert(SiNContracts.lifecycleBridgeUnavailableLogged == nil)
         """)
 
+    def test_native_lifecycle_publish_error_is_logged_once_and_kept_for_retry(self):
+        lua = self._runtime()
+        lua.execute("""
+            FS25SiNServer = nil
+            local warnings = {}
+            Logging.warning = function(message, ...)
+                table.insert(warnings, string.format(message, ...))
+            end
+            g_messageCenter = {publish=function() error("message center failure") end}
+            local mission={status="CREATED", type={name="hoeMission"}, reward=1000}
+            function mission:getUniqueId() return "publish-error-mission" end
+            SiNContracts:observe(mission, "generated")
+            g_currentMission.time = g_currentMission.time + 6000
+            SiNContracts:retryPendingLifecycle()
+            assert(#warnings == 2)
+            assert(string.find(warnings[1], "publish failed", 1, true) ~= nil)
+            assert(string.find(warnings[2], "bridge unavailable", 1, true) ~= nil)
+            assert(SiNContracts.records["publish-error-mission"].pendingLifecycles.available == true)
+        """)
+
     def test_pending_availability_survives_acceptance_until_bridge_recovers(self):
         lua = self._runtime()
         lua.execute("""
@@ -243,7 +441,9 @@ class ContractsLuaTests(unittest.TestCase):
                 end,
                 publish=function(_, messageType, args)
                     assert(messageType == 0x53494E43)
-                    if listener then listener(listenerTarget, args[1]) end
+                    -- Model a MessageCenter that forwards its argument table
+                    -- as-is instead of unpacking the one-element table.
+                    if listener then listener(listenerTarget, args) end
                 end
             }
             g_currentMission.missionInfo={savegameIndex=8}
@@ -265,6 +465,15 @@ class ContractsLuaTests(unittest.TestCase):
             assert(#emitted == 1)
             assert(emitted[1].type == "native_contract_available")
             assert(string.find(emitted[1].eventId, "bridge-mission", 1, true) ~= nil)
+            local acknowledged = false
+            server:onNativeContractLifecycle({
+                eventType="native_contract_available",
+                payload={mission_id="direct-envelope"},
+                acknowledge=function(written) acknowledged = written end
+            })
+            assert(#emitted == 2)
+            assert(emitted[2].id == "direct-envelope")
+            assert(acknowledged == true)
         """)
 
     def test_unprepared_mission_does_not_probe_or_poison_native_completion(self):
@@ -752,7 +961,7 @@ class ContractsLuaTests(unittest.TestCase):
             assert(#details == 3)
             assert(details[2].title == "SiN estimated work time")
             assert(details[2].value == "0.8 h")
-            assert(details[3].title == "SiN estimated native $/hour")
+            assert(details[3].title == "SiN estimated gross $/hour")
             local again = AbstractFieldMission.getDetails(mission)
             assert(#again == 3)
             """
@@ -857,7 +1066,7 @@ class ContractsLuaTests(unittest.TestCase):
             assert(math.abs(record.estimatedHours - 15.2 * 10 / (12 * 10 * 0.70)) < 0.000001)
             local details = AbstractFieldMission.getDetails(mission)
             assert(#details == 2 and details[1].value == "1.8 h")
-            assert(details[2].title == "SiN estimated native $/hour")
+            assert(details[2].title == "SiN estimated gross $/hour")
             -- Contract inspection must never mutate the global descriptor
             -- that the vehicle showroom uses to render its preview/price.
             assert(canonicalStoreItem.specs == nil)

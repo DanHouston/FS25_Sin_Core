@@ -43,7 +43,7 @@ class ContractsModTests(unittest.TestCase):
         ]
         self.assertEqual(equipment_performance(equipment), (6.0, 11.2654))
 
-    def test_mod_is_standalone_read_only_and_declares_expected_files(self):
+    def test_mod_preserves_native_mission_authority_and_declares_expected_files(self):
         descriptor = (MOD / "modDesc.xml").read_text(encoding="utf-8")
         source = (MOD / "scripts/SiNContracts.lua").read_text(encoding="utf-8")
         self.assertIn("SiN FS25 Contracts", descriptor)
@@ -120,7 +120,7 @@ class ContractsModTests(unittest.TestCase):
         source = (MOD / "scripts/SiNContracts.lua").read_text(encoding="utf-8")
         self.assertIn("appendNativeUiDetails", source)
         self.assertIn("SiN estimated work time", source)
-        self.assertIn("SiN estimated native $/hour", source)
+        self.assertIn("SiN estimated gross $/hour", source)
         self.assertIn("AbstractFieldMission.getDetails", source)
         self.assertIn("native details preserved", source)
 

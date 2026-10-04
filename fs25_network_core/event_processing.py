@@ -21,7 +21,8 @@ CHAT_EVENT_TYPE = "chat_message"
 MAP_EVENT_TYPE = "map_geometry"
 SUPPORTED_EVENTS = {"heartbeat", "player_connected", "player_disconnected", ACTIVITY_EVENT_TYPE,
                     CHAT_EVENT_TYPE, MAP_EVENT_TYPE, "native_contract_available",
-                    "native_contract_accepted", "native_contract_completed", "native_contract_cancelled"}
+                    "native_contract_accepted", "native_contract_completed", "native_contract_cancelled",
+                    "native_contract_expired"}
 
 
 def scoped_event_id(server_key, save_key, event_id, world_id=None):
@@ -292,6 +293,8 @@ class CentralEventProcessor:
                 lines.append(f"**Estimate:** {contract['estimated_hours']:.2f} h")
             lines.append("Accept it in FS25. This thread records when it is claimed.")
             return "\n".join(lines)
+        if lifecycle == "expired":
+            return "⌛ **Expired in FS25**\nThis offer is no longer available."
         actor = contract.get("accepting_player")
         farm = contract.get("accepting_farm_id")
         farm_name = contract.get("accepting_farm_name")
