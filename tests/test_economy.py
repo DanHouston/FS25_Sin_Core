@@ -82,3 +82,20 @@ class EconomyTests(unittest.TestCase):
         summary = engine.account_summary("player", "server", "save", "world")
         self.assertIsNone(summary["game_balance"])
         self.assertEqual(summary["game_balance_reason"], "no active, mod-confirmed farm manager mapping")
+
+    def test_recent_bank_status_is_scoped_to_current_world(self):
+        database = MagicMock()
+        database.db.deposit_requests.find_one.return_value = {
+            "state": "completed", "amount": 100}
+        database.db.withdrawals.find_one.return_value = {
+            "state": "refunded", "amount": 25}
+        engine = BankingEngine(database)
+        engine._world_id = lambda server, save, world: "world-a"
+
+        status = engine.recent_operation_status("42", "server", "save", "world-a")
+
+        self.assertEqual(status["deposit"], {"state": "completed", "amount": 100})
+        self.assertEqual(status["withdrawal"], {"state": "refunded", "amount": 25})
+        query = database.db.deposit_requests.find_one.call_args.args[0]
+        self.assertEqual(query, {"discord_id": "42", "server_id": "server",
+                                 "save_id": "save", "world_id": "world-a"})

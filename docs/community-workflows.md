@@ -52,6 +52,14 @@ authenticated farm only after the deployed FS25 money adapter proves the native
 balance change; `/withdraw` reserves wallet funds and credits that same farm
 only after authoritative readback.  Invoice payments move value between SiN
 wallets without mutating FS25 farm balances.
+The command acknowledges submission, then a private Discord message reports
+the confirmed outcome and balances. The FS25 balance in a success notice is
+the native receipt's balance read-back, not an older server snapshot. A
+definitive failure says to retry later; an uncertain or delayed operation
+remains reserved/queued and is never falsely called failed. Members who block
+bot DMs can still inspect pending amounts and the latest definitive transfer
+state with `/balance`. Staff should check the operational log if a completion
+notice cannot be delivered.
 
 ## Contracts, invoices, and events
 

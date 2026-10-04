@@ -55,7 +55,8 @@ class ActivityPublisher:
     async def run(self):
         while True:
             for record in list(self.outbox.db.activity_outbox.find(
-                    {"status": "pending", "world_generation_state": {"$ne": "historical"}}).limit(25)):
+                    {"status": "pending", "world_generation_state": {"$ne": "historical"}})
+                    .sort("created_at", 1).limit(25)):
                 await self.publish(record)
             await asyncio.sleep(self.interval)
 
@@ -171,14 +172,17 @@ class ActivityPublisher:
                 parent = await channel.send(record["message"], allowed_mentions=mentions)
                 self.outbox.db.native_contracts.update_one(
                     {"_id": contract_id}, {"$set": {"discord_parent_channel_id": str(channel.id),
-                                                        "discord_parent_message_id": str(parent.id)}})
+                                                        "discord_parent_message_id": str(parent.id),
+                                                        "discord_parent_base_message": record["message"]}})
                 contract["discord_parent_message_id"] = str(parent.id)
+                contract["discord_parent_base_message"] = record["message"]
             if not contract.get("discord_thread_id"):
                 mission = str(contract.get("mission_type") or "Contract").replace("Mission", "").replace("_", " ").title()
                 field = contract.get("field_name") or ("Field " + str(contract.get("field_id") or "unknown"))
                 thread = await parent.create_thread(name=(f"Contract • {field} • {mission}")[:100])
                 self.outbox.db.native_contracts.update_one(
                     {"_id": contract_id}, {"$set": {"discord_thread_id": str(thread.id)}})
+                contract["discord_thread_id"] = str(thread.id)
             return
         thread_id = contract.get("discord_thread_id")
         if not thread_id:
@@ -188,6 +192,21 @@ class ActivityPublisher:
             thread = await self.bot.fetch_channel(int(thread_id))
         if not hasattr(thread, "send"):
             raise ValueError("native contract thread is not sendable")
+        parent_id = contract.get("discord_parent_message_id")
+        if parent_id:
+            try:
+                parent = await channel.fetch_message(int(parent_id))
+                base = contract.get("discord_parent_base_message") or str(parent.content).split(
+                    "\n\n**Current status:**", 1)[0]
+                label = {"accepted": "Claimed", "completed": "Completed",
+                         "cancelled": "Cancelled"}.get(lifecycle, "Updated")
+                heading = base.replace("Contract Available", f"Contract {label}", 1)
+                await parent.edit(content=f"{heading}\n\n**Current status:** {record['message']}",
+                                  allowed_mentions=mentions)
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException) as error:
+                # The thread is still the durable disposition trail. A parent
+                # edit failure must not suppress the actual lifecycle update.
+                LOG.warning("[SiN Activity] contract parent refresh unavailable id=%s: %s", contract_id, error)
         await thread.send(record["message"], allowed_mentions=mentions)
 
     def _record_failure(self, record, error, permanent=False):

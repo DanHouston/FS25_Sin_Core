@@ -453,6 +453,30 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         await self.bot.tree.get_command("withdraw").callback(interaction, 1)
         self.bot.bank.request_withdrawal.assert_called_once_with(
             "9001", "42", "server-a", "save-a", 1, world_id="world-a")
+        self.assertEqual(interaction.response.defer.await_count, 2)
+        self.assertNotIn("Withdrawal is pending", interaction.followup.send.await_args.args[0])
+        self.assertIn("confirmed result", interaction.followup.send.await_args.args[0])
+
+    async def test_balance_shows_latest_definitive_bank_outcome_when_dm_unavailable(self):
+        interaction = MagicMock()
+        interaction.user.id = 42
+        interaction.response.defer = AsyncMock()
+        interaction.followup.send = AsyncMock()
+        self.bot.resolve_identity_context = MagicMock(return_value={
+            "server_key": "server-a", "save_key": "save-a", "world_id": "world-a"})
+        self.bot.bank.account_summary = MagicMock(return_value={
+            "game_balance": 1000, "game_balance_reason": None,
+            "available_balance": 400, "pending_deposits": 0, "pending_withdrawals": 0})
+        self.bot.bank.recent_operation_status = MagicMock(return_value={
+            "deposit": {"state": "completed", "amount": 100},
+            "withdrawal": {"state": "refunded", "amount": 50}})
+
+        await self.bot.tree.get_command("balance").callback(interaction)
+
+        message = interaction.followup.send.await_args.args[0]
+        self.assertIn("Game balance: $1,000", message)
+        self.assertIn("Last deposit: $100 — complete", message)
+        self.assertIn("Last withdrawal: $50 — failed; funds returned", message)
 
     async def test_contract_identity_context_auto_selects_one_server_and_fails_closed_for_multiple(self):
         database = self.bot.bank.database.db

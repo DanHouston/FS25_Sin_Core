@@ -8,6 +8,7 @@ from lupa.lua51 import LuaRuntime
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "mods/SiN_FS25_Contracts/scripts/SiNContracts.lua"
+SERVER_SCRIPT = ROOT / "mods/FS25_SiN_Server/NetworkLocal.lua"
 
 
 class ContractsLuaTests(unittest.TestCase):
@@ -54,6 +55,216 @@ class ContractsLuaTests(unittest.TestCase):
             assert(emitted[2].eventType == "native_contract_accepted")
             assert(emitted[2].payload.accepting_farm_id == 2)
             assert(emitted[3].eventType == "native_contract_completed")
+        """)
+
+    def test_native_lifecycle_retries_when_server_bridge_initializes_later(self):
+        lua = self._runtime()
+        lua.execute("""
+            FS25SiNServer = nil
+            local field = {id = 12, areaHa = 3.5, name = "Field 12", farmlandId = 2}
+            function field:getId() return self.id end
+            function field:getAreaHa() return self.areaHa end
+            function field:getName() return self.name end
+            local mission = {status = "CREATED", type = {name = "hoeMission"}, reward = 4000}
+            function mission:getUniqueId() return "mission-delayed-bridge" end
+            function mission:getField() return field end
+            function mission:getReward() return self.reward end
+
+            SiNContracts:observe(mission, "generated")
+            assert(SiNContracts.records["mission-delayed-bridge"].lifecycleToPublish == "available")
+
+            local emitted = {}
+            FS25SiNServer = {emitServerEvent = function(self, eventType, payload)
+                table.insert(emitted, {eventType = eventType, payload = payload})
+                return true
+            end}
+            g_currentMission.time = g_currentMission.time + 6000
+            SiNContracts:observe(mission, "observed")
+            SiNContracts:observe(mission, "observed")
+            assert(#emitted == 1)
+            assert(emitted[1].eventType == "native_contract_available")
+            assert(SiNContracts.records["mission-delayed-bridge"].lifecycleToPublish == nil)
+        """)
+
+    def test_native_lifecycle_uses_shared_message_center_across_mod_environments(self):
+        lua = self._runtime()
+        lua.execute("""
+            FS25SiNServer = nil -- user-defined globals are not the cross-mod boundary
+            local warnings = 0
+            Logging.warning = function() warnings = warnings + 1 end
+            local listener, listenerTarget
+            local received = {}
+            g_messageCenter = {
+                subscribe = function(self, messageType, callback, target)
+                    assert(messageType == 0x53494E43)
+                    listener, listenerTarget = callback, target
+                end,
+                publish = function(self, messageType, arguments)
+                    assert(messageType == 0x53494E43)
+                    if listener ~= nil then listener(listenerTarget, arguments[1]) end
+                    -- The real MessageCenter need not return a delivery bool.
+                end
+            }
+            local field = {id = 12, areaHa = 3.5, name = "Field 12", farmlandId = 2}
+            function field:getId() return self.id end
+            function field:getAreaHa() return self.areaHa end
+            function field:getName() return self.name end
+            local mission = {status = "CREATED", type = {name = "hoeMission"}, reward = 4000}
+            function mission:getUniqueId() return "mission-message-center" end
+            function mission:getField() return field end
+            function mission:getReward() return self.reward end
+
+            SiNContracts:observe(mission, "generated")
+            assert(SiNContracts.records["mission-message-center"].lifecycleToPublish == "available")
+            assert(warnings == 1)
+            local server = {emitServerEvent = function(self, eventType, payload, eventId)
+                table.insert(received, {eventType=eventType, payload=payload, eventId=eventId})
+                return true
+            end}
+            g_messageCenter:subscribe(0x53494E43, function(self, envelope)
+                local written = server:emitServerEvent(envelope.eventType, envelope.payload, "stable-event-id")
+                if written == true then envelope.acknowledge(true) end
+            end, {})
+
+            g_currentMission.time = g_currentMission.time + 6000
+            SiNContracts:observe(mission, "observed")
+            assert(#received == 1)
+            assert(received[1].eventType == "native_contract_available")
+            assert(received[1].payload.mission_id == "mission-message-center")
+            assert(SiNContracts.records["mission-message-center"].lifecycleToPublish == nil)
+            assert(warnings == 1)
+            assert(SiNContracts.lifecycleBridgeUnavailableLogged == nil)
+        """)
+
+    def test_pending_availability_survives_acceptance_until_bridge_recovers(self):
+        lua = self._runtime()
+        lua.execute("""
+            FS25SiNServer = nil
+            local ready = false
+            local emitted = {}
+            g_messageCenter = {publish=function(_, _, args)
+                if ready then
+                    local envelope = args[1]
+                    table.insert(emitted, envelope.eventType)
+                    envelope.acknowledge(true)
+                end
+            end}
+            local field = {id=12, areaHa=3, name="Field 12"}
+            function field:getId() return self.id end
+            function field:getAreaHa() return self.areaHa end
+            function field:getName() return self.name end
+            local mission = {status="CREATED", type={name="hoeMission"}, reward=1000}
+            function mission:getUniqueId() return "pending-mission" end
+            function mission:getField() return field end
+            function mission:getReward() return self.reward end
+            SiNContracts:observe(mission, "generated")
+            mission.status, mission.farmId = "RUNNING", 2
+            SiNContracts:observe(mission, "accepted")
+            assert(SiNContracts.records["pending-mission"].pendingLifecycles.available == true)
+            assert(SiNContracts.records["pending-mission"].pendingLifecycles.accepted == true)
+            assert(#emitted == 0)
+            ready = true
+            g_currentMission.time = g_currentMission.time + 6000
+            SiNContracts:observe(mission, "observed")
+            assert(#emitted == 2)
+            assert(emitted[1] == "native_contract_available")
+            assert(emitted[2] == "native_contract_accepted")
+            assert(SiNContracts.records["pending-mission"].lifecycleToPublish == nil)
+        """)
+
+    def test_startup_scan_backfills_native_available_and_running_missions_once(self):
+        lua = self._runtime()
+        lua.execute("""
+            local emitted = {}
+            FS25SiNServer = {emitServerEvent=function(_, eventType, payload)
+                table.insert(emitted, {type=eventType, id=payload.mission_id,
+                    farmName=payload.accepting_farm_name})
+                return true
+            end}
+            g_farmManager = {getFarmById=function(_, id)
+                if id == 2 then return {name="SiN Harvest"} end
+            end}
+            local function mission(id, status, farmId)
+                local m={status=status, farmId=farmId, type={name="hoeMission"}, reward=1000}
+                function m:getUniqueId() return id end
+                return m
+            end
+            g_missionManager={missions={mission("board-offer", "CREATED"),
+                mission("running-offer", "RUNNING", 2)}}
+            SiNContracts:scan("observed")
+            SiNContracts:scan("observed")
+            assert(#emitted == 3)
+            assert(emitted[1].type == "native_contract_available")
+            assert(emitted[2].type == "native_contract_available")
+            assert(emitted[3].type == "native_contract_accepted")
+            assert(emitted[3].farmName == "SiN Harvest")
+        """)
+
+    def test_removed_mission_keeps_pending_lifecycle_until_mailbox_recovers(self):
+        lua = self._runtime()
+        lua.execute("""
+            FS25SiNServer=nil
+            local ready=false
+            local emitted={}
+            g_messageCenter={publish=function(_, _, args)
+                if ready then
+                    table.insert(emitted, args[1].eventType)
+                    args[1].acknowledge(true)
+                end
+            end}
+            local mission={status="CREATED", type={name="hoeMission"}, reward=1000}
+            function mission:getUniqueId() return "short-lived-mission" end
+            SiNContracts:observe(mission, "generated")
+            mission.status, mission.farmId = "RUNNING", 2
+            SiNContracts:observe(mission, "accepted")
+            mission.status, mission.finishState = "FINISHED", "SUCCESS"
+            SiNContracts:observe(mission, "finished", "SUCCESS")
+            assert(SiNContracts.records["short-lived-mission"].pendingLifecycles.completed == true)
+            -- Native MissionManager no longer retains this dismissed mission.
+            g_missionManager={missions={}}
+            ready=true
+            g_currentMission.time=g_currentMission.time+6000
+            SiNContracts:scan("observed")
+            SiNContracts:retryPendingLifecycle()
+            assert(#emitted == 3)
+            assert(emitted[1] == "native_contract_available")
+            assert(emitted[2] == "native_contract_accepted")
+            assert(emitted[3] == "native_contract_completed")
+        """)
+
+    def test_actual_server_listener_receives_cross_mod_lifecycle_envelope(self):
+        lua = self._runtime()
+        lua.execute("""
+            local listener, listenerTarget
+            g_messageCenter = {
+                subscribe=function(_, messageType, callback, target)
+                    assert(messageType == 0x53494E43)
+                    listener, listenerTarget = callback, target
+                end,
+                publish=function(_, messageType, args)
+                    assert(messageType == 0x53494E43)
+                    if listener then listener(listenerTarget, args[1]) end
+                end
+            }
+            g_currentMission.missionInfo={savegameIndex=8}
+        """)
+        lua.execute(SERVER_SCRIPT.read_text(encoding="utf-8"))
+        lua.execute("""
+            local server = FS25SiNServer
+            local emitted = {}
+            server.worldId="test-world"
+            server.emitServerEvent=function(_, eventType, payload, eventId)
+                table.insert(emitted, {type=eventType, id=payload.mission_id, eventId=eventId})
+                return true
+            end
+            assert(server:installNativeContractLifecycleListener())
+            FS25SiNServer=nil -- separate mod environments do not share this global
+            local mission={status="CREATED", type={name="hoeMission"}, reward=1000}
+            function mission:getUniqueId() return "bridge-mission" end
+            SiNContracts:observe(mission, "generated")
+            assert(#emitted == 1)
+            assert(emitted[1].type == "native_contract_available")
+            assert(string.find(emitted[1].eventId, "bridge-mission", 1, true) ~= nil)
         """)
 
     def test_unprepared_mission_does_not_probe_or_poison_native_completion(self):

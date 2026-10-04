@@ -94,6 +94,21 @@ class BankingEngine:
             "game_balance_reason": game_balance_reason,
         }
 
+    def recent_operation_status(self, discord_id, server_id, save_id, world_id=None):
+        """Show the last request in this world even when Discord DMs are blocked."""
+        query = {"discord_id": str(discord_id), "server_id": str(server_id),
+                 "save_id": str(save_id)}
+        active_world = self._world_id(server_id, save_id, world_id)
+        if active_world:
+            query["world_id"] = str(active_world)
+        result = {}
+        for kind, collection in (("deposit", self.db.deposit_requests),
+                                 ("withdrawal", self.db.withdrawals)):
+            record = collection.find_one(query, sort=[("created_at", -1)])
+            if isinstance(record, dict):
+                result[kind] = {"state": record.get("state"), "amount": int(record.get("amount", 0))}
+        return result
+
     @staticmethod
     def transaction_id(*parts):
         return hashlib.sha256("|".join(str(part) for part in parts).encode("utf-8")).hexdigest()
@@ -231,7 +246,8 @@ class BankingEngine:
             self.db.withdrawals.insert_one(dict(_id=request_id, discord_id=user, server_id=server_id,
                                                 save_id=save_id, farm_id=link["farm_id"], amount=amount,
                                                 **({"world_id": world_id} if world_id else {}),
-                                               operation_id=operation_id, state="pending", created_at=now), session=session)
+                                               operation_id=operation_id, state="pending", created_at=now,
+                                               notification_state="pending"), session=session)
             return "pending"
         return self.database.atomic(reserve)
 
@@ -264,7 +280,8 @@ class BankingEngine:
                 "discord_id": user, "server_id": server_id, "save_id": save_id,
                 **({"world_id": world_id} if world_id else {}),
                 "farm_id": link["farm_id"], "amount": amount, "operation_id": operation_id,
-                "state": "pending", "created_at": now}, session=session)
+                "state": "pending", "created_at": now,
+                "notification_state": "pending"}, session=session)
             return "pending"
         return self.database.atomic(queue)
 

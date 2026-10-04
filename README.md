@@ -57,10 +57,12 @@ an Advanced Bank System transfer automatically. Shared-farm personal attribution
 requires a mod event that identifies the player; this version uses the approved
 single manager mapping.
 
-`/deposit amount` explains the verification workflow. `/balance` displays funds.
-`/withdraw server amount` atomically reserves funds and creates a durable queue
-record using the Discord interaction ID. Delivery is not reported as successful
-until a trusted operator/adapter calls `settle_withdrawal` with a durable receipt.
+`/deposit amount` and `/withdraw amount` queue a receipt-gated game operation;
+`/balance` displays funds and outstanding transfers. The bot privately sends
+the final result and balances after a definitive game receipt. A withdrawal
+atomically reserves funds using the Discord interaction ID. Delivery is not
+reported as successful until a trusted operator/adapter calls
+`settle_withdrawal` with a durable receipt.
 A definitively failed delivery refunds exactly once. An ambiguous timeout must
 remain pending until reconciled; never automatically refund or resend it.
 

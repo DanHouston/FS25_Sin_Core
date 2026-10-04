@@ -21,6 +21,16 @@ class Response:
 
 
 class AgentTests(unittest.TestCase):
+    def test_native_contract_mailbox_files_sort_in_lifecycle_order(self):
+        events = [(Path(f"sin-contract-mission-1-{name}.xml"), {
+            "server_key": "sin-fs25-01", "save_id": "8",
+            "event_type": f"native_contract_{name}",
+            "payload": {"mission_id": "mission-1"}
+        }) for name in ("completed", "accepted", "available")]
+        ordered = sorted(events, key=PairingAgent._event_sort_key)
+        self.assertEqual([event["event_type"] for _, event in ordered], [
+            "native_contract_available", "native_contract_accepted", "native_contract_completed"])
+
     def test_pair_once_writes_response_without_requiring_request_xml(self):
         opener = MagicMock(return_value=Response())
         with tempfile.TemporaryDirectory() as folder:

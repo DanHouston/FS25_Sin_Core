@@ -3,14 +3,15 @@
 -- FS25 has no public SellingStation:addAcceptedFillType API.  This module
 -- therefore changes neither a loaded station nor map/mod XML on disk.  It
 -- augments the in-memory XMLFile immediately before PlaceableSellingStation
--- calls SellingStation:load.  Native load then creates acceptedFillTypes,
--- pricingDynamics, statistics and unload triggers. Multiplayer replication
--- still requires a dedicated-server/client acceptance test.
+-- calls SellingStation:load. The server plans against FS25's already-open
+-- active placeable list and sends each applied assignment in the placeable
+-- join stream before the client loads it. Native load on both peers creates
+-- acceptedFillTypes, pricingDynamics, statistics and unload triggers.
 
 SiNSellCoveragePolicy = {
     config = {
-        -- Plan against the active savegame placeable list before any station
-        -- is changed. If the list cannot be read, assignment fails closed.
+        -- Plan against FS25's active placeable load data on the server.
+        -- No client or independent savegame-file lookup is performed.
         enabled = true,
         excludedFillTypes = {
             WATER=true, DIESEL=true, DEF=true, ELECTRICCHARGE=true, METHANE=true, AIR=true,
@@ -21,13 +22,19 @@ SiNSellCoveragePolicy = {
         overrides = {},
         -- ["FILLTYPE"] = "station-id". A compatible preference is scored before automatic choices.
         preferredStations = {},
+        -- Missing commodities may gain up to this many NPC fallback buyers.
+        -- Additional buyers must also have a related native commodity.
+        fallbackBuyerCount = 2,
+        additionalBuyerMinSimilarity = 20,
         defaultPriceScale = 1.0
     },
     assigned = {},
     audited = false,
     hookInstalled = false,
+    streamHookInstalled = false,
     plan = nil,
-    planAttempted = false
+    planAttempted = false,
+    appliedByPlaceable = {}
 }
 
 local function log(message)
@@ -233,14 +240,17 @@ function SiNSellCoveragePolicy:audit()
     local covered, missing = 0, 0
     log("Sell-point coverage audit")
     for _, fill in pairs(eligible) do
-        local buyers = 0
+        local buyers = {}
         for _, station in ipairs(stations) do
-            if self:isNpcStation(station) and self:isDeliverableBuyer(station, fill) then buyers = buyers + 1 end
+            if self:isNpcStation(station) and self:isDeliverableBuyer(station, fill) then
+                table.insert(buyers, stationId(station))
+            end
         end
-        local status = buyers > 0 and "COVERED" or "MISSING"
-        if buyers > 0 then covered = covered + 1 else missing = missing + 1 end
-        log(string.format("sellCoverage fillType=%s index=%s buyers=%d class=%s status=%s", fill.name, tostring(fill.index), buyers, fill.class, status))
-        if buyers == 0 then
+        local status = #buyers > 0 and "COVERED" or "MISSING"
+        if #buyers > 0 then covered = covered + 1 else missing = missing + 1 end
+        log(string.format("sellCoverage fillType=%s index=%s buyers=%d stations=\"%s\" class=%s status=%s",
+            fill.name, tostring(fill.index), #buyers, table.concat(buyers, ","), fill.class, status))
+        if #buyers == 0 then
             local candidate = self:chooseStation(fill, stations)
             local reason = self.config.enabled ~= true and "automatic-assignment-disabled"
                 or (self.plan == nil and "assignment-preflight-unavailable"
@@ -257,15 +267,10 @@ end
 -- before the first selling station's native load; a later native buyer then
 -- prevents assignment to an earlier station. Store items and fill categories
 -- are resolved through the same live managers used by the game loader.
-function SiNSellCoveragePolicy:buildPlan()
-    local mission = g_currentMission
-    local directory = mission ~= nil and mission.missionInfo ~= nil and mission.missionInfo.savegameDirectory or nil
-    if directory == nil or Placeable == nil or Placeable.xmlSchemaSavegame == nil or Placeable.xmlSchema == nil then return nil, "active-placeable-list-unavailable" end
-    local separator = string.sub(tostring(directory), -1)
-    if separator ~= "/" and separator ~= "\\" then directory = tostring(directory) .. "/" end
-    local savePath = tostring(directory) .. "placeables.xml"
-    local saveXml = XMLFile.load("sinSellCoverageSavegame", savePath, Placeable.xmlSchemaSavegame)
-    if saveXml == nil then return nil, "active-placeable-list-unavailable" end
+function SiNSellCoveragePolicy:buildPlan(saveXml)
+    if saveXml == nil or type(saveXml.iterator) ~= "function" or Placeable == nil or Placeable.xmlSchema == nil then
+        return nil, "active-placeable-list-unavailable"
+    end
     local records, occurrences, inspected = {}, {}, {}
     local failed = false
     for _, saveKey in saveXml:iterator("placeables.placeable") do
@@ -317,7 +322,6 @@ function SiNSellCoveragePolicy:buildPlan()
             end
         end
     end
-    saveXml:delete()
     if failed or #records == 0 then return nil, "station-preflight-incomplete" end
     table.sort(records, function(a, b) return a.filename < b.filename end)
     for i, record in ipairs(records) do
@@ -337,7 +341,7 @@ function SiNSellCoveragePolicy:buildPlan()
         end
         if not covered then
             local requested = self.config.overrides[fill.name] or self.config.preferredStations[fill.name]
-            local best, bestScore = nil, -1
+            local candidates = {}
             for _, record in ipairs(records) do
                 if occurrences[record.filename] == 1 and (self.config.overrides[fill.name] == nil or requested == record.filename) then
                     local compatible, compatibleTriggers = nil, nil
@@ -377,47 +381,110 @@ function SiNSellCoveragePolicy:buildPlan()
                     end
                     if compatible ~= nil then
                         local peerTypes = fill.class == "LIQUID" and record.accepted or record.acceptedByClass[fill.class] or {}
-                        local score = self:similarityScore(fill.name, peerTypes) + 1
+                        local similarity = self:similarityScore(fill.name, peerTypes)
+                        local score = similarity + 1
                         if requested == record.filename then score = score + 10000 end
-                        if score > bestScore or (score == bestScore and (best == nil or record.filename < best.record.filename)) then
-                            best, bestScore = {record=record, trigger=compatible, triggers=compatibleTriggers, fill=fill}, score
+                        if score > -1 then
+                            table.insert(candidates, {record=record, trigger=compatible, triggers=compatibleTriggers,
+                                fill=fill, priceScale=self.config.defaultPriceScale, score=score,
+                                similarity=similarity})
                         end
                     end
                 end
             end
-            if best ~= nil then
-                plan[best.record.filename] = plan[best.record.filename] or {}
-                table.insert(plan[best.record.filename], best)
+            table.sort(candidates, function(a, b)
+                if a.score ~= b.score then return a.score > b.score end
+                return a.record.filename < b.record.filename
+            end)
+            local buyerLimit = math.max(1, math.floor(tonumber(self.config.fallbackBuyerCount) or 1))
+            local selectedCount = 0
+            for _, candidate in ipairs(candidates) do
+                if selectedCount >= buyerLimit then break end
+                if selectedCount > 0
+                    and candidate.similarity < (tonumber(self.config.additionalBuyerMinSimilarity) or 20) then break end
+                plan[candidate.record.filename] = plan[candidate.record.filename] or {}
+                table.insert(plan[candidate.record.filename], candidate)
+                selectedCount = selectedCount + 1
             end
         end
+    end
+    -- The placeable join prefix carries an unsigned-byte assignment count.
+    -- Never create a server plan that could be truncated for clients.
+    for _, assignments in pairs(plan) do
+        if #assignments > 255 then return nil, "station-assignment-count-exceeded" end
     end
     return plan, nil
 end
 
 -- Native SellingStation:load receives the augmented in-memory XML and creates
 -- accepted types, pricing dynamics, totals and trigger state itself.
-function SiNSellCoveragePolicy:preparePlaceableXML(placeable, xmlFile, key)
-    if self.config.enabled ~= true or xmlFile == nil or placeable == nil then return end
-    if type(placeable.getOwnerFarmId) ~= "function" or placeable:getOwnerFarmId() ~= AccessHandler.EVERYONE then return end
-    if not self.planAttempted then
-        self.planAttempted = true
-        local reason
-        self.plan, reason = self:buildPlan()
-        if self.plan == nil then
-            log("sell coverage assignment unavailable reason=" .. tostring(reason))
-        else
-            local count = 0
-            for _, assignments in pairs(self.plan) do count = count + #assignments end
-            log(string.format("sell coverage plan ready assignments=%d", count))
-        end
+function SiNSellCoveragePolicy:isAssignmentApplicable(assignment, xmlFile)
+    local fill = assignment.fill
+    local triggers = assignment.triggers or {assignment.trigger}
+    if fill == nil or not self:isEligible(fill.name, fill.desc)
+        or #triggers == 0 or #triggers > 2 then return false end
+    local kinds = {}
+    for _, trigger in ipairs(triggers) do
+        local triggerKey = trigger.key
+        local kind = string.match(triggerKey or "", "^placeable%.sellingStation%.([%a]+Trigger)%(%d+%)$")
+        local permitted = ((fill.class == "BULK" or fill.class == "LIQUID") and kind == "unloadTrigger")
+            or (fill.class == "PALLET" and kind == "palletTrigger")
+            or (fill.class == "BALE" and kind == "baleTrigger")
+            or (fill.class == "LIQUID" and fill.desc.isBulkType == true
+                and fill.desc.isPalletType == true and kind == "palletTrigger")
+        if not permitted or kinds[kind] or not xmlFile:hasProperty(triggerKey)
+            or containsFillType(xmlFile:getValue(triggerKey .. "#fillTypesExclude"), fill.name) then return false end
+        local current = xmlFile:getValue(triggerKey .. "#fillTypes")
+        local categories = xmlFile:getValue(triggerKey .. "#fillTypeCategories")
+        if current == nil and (categories == nil or type(trigger.categoryName) ~= "string"
+            or trigger.categoryName == "") then return false end
+        kinds[kind] = true
     end
-    local assignments = self.plan ~= nil and self.plan[placeable.configFileName] or nil
+    if fill.class == "LIQUID" and fill.desc.isBulkType == true and fill.desc.isPalletType == true then
+        return kinds.unloadTrigger == true and kinds.palletTrigger == true
+    end
+    return true
+end
+
+function SiNSellCoveragePolicy:preparePlaceableXML(placeable, xmlFile, key, savegame)
+    if self.config.enabled ~= true or xmlFile == nil or placeable == nil then return end
+    local isServer = placeable.isServer ~= false
+    local assignments
+    if isServer then
+        if type(placeable.getOwnerFarmId) ~= "function" or placeable:getOwnerFarmId() ~= AccessHandler.EVERYONE then return end
+        local multiplayer = g_currentMission ~= nil and g_currentMission.missionDynamicInfo ~= nil
+            and g_currentMission.missionDynamicInfo.isMultiplayer == true
+        if multiplayer and not self.streamHookInstalled then
+            if not self.planAttempted then log("sell coverage assignment unavailable reason=client-sync-hook-unavailable") end
+            self.planAttempted = true
+            return
+        end
+        if not self.planAttempted then
+            self.planAttempted = true
+            local activeXml = savegame ~= nil and savegame.xmlFile or
+                (placeable.savegame ~= nil and placeable.savegame.xmlFile or nil)
+            local reason
+            self.plan, reason = self:buildPlan(activeXml)
+            if self.plan == nil then
+                log("sell coverage assignment unavailable reason=" .. tostring(reason))
+            else
+                local count = 0
+                for _, planned in pairs(self.plan) do count = count + #planned end
+                log(string.format("sell coverage plan ready assignments=%d", count))
+            end
+        end
+        assignments = self.plan ~= nil and self.plan[placeable.configFileName] or nil
+    else
+        -- The placeable join stream arrives before asynchronous native load.
+        assignments = placeable.sinSellCoverageAssignments
+    end
     if assignments == nil then return end
     for _, assignment in ipairs(assignments) do
         local fill = assignment.fill
         local triggers = assignment.triggers or {assignment.trigger}
-        local added = true
-        for _, trigger in ipairs(triggers) do
+        if self:isAssignmentApplicable(assignment, xmlFile) then
+            local added = true
+            for _, trigger in ipairs(triggers) do
             local triggerKey = trigger.key
             local current = xmlFile:getValue(triggerKey .. "#fillTypes")
             local categories = xmlFile:getValue(triggerKey .. "#fillTypeCategories")
@@ -443,17 +510,91 @@ function SiNSellCoveragePolicy:preparePlaceableXML(placeable, xmlFile, key)
                 end
             end
             added = added and triggerAdded
-        end
-        if added then
+            end
+            if added then
             local i = 0
             while xmlFile:hasProperty(string.format(key .. ".fillType(%d)", i)) do i = i + 1 end
             xmlFile:setString(string.format(key .. ".fillType(%d)#name", i), fill.name)
-            xmlFile:setFloat(string.format(key .. ".fillType(%d)#priceScale", i), self.config.defaultPriceScale)
+            local priceScale = assignment.priceScale or self.config.defaultPriceScale
+            xmlFile:setFloat(string.format(key .. ".fillType(%d)#priceScale", i), priceScale)
             self.assigned[fill.name] = true
             log(string.format("ASSIGNED fillType=%s station=\"%s\" class=%s priceScale=%.1f", fill.name,
-                tostring(placeable:getName()), fill.class, self.config.defaultPriceScale))
+                tostring(placeable:getName()), fill.class, priceScale))
+            if isServer then
+                self.appliedByPlaceable[placeable] = self.appliedByPlaceable[placeable] or {}
+                table.insert(self.appliedByPlaceable[placeable], assignment)
+            end
+            end
         end
     end
+end
+
+-- Placeable.readStream runs before the client's asynchronous Placeable:load.
+-- A short prefix to the ordinary placeable stream supplies the server's
+-- already-applied XML plan early enough for native SellingStation:load.
+-- The normal FS25 station stream sends trigger objects, not changed XML.
+function SiNSellCoveragePolicy:writePlaceableAssignments(placeable, streamId)
+    local assignments = self.appliedByPlaceable[placeable] or {}
+    local count = #assignments
+    if count > 255 then count = 0 end -- fail closed, never emit a partial plan
+    streamWriteUInt8(streamId, count)
+    for i=1, count do
+        local assignment = assignments[i]
+        local triggers = assignment.triggers or {assignment.trigger}
+        streamWriteString(streamId, assignment.fill.name)
+        streamWriteFloat32(streamId, assignment.priceScale or self.config.defaultPriceScale)
+        streamWriteUInt8(streamId, #triggers)
+        for _, trigger in ipairs(triggers) do
+            streamWriteString(streamId, trigger.key)
+            streamWriteString(streamId, trigger.categoryName or "")
+        end
+    end
+end
+
+function SiNSellCoveragePolicy:readPlaceableAssignments(placeable, streamId)
+    local assignments = {}
+    local count = streamReadUInt8(streamId)
+    for _=1, count do
+        local name = upper(streamReadString(streamId))
+        local priceScale = streamReadFloat32(streamId)
+        local triggerCount = streamReadUInt8(streamId)
+        local triggers = {}
+        for _=1, triggerCount do
+            local key = streamReadString(streamId)
+            local categoryName = streamReadString(streamId)
+            table.insert(triggers, {key=key, categoryName=categoryName})
+        end
+        local desc = name ~= nil and g_fillTypeManager:getFillTypeByName(name) or nil
+        if desc ~= nil and self:isEligible(name, desc) and #triggers > 0 and #triggers <= 2
+            and type(priceScale) == "number" and priceScale > 0 and priceScale <= 10 then
+            table.insert(assignments, {fill={index=desc.index, name=name, class=self:getDeliveryClass(desc), desc=desc},
+                triggers=triggers, priceScale=priceScale})
+        end
+    end
+    placeable.sinSellCoverageAssignments = assignments
+end
+
+function SiNSellCoveragePolicy:installStreamHook()
+    if self.streamHookInstalled then return true end
+    if Placeable == nil or type(Placeable.readStream) ~= "function" or type(Placeable.writeStream) ~= "function"
+        or type(streamReadUInt8) ~= "function" or type(streamWriteUInt8) ~= "function"
+        or type(streamReadString) ~= "function" or type(streamWriteString) ~= "function"
+        or type(streamReadFloat32) ~= "function" or type(streamWriteFloat32) ~= "function" then return false end
+    local originalRead, originalWrite = Placeable.readStream, Placeable.writeStream
+    Placeable.readStream = function(placeable, streamId, connection, ...)
+        if connection ~= nil and connection:getIsServer() then
+            SiNSellCoveragePolicy:readPlaceableAssignments(placeable, streamId)
+        end
+        return originalRead(placeable, streamId, connection, ...)
+    end
+    Placeable.writeStream = function(placeable, streamId, connection, ...)
+        if connection ~= nil and not connection:getIsServer() then
+            SiNSellCoveragePolicy:writePlaceableAssignments(placeable, streamId)
+        end
+        return originalWrite(placeable, streamId, connection, ...)
+    end
+    self.streamHookInstalled = true
+    return true
 end
 
 function SiNSellCoveragePolicy:installHook()
@@ -461,7 +602,7 @@ function SiNSellCoveragePolicy:installHook()
         return false
     end
     PlaceableSellingStation.onLoad = Utils.prependedFunction(PlaceableSellingStation.onLoad, function(placeable, savegame)
-        SiNSellCoveragePolicy:preparePlaceableXML(placeable, placeable.xmlFile, "placeable.sellingStation")
+        SiNSellCoveragePolicy:preparePlaceableXML(placeable, placeable.xmlFile, "placeable.sellingStation", savegame)
     end)
     self.hookInstalled = true
     return true
@@ -469,12 +610,14 @@ end
 
 function SiNSellCoveragePolicy:loadMap()
     self.assigned, self.audited, self.plan, self.planAttempted = {}, false, nil, false
+    self.appliedByPlaceable = {}
     -- The initial attempt occurs when this source file is evaluated, before
     -- map placeables load. Calling installHook here is only a late fallback;
     -- report the durable installation state, not that fallback's return.
     self:installHook()
+    self:installStreamHook()
     log("sell coverage ready hook=" .. tostring(self.hookInstalled) .. " enabled=" .. tostring(self.config.enabled)
-        .. " priceScale=" .. tostring(self.config.defaultPriceScale))
+        .. " streamHook=" .. tostring(self.streamHookInstalled) .. " priceScale=" .. tostring(self.config.defaultPriceScale))
     self.auditDelayMs = 2500
 end
 
@@ -486,7 +629,9 @@ end
 
 function SiNSellCoveragePolicy:deleteMap()
     self.assigned, self.audited, self.plan, self.planAttempted = {}, false, nil, false
+    self.appliedByPlaceable = {}
 end
 
 SiNSellCoveragePolicy:installHook()
+SiNSellCoveragePolicy:installStreamHook()
 addModEventListener(SiNSellCoveragePolicy)

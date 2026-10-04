@@ -63,3 +63,7 @@ class SellCoveragePolicyTests(unittest.TestCase):
         self.assertIn("xmlFile:setFloat", source)
         self.assertIn("g_currentMission.storageSystem", source)
         self.assertNotIn(":addAcceptedFillType(", source)
+        self.assertNotIn("savegameDirectory", source)
+        self.assertIn("self:buildPlan(activeXml)", source)
+        self.assertLess(source.index("SiNSellCoveragePolicy:readPlaceableAssignments(placeable, streamId)"),
+                        source.index("return originalRead(placeable, streamId, connection, ...)"))

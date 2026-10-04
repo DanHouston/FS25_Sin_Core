@@ -79,6 +79,32 @@ class ActivityNotificationTests(unittest.IsolatedAsyncioTestCase):
         bot.get_channel.assert_called_once_with(202)
         thread.send.assert_awaited_once_with("Claimed by Farm 2", allowed_mentions=unittest.mock.ANY)
 
+    async def test_native_contract_disposition_refreshes_parent_and_posts_in_thread(self):
+        database = MagicMock()
+        parent = MagicMock(id=101, content="Contract Available - Harvest\nField 12")
+        parent.edit = AsyncMock()
+        thread = MagicMock(id=202)
+        thread.send = AsyncMock()
+        channel = MagicMock(id=303)
+        channel.fetch_message = AsyncMock(return_value=parent)
+        bot = MagicMock()
+        bot.get_channel.return_value = thread
+        publisher = ActivityPublisher(bot, database)
+        database.db.native_contracts.find_one.return_value = {
+            "_id": "contract-key", "discord_parent_message_id": "101",
+            "discord_parent_base_message": "Contract Available - Harvest\nField 12",
+            "discord_thread_id": "202"}
+
+        await publisher._publish_native_contract(channel, {
+            "metadata": {"native_contract_id": "contract-key", "lifecycle": "accepted"},
+            "message": "Claimed by SiN Harvest"})
+
+        parent.edit.assert_awaited_once_with(
+            content="Contract Claimed - Harvest\nField 12\n\n**Current status:** Claimed by SiN Harvest",
+            allowed_mentions=unittest.mock.ANY)
+        thread.send.assert_awaited_once_with("Claimed by SiN Harvest",
+                                             allowed_mentions=unittest.mock.ANY)
+
     async def test_native_contract_requires_thread_permissions(self):
         database = MagicMock()
         channel = MagicMock()

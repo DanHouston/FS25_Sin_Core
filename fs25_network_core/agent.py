@@ -597,9 +597,19 @@ class PairingAgent:
         """
         path, event = item
         payload = event.get("payload") or {}
+        event_type = event.get("event_type")
+        if str(event_type).startswith("native_contract_"):
+            # Availability must reach Central before the claim/disposition:
+            # the Discord parent message and thread are created from it.
+            lifecycle_order = {"native_contract_available": 0,
+                               "native_contract_accepted": 1,
+                               "native_contract_completed": 2,
+                               "native_contract_cancelled": 2}
+            scope = (str(event.get("server_key", "")), str(event.get("save_id", "")),
+                     "native_contract", str(payload.get("mission_id", "")))
+            return (scope, lifecycle_order.get(event_type, 3), 0, path.name)
         scope = (str(event.get("server_key", "")), str(event.get("save_id", "")),
                  str(payload.get("unique_user_id", "")), str(payload.get("session_id", "")))
-        event_type = event.get("event_type")
         priority = {"player_connected": 0, "player_activity_minute": 1,
                     "player_disconnected": 2}.get(event_type, 1)
         try:

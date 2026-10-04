@@ -1,6 +1,13 @@
 -- SiN server-side mailbox transport and authority integration. No direct HTTP.
 FS25SiNServer = {}
 local SERVER_MAILBOX_NAME = "FS25_SiN_Server"
+-- Shared local engine-message channel with SiN_FS25_Contracts. Mod-local
+-- globals are isolated; both mods deliberately use this stable private ID.
+local SIN_NATIVE_CONTRACT_LIFECYCLE_MESSAGE = 0x53494E43
+
+local function nativeContractToken(value)
+    return string.gsub(tostring(value or ""), "[^%w_%-]", "_")
+end
 
 -- A wall-clock second is not a runtime identity.  Persist a mailbox
 -- generation before emitting anything so a rapid FS25 reload cannot reuse
@@ -270,6 +277,7 @@ function FS25SiNServer:loadMap()
     self.sequence = 0
     self.eventSequence = 0
     self.failed = false
+    self.nativeContractLifecycleListenerInstalled = false
     self.session = getDate("%Y%m%d%H%M%S")
     self.directory = getUserProfileAppPath() .. "modSettings/" .. SERVER_MAILBOX_NAME .. "/"
     createFolder(getUserProfileAppPath() .. "modSettings/")
@@ -345,7 +353,52 @@ function FS25SiNServer:loadMap()
     if g_messageCenter ~= nil and MessageType ~= nil and MessageType.PLAYER_FARM_CHANGED ~= nil then
         g_messageCenter:subscribe(MessageType.PLAYER_FARM_CHANGED, self.onPlayerFarmChanged, self)
     end
+    self:installNativeContractLifecycleListener()
     Logging.info("[SiN (SimNet) Server] Loaded; telemetry directory: %s", self.directory)
+end
+
+function FS25SiNServer:installNativeContractLifecycleListener()
+    if self.nativeContractLifecycleListenerInstalled == true then return true end
+    if g_messageCenter == nil or type(g_messageCenter.subscribe) ~= "function" then return false end
+    g_messageCenter:subscribe(SIN_NATIVE_CONTRACT_LIFECYCLE_MESSAGE,
+        self.onNativeContractLifecycle, self)
+    self.nativeContractLifecycleListenerInstalled = true
+    Logging.info("[SiN Events] native contract lifecycle listener installed")
+    return true
+end
+
+function FS25SiNServer:onNativeContractLifecycle(envelope)
+    if g_currentMission == nil or g_currentMission:getIsServer() ~= true or type(envelope) ~= "table" then return end
+    local eventType = envelope.eventType
+    local allowed = {
+        native_contract_available=true,
+        native_contract_accepted=true,
+        native_contract_completed=true,
+        native_contract_cancelled=true
+    }
+    local source = envelope.payload
+    if allowed[eventType] ~= true or type(source) ~= "table" or source.mission_id == nil then return end
+
+    -- Copy only the established event schema to XML; the in-process envelope
+    -- also contains an acknowledgment callback and must never enter the file.
+    local fields = {"mission_id", "mission_type", "field_id", "field_name", "area_ha",
+        "farmland_id", "reward", "estimated_hours", "estimated_dollars_per_hour",
+        "accepting_farm_id", "accepting_farm_name", "accepting_player"}
+    local payload = {}
+    for _, key in ipairs(fields) do
+        local value = source[key]
+        if type(value) == "string" or type(value) == "number" then payload[key] = value end
+    end
+
+    local lifecycle = string.sub(eventType, string.len("native_contract_") + 1)
+    local missionInfo = g_currentMission.missionInfo or {}
+    local eventId = "sin-contract-" .. nativeContractToken(self.worldId) .. "-"
+        .. nativeContractToken(missionInfo.savegameIndex or 0) .. "-"
+        .. nativeContractToken(payload.mission_id) .. "-" .. lifecycle
+    local ok, written = pcall(self.emitServerEvent, self, eventType, payload, eventId)
+    if ok and written == true and type(envelope.acknowledge) == "function" then
+        pcall(envelope.acknowledge, true)
+    end
 end
 
 function FS25SiNServer:installLifecycleHooks()
@@ -1751,6 +1804,9 @@ end
 function FS25SiNServer:update(dt)
     if g_currentMission ~= nil and g_currentMission:getIsClient() then
         self:updateClientRegistrationWarning(dt)
+    end
+    if g_currentMission ~= nil and g_currentMission:getIsServer() == true then
+        self:installNativeContractLifecycleListener()
     end
     if not self.failed and g_currentMission ~= nil and self.worldIdentitySaveHookInstalled ~= true then
         self:installWorldIdentityPersistenceHook()
@@ -3234,6 +3290,11 @@ function FS25SiNServer:deleteMap()
     if g_messageCenter ~= nil and MessageType ~= nil and MessageType.PLAYER_FARM_CHANGED ~= nil then
         g_messageCenter:unsubscribe(MessageType.PLAYER_FARM_CHANGED, self)
     end
+    if self.nativeContractLifecycleListenerInstalled == true and g_messageCenter ~= nil
+        and type(g_messageCenter.unsubscribe) == "function" then
+        g_messageCenter:unsubscribe(SIN_NATIVE_CONTRACT_LIFECYCLE_MESSAGE, self)
+    end
+    self.nativeContractLifecycleListenerInstalled = false
 end
 
 addModEventListener(FS25SiNServer)

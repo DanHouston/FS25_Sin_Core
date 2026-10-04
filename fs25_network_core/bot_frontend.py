@@ -18,6 +18,7 @@ from .channel_policy import require_command_channel
 from .community import CommunityApplications
 from .server_registry import ServerRegistry
 from .activity import ActivityPublisher
+from .bank_notifications import BankNotificationPublisher
 from .server_status import ServerStatusPublisher
 from .activity_telemetry import ActivityTelemetryProcessor
 from .business_workflows import (ChatService, ContractService, InvoiceService,
@@ -425,6 +426,7 @@ class NetworkBot(discord.Client):
         self.server_registry = ServerRegistry(bank.database)
         self.farm_lifecycle = FarmLifecycle(bank.database, self.authorization)
         self.activity_publisher = ActivityPublisher(self, bank.database)
+        self.bank_notification_publisher = BankNotificationPublisher(self, bank)
         # This is a durable one-card-per-server projection, not an activity
         # feed.  Its message IDs are stored in Mongo so gateway reconnects and
         # process restarts edit the same cards.
@@ -1058,12 +1060,25 @@ class NetworkBot(discord.Client):
                 game_balance = f"unavailable ({reason})"
             else:
                 game_balance = f"${summary['game_balance']:,.0f}"
+            recent_lines = []
+            if context:
+                recent = await asyncio.to_thread(
+                    self.bank.recent_operation_status, str(interaction.user.id),
+                    context["server_key"], context["save_key"], context.get("world_id"))
+                labels = {"pending": "processing", "completed": "complete",
+                          "failed": "failed", "refunded": "failed; funds returned"}
+                for kind in ("deposit", "withdrawal"):
+                    record = recent.get(kind)
+                    if record:
+                        recent_lines.append(
+                            f"Last {kind}: ${record['amount']:,} — {labels.get(record['state'], 'status unavailable')}")
             await interaction.followup.send(
                 f"Game balance: {game_balance}\n"
                 f"SiN bank balance: ${summary['available_balance']:,}\n"
                 f"Pending deposits: ${summary['pending_deposits']:,}\n"
                 f"Pending withdrawals: ${summary['pending_withdrawals']:,}\n"
-                f"Available balance: ${summary['available_balance']:,}", ephemeral=True)
+                f"Available balance: ${summary['available_balance']:,}"
+                + ("\n" + "\n".join(recent_lines) if recent_lines else ""), ephemeral=True)
 
         @self.tree.command(name="deposit", description="Queue a game-to-SiN bank deposit")
         @app_commands.check(channel_check)
@@ -1071,21 +1086,20 @@ class NetworkBot(discord.Client):
                           amount: app_commands.Range[int, 1, 1_000_000_000]):
             context = await asyncio.to_thread(self.resolve_identity_context, str(interaction.user.id), None, "reconcile")
             server_key, save_key = context["server_key"], context["save_key"]
-            # The deployed mod deliberately has no verified authoritative
-            # Queueing a deposit while the native adapter is not explicitly
-            # enabled would create an indefinitely pending distributed-money
-            # operation, so deposits use the same capability gate as
-            # withdrawals.
+            # Never queue money without the verified native adapter.
             if not self.fs25_money_bridge_enabled(server_key):
                 await interaction.response.send_message(
                     "Deposits are disabled because no verified FS25 money-debit adapter is enabled for this server.",
                     ephemeral=True)
                 return
+            await interaction.response.defer(ephemeral=True)
             state = await asyncio.to_thread(self.bank.request_deposit, str(interaction.id),
                                              str(interaction.user.id), server_key, save_key, amount,
                                              world_id=context.get("world_id"))
-            await interaction.response.send_message(
-                f"Deposit is {state} for the selected game context. The game-side debit must be confirmed before your balance changes.",
+            await interaction.followup.send(
+                "Deposit submitted. I'll DM you the confirmed result and balances when the game responds. "
+                "Do not repeat the command while it is processing; `/balance` shows outstanding transfers."
+                if state == "pending" else f"Deposit is {state}; use `/balance` for your current balances.",
                 ephemeral=True)
 
         @self.tree.command(name="withdraw", description="Reserve funds for delivery to your approved farm")
@@ -1104,7 +1118,12 @@ class NetworkBot(discord.Client):
             state = await asyncio.to_thread(self.bank.request_withdrawal, str(interaction.id),
                                            str(interaction.user.id), server_key, save_key, amount,
                                            world_id=context.get("world_id"))
-            await interaction.followup.send(f"Withdrawal is {state}. Pending funds are reserved until delivery is confirmed.", ephemeral=True)
+            await interaction.followup.send(
+                "Withdrawal submitted. Your funds are reserved while the game confirms delivery. "
+                "I'll DM you the confirmed result and balances. Do not repeat the command while it is processing; "
+                "`/balance` shows outstanding transfers."
+                if state == "pending" else f"Withdrawal is {state}; use `/balance` for your current balances.",
+                ephemeral=True)
 
         @self.tree.command(name="chat_send", description="Staff: send a message to an FS25 server chat")
         @app_commands.check(channel_check)
@@ -1795,6 +1814,7 @@ class NetworkBot(discord.Client):
     async def on_ready(self):
         logging.info("Discord bot connected as %s (ID %s)", self.user, self.user.id)
         self.activity_publisher.start()
+        self.bank_notification_publisher.start()
         self.server_status_publisher.start()
 
     async def on_resumed(self):
@@ -1803,6 +1823,7 @@ class NetworkBot(discord.Client):
 
     async def close(self):
         await self.activity_publisher.stop()
+        await self.bank_notification_publisher.stop()
         await self.server_status_publisher.stop()
         await super().close()
 

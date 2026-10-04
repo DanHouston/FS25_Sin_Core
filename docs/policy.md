@@ -20,10 +20,14 @@ No source map or third-party mod XML is written. A commodity without a same-
 class NPC trigger is left `UNRESOLVED`/missing rather than receiving a
 price-table-only entry. Policy knobs live at the top of
 `SiNSellCoveragePolicy.lua`: `enabled`, `excludedFillTypes`, `overrides`,
-`preferredStations`, and `defaultPriceScale`.
-The active-savegame preflight fails closed when the placeable list is
-unavailable. Dedicated server and client behavior still needs a live
-acceptance test.
+`preferredStations`, `fallbackBuyerCount`, `additionalBuyerMinSimilarity`,
+and `defaultPriceScale`. Missing commodities can receive two related NPC
+fallback buyers; commodities with a native buyer are not expanded.
+The server plans from FS25's already-open active placeable list, not a
+savegame path. Applied assignments travel in the placeable join stream and
+are injected before the joining client's native station load. If the active
+list or multiplayer stream hook is unavailable, assignment fails closed.
+Dedicated-server/client behavior still needs a live acceptance test.
 
 The modules have separate XML policy files, registries, console diagnostics,
 and runtime seams. They do not call each other or share mutable FS25 catalog

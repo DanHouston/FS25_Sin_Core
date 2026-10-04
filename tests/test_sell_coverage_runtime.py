@@ -67,14 +67,20 @@ g_fillTypeManager = {
     addFillTypeToCategory=function() return true end
 }
 
-local function mockXml(values, keys)
+function mockXml(values, keys)
     return {
         values=values,
         getValue=function(self, key, default)
             if self.values[key] == nil then return default end
             return self.values[key]
         end,
-        hasProperty=function(self, key) return keys[key] == true end,
+        hasProperty=function(self, key)
+            if keys[key] == true then return true end
+            for existing in pairs(self.values) do
+                if string.sub(existing, 1, #key + 1) == key .. "#" then return true end
+            end
+            return false
+        end,
         setString=function(self, key, value) self.values[key] = value; keys[key] = true end,
         setFloat=function(self, key, value) self.values[key] = value; keys[key] = true end,
         delete=function() end
@@ -117,6 +123,13 @@ local configs = {
     ["produce.xml"] = station("CANNED_PEAS PRESERVEDCARROTS", "unloadTrigger"),
     ["woodbales.xml"] = station("ROUNDBALE_WOOD", "baleTrigger")
 }
+function addNpcStation(filename, config)
+    configs[filename] = config
+    local key = string.format("placeables.placeable(%d)", #saveKeys)
+    table.insert(saveKeys, key)
+    saveValues[key .. "#filename"] = filename
+    saveValues[key .. "#farmId"] = 0
+end
 if not futureBuyer then configs["bales.xml"] = station("WHEAT", "baleTrigger", "COTTON") end
 configs["produce.xml"].values["placeable.sellingStation.unloadTrigger(0)#fillTypes"] = nil
 configs["produce.xml"].values["placeable.sellingStation.unloadTrigger(0)#fillTypeCategories"] = "FOOD"
@@ -129,10 +142,11 @@ end
 g_storeManager = {getItemByXMLFilename=function(_, filename)
     if configs[filename] ~= nil then return {xmlFilename=filename, name=filename} end
 end}
-XMLFile = {load=function(_, filename) if filename == "save/placeables.xml" then return saveXml end return configs[filename] end}
-g_currentMission = {missionInfo={savegameDirectory="save/"}}
+XMLFile = {load=function(_, filename) return configs[filename] end}
+g_currentMission = {missionDynamicInfo={isMultiplayer=false}}
 function makePlaceable(filename, farmId)
-    return {configFileName=filename, getOwnerFarmId=function() return farmId end, getName=function() return filename end}
+    return {configFileName=filename, isServer=true, savegame={xmlFile=saveXml},
+        getOwnerFarmId=function() return farmId end, getName=function() return filename end}
 end
 function getConfig(filename) return configs[filename] end
 '''
@@ -147,9 +161,8 @@ def runtime(future_buyer=False):
 
 
 class SellCoverageRuntimeTests(unittest.TestCase):
-    def test_savegame_directory_without_separator_and_pallet_liquids(self):
+    def test_engine_owned_active_list_and_pallet_liquids(self):
         lua = runtime()
-        lua.execute('g_currentMission.missionInfo.savegameDirectory = "save"')
         lua.execute('SiNSellCoveragePolicy:preparePlaceableXML(makePlaceable("grain.xml",0),getConfig("grain.xml"),"placeable.sellingStation")')
         self.assertIsNotNone(lua.eval('SiNSellCoveragePolicy.plan'))
         self.assertEqual(lua.eval('SiNSellCoveragePolicy:getDeliveryClass(g_fillTypeManager:getFillTypeByName("HONEY"))'), "PALLET")
@@ -186,6 +199,70 @@ class SellCoverageRuntimeTests(unittest.TestCase):
         self.assertNotIn("SIN_SELL_COVERAGE_5_1", lua.eval('getConfig("produce.xml"):getValue("placeable.sellingStation.palletTrigger(0)#fillTypeCategories")'))
         self.assertIn("PEA", lua.eval('SiNSellCoveragePolicy.assigned.PEA and "PEA" or ""'))
         self.assertIn("CARROT", lua.eval('SiNSellCoveragePolicy.assigned.CARROT and "CARROT" or ""'))
+
+    def test_missing_bulk_gets_two_related_buyers_without_debris_crusher(self):
+        lua = runtime()
+        lua.execute(r'''
+            addNpcStation("grain2.xml", mockXml(
+                {["placeable.sellingStation.unloadTrigger(0)#fillTypes"]="WHEAT"},
+                {["placeable.sellingStation"]=true,
+                 ["placeable.sellingStation.unloadTrigger(0)"]=true}))
+            SiNSellCoveragePolicy:preparePlaceableXML(makePlaceable("grain.xml",0), getConfig("grain.xml"), "placeable.sellingStation")
+            SiNSellCoveragePolicy:preparePlaceableXML(makePlaceable("grain2.xml",0), getConfig("grain2.xml"), "placeable.sellingStation")
+        ''')
+        self.assertIn("PEA", lua.eval('getConfig("grain.xml"):getValue("placeable.sellingStation.unloadTrigger(0)#fillTypes")'))
+        self.assertIn("PEA", lua.eval('getConfig("grain2.xml"):getValue("placeable.sellingStation.unloadTrigger(0)#fillTypes")'))
+        self.assertNotIn("PEA", lua.eval('getConfig("debris.xml"):getValue("placeable.sellingStation.unloadTrigger(0)#fillTypes")'))
+        self.assertEqual(lua.eval('SiNSellCoveragePolicy.config.fallbackBuyerCount'), 2)
+
+    def test_two_dairy_buyers_keep_paired_triggers_and_base_price(self):
+        lua = runtime()
+        lua.execute(r'''
+            addNpcStation("dairy.xml", mockXml({
+                ["placeable.sellingStation.unloadTrigger(0)#fillTypes"]="WHEAT",
+                ["placeable.sellingStation.palletTrigger(0)#fillTypes"]="MILK_BOTTLED"
+            }, {
+                ["placeable.sellingStation"]=true,
+                ["placeable.sellingStation.unloadTrigger(0)"]=true,
+                ["placeable.sellingStation.palletTrigger(0)"]=true
+            }))
+            SiNSellCoveragePolicy:preparePlaceableXML(makePlaceable("dairy.xml",0), getConfig("dairy.xml"), "placeable.sellingStation")
+            SiNSellCoveragePolicy:preparePlaceableXML(makePlaceable("produce.xml",0), getConfig("produce.xml"), "placeable.sellingStation")
+        ''')
+        for station_name in ('dairy.xml', 'produce.xml'):
+            check = lua.eval(f'''function()
+                local xml = getConfig("{station_name}")
+                local unload = xml:getValue("placeable.sellingStation.unloadTrigger(0)#fillTypes")
+                    or xml:getValue("placeable.sellingStation.unloadTrigger(0)#fillTypeCategories")
+                local pallet = xml:getValue("placeable.sellingStation.palletTrigger(0)#fillTypes")
+                    or xml:getValue("placeable.sellingStation.palletTrigger(0)#fillTypeCategories")
+                local scale
+                for i=0,30 do
+                    if xml:getValue("placeable.sellingStation.fillType("..i..")#name") == "MILK" then
+                        scale = xml:getValue("placeable.sellingStation.fillType("..i..")#priceScale")
+                    end
+                end
+                return unload, pallet, scale
+            end''')
+            unload, pallet, scale = check()
+            self.assertTrue('MILK' in unload or 'SIN_SELL_COVERAGE_' in unload)
+            self.assertTrue('MILK' in pallet or 'SIN_SELL_COVERAGE_' in pallet)
+            self.assertEqual(scale, 1.0, station_name)
+
+    def test_secondary_buyer_tie_breaks_by_filename(self):
+        lua = runtime()
+        lua.execute(r'''
+            for _, filename in ipairs({"grainA.xml", "grainB.xml"}) do
+                addNpcStation(filename, mockXml(
+                    {["placeable.sellingStation.unloadTrigger(0)#fillTypes"]="WHEAT"},
+                    {["placeable.sellingStation"]=true,
+                     ["placeable.sellingStation.unloadTrigger(0)"]=true}))
+            end
+            SiNSellCoveragePolicy:preparePlaceableXML(makePlaceable("grain.xml",0), getConfig("grain.xml"), "placeable.sellingStation")
+        ''')
+        self.assertTrue(lua.eval('function() for _,a in ipairs(SiNSellCoveragePolicy.plan["grain.xml"] or {}) do if a.fill.name == "PEA" then return true end end return false end')())
+        self.assertTrue(lua.eval('function() for _,a in ipairs(SiNSellCoveragePolicy.plan["grainA.xml"] or {}) do if a.fill.name == "PEA" then return true end end return false end')())
+        self.assertFalse(lua.eval('function() for _,a in ipairs(SiNSellCoveragePolicy.plan["grainB.xml"] or {}) do if a.fill.name == "PEA" then return true end end return false end')())
 
     def test_raw_root_crop_prefers_grain_buyer_over_processed_produce_names(self):
         lua = runtime()
@@ -236,10 +313,9 @@ class SellCoverageRuntimeTests(unittest.TestCase):
         self.assertIsNone(lua.eval('getConfig("woodbales.xml"):getValue("placeable.sellingStation.fillType(0)#name")'))
         self.assertEqual(lua.eval('SiNSellCoveragePolicy:getDeliveryClass(g_fillTypeManager:getFillTypeByName("MILK"))'), "LIQUID")
 
-    def test_missing_active_station_list_assigns_nothing(self):
+    def test_missing_engine_active_station_list_assigns_nothing(self):
         lua = runtime()
-        lua.execute('g_currentMission.missionInfo.savegameDirectory = nil')
-        lua.execute('SiNSellCoveragePolicy:preparePlaceableXML(makePlaceable("grain.xml",0),getConfig("grain.xml"),"placeable.sellingStation")')
+        lua.execute('local p=makePlaceable("grain.xml",0); p.savegame=nil; SiNSellCoveragePolicy:preparePlaceableXML(p,getConfig("grain.xml"),"placeable.sellingStation")')
         self.assertEqual(lua.eval('getConfig("grain.xml"):getValue("placeable.sellingStation.unloadTrigger(0)#fillTypes")'), "WHEAT")
         self.assertIsNone(lua.eval('SiNSellCoveragePolicy.plan'))
 
@@ -247,6 +323,102 @@ class SellCoverageRuntimeTests(unittest.TestCase):
         lua = runtime()
         self.assertTrue(lua.eval('SiNSellCoveragePolicy:isDeliverableBuyer({acceptedFillTypes={[2]=true}}, {index=2,class="BULK"})'))
         self.assertFalse(lua.eval('SiNSellCoveragePolicy:isDeliverableBuyer({acceptedFillTypes={[1]=true}}, {index=2,class="BULK"})'))
+
+    def test_server_plan_is_streamed_before_client_native_load(self):
+        lua = runtime()
+        lua.execute(r'''
+            addNpcStation("grain2.xml", mockXml(
+                {["placeable.sellingStation.unloadTrigger(0)#fillTypes"]="WHEAT"},
+                {["placeable.sellingStation"]=true,
+                 ["placeable.sellingStation.unloadTrigger(0)"]=true}))
+            local server = makePlaceable("grain.xml", 0)
+            local server2 = makePlaceable("grain2.xml", 0)
+            SiNSellCoveragePolicy:preparePlaceableXML(server, getConfig("grain.xml"), "placeable.sellingStation")
+            SiNSellCoveragePolicy:preparePlaceableXML(server2, getConfig("grain2.xml"), "placeable.sellingStation")
+            assert(#SiNSellCoveragePolicy.appliedByPlaceable[server] > 0)
+            local clientValues = {["placeable.sellingStation.unloadTrigger(0)#fillTypes"] = "WHEAT"}
+            local clientKeys = {["placeable.sellingStation"]=true,
+                ["placeable.sellingStation.unloadTrigger(0)"]=true}
+            local clientXml = mockXml(clientValues, clientKeys)
+            local clientXml2 = mockXml(
+                {["placeable.sellingStation.unloadTrigger(0)#fillTypes"]="WHEAT"},
+                {["placeable.sellingStation"]=true,
+                 ["placeable.sellingStation.unloadTrigger(0)"]=true})
+            local clientXmls = {["grain.xml"]=clientXml, ["grain2.xml"]=clientXml2}
+            local stream = {position=1}
+            streamWriteUInt8 = function(s, v) table.insert(s, v) end
+            streamWriteString = function(s, v) table.insert(s, v) end
+            streamWriteFloat32 = function(s, v) table.insert(s, v) end
+            local function read(s) local v=s[s.position]; s.position=s.position+1; return v end
+            streamReadUInt8 = read
+            streamReadString = read
+            streamReadFloat32 = read
+            Placeable.writeStream = function(_, s) streamWriteString(s, "native") end
+            Placeable.readStream = function(p, s)
+                assert(streamReadString(s) == "native")
+                SiNSellCoveragePolicy:preparePlaceableXML(p, clientXmls[p.configFileName], "placeable.sellingStation")
+            end
+            assert(SiNSellCoveragePolicy:installStreamHook())
+            local serverConnection = {getIsServer=function() return false end}
+            local clientConnection = {getIsServer=function() return true end}
+            Placeable.writeStream(server, stream, serverConnection)
+            local client = makePlaceable("grain.xml", 0)
+            client.isServer = false
+            client.savegame = nil
+            Placeable.readStream(client, stream, clientConnection)
+            assert(string.find(clientXml:getValue("placeable.sellingStation.unloadTrigger(0)#fillTypes"), "RICE") ~= nil)
+            local stream2 = {position=1}
+            Placeable.writeStream(server2, stream2, serverConnection)
+            local client2 = makePlaceable("grain2.xml", 0)
+            client2.isServer = false
+            client2.savegame = nil
+            Placeable.readStream(client2, stream2, clientConnection)
+            assert(string.find(clientXml2:getValue("placeable.sellingStation.unloadTrigger(0)#fillTypes"), "PEA") ~= nil)
+            assert(stream2.position == #stream2 + 1)
+            assert(SiNSellCoveragePolicy.plan ~= nil)
+            assert(stream.position == #stream + 1)
+        ''')
+
+    def test_client_raw_milk_keeps_both_native_trigger_paths(self):
+        lua = runtime()
+        lua.execute(r'''
+            local server = makePlaceable("produce.xml", 0)
+            SiNSellCoveragePolicy:preparePlaceableXML(server, getConfig("produce.xml"), "placeable.sellingStation")
+            local clientValues = {
+                ["placeable.sellingStation.unloadTrigger(0)#fillTypeCategories"]="FOOD",
+                ["placeable.sellingStation.palletTrigger(0)#fillTypeCategories"]="FOOD"
+            }
+            local clientKeys = {
+                ["placeable.sellingStation"]=true,
+                ["placeable.sellingStation.unloadTrigger(0)"]=true,
+                ["placeable.sellingStation.palletTrigger(0)"]=true
+            }
+            local clientXml = mockXml(clientValues, clientKeys)
+            local client = makePlaceable("produce.xml", 0)
+            client.isServer = false
+            client.savegame = nil
+            local milkAssignment
+            for _, assignment in ipairs(SiNSellCoveragePolicy.appliedByPlaceable[server]) do
+                if assignment.fill.name == "MILK" then milkAssignment = assignment end
+            end
+            assert(milkAssignment ~= nil)
+            client.sinSellCoverageAssignments = {milkAssignment}
+            SiNSellCoveragePolicy:preparePlaceableXML(client, clientXml, "placeable.sellingStation")
+            assert(string.find(clientXml:getValue("placeable.sellingStation.unloadTrigger(0)#fillTypeCategories"), "SIN_SELL_COVERAGE_") ~= nil)
+            assert(string.find(clientXml:getValue("placeable.sellingStation.palletTrigger(0)#fillTypeCategories"), "SIN_SELL_COVERAGE_") ~= nil)
+            local hasMilk = false
+            for i=0,30 do
+                if clientXml:getValue("placeable.sellingStation.fillType("..i..")#name") == "MILK" then hasMilk=true end
+            end
+            assert(hasMilk)
+        ''')
+
+    def test_multiplayer_server_fails_closed_without_client_stream_hook(self):
+        lua = runtime()
+        lua.execute('g_currentMission.missionDynamicInfo.isMultiplayer=true')
+        lua.execute('SiNSellCoveragePolicy:preparePlaceableXML(makePlaceable("grain.xml",0),getConfig("grain.xml"),"placeable.sellingStation")')
+        self.assertIsNone(lua.eval('SiNSellCoveragePolicy.plan'))
+        self.assertEqual(lua.eval('getConfig("grain.xml"):getValue("placeable.sellingStation.unloadTrigger(0)#fillTypes")'), 'WHEAT')
 
 
 if __name__ == "__main__":

@@ -294,10 +294,11 @@ class CentralEventProcessor:
             return "\n".join(lines)
         actor = contract.get("accepting_player")
         farm = contract.get("accepting_farm_id")
+        farm_name = contract.get("accepting_farm_name")
         if actor in (None, "", "not-exposed-by-native-mission"):
-            actor = f"Farm {farm}" if farm else "A player/farm (identity unavailable)"
+            actor = farm_name or (f"Farm {farm}" if farm else "A player/farm (identity unavailable)")
         elif farm:
-            actor = f"{actor} (Farm {farm})"
+            actor = f"{actor} ({farm_name or f'Farm {farm}'})"
         labels = {"accepted": "✅ **Claimed in FS25**", "completed": "🏁 **Completed in FS25**",
                   "cancelled": "↩️ **Cancelled in FS25**"}
         return f"{labels.get(lifecycle, 'ℹ️ **Contract updated**')}\n{actor}"

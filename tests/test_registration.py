@@ -697,6 +697,18 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn('eventType ~= "player_activity_minute"', source)
         self.assertIn('self.eventDirectory .. eventId .. ".xml"', source)
 
+    def test_native_contract_lifecycle_uses_shared_bus_and_server_mailbox(self):
+        root = Path(__file__).parents[1]
+        contracts = (root / "mods" / "SiN_FS25_Contracts" / "scripts" / "SiNContracts.lua").read_text(
+            encoding="utf-8")
+        server = (root / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(encoding="utf-8")
+        self.assertIn("SIN_NATIVE_CONTRACT_LIFECYCLE_MESSAGE = 0x53494E43", contracts)
+        self.assertIn("SIN_NATIVE_CONTRACT_LIFECYCLE_MESSAGE = 0x53494E43", server)
+        self.assertIn("g_messageCenter.publish", contracts)
+        self.assertIn("self:installNativeContractLifecycleListener()", server)
+        self.assertIn("function FS25SiNServer:onNativeContractLifecycle(envelope)", server)
+        self.assertIn("self.emitServerEvent, self, eventType, payload, eventId", server)
+
 
 class CrossSaveAutoEnrollmentTests(unittest.TestCase):
     SERVER = "sin-fs25-01"

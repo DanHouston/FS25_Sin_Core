@@ -46,6 +46,7 @@ class NativeContractService:
             "estimated_dollars_per_hour": _number(payload, "estimated_dollars_per_hour"),
             "equipment_count": _number(payload, "equipment_count"),
             "accepting_farm_id": str(payload.get("accepting_farm_id") or ""),
+            "accepting_farm_name": str(payload.get("accepting_farm_name") or ""),
             "accepting_player": str(payload.get("accepting_player") or ""),
             "last_event_id": str(event_id), "updated_at": now,
         }

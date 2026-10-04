@@ -102,6 +102,14 @@ class EventProcessingTests(unittest.TestCase):
         self.assertIn("Farm 4", message)
         self.assertNotIn("not-exposed-by-native-mission", message)
 
+    def test_native_contract_claim_uses_authoritative_farm_name_when_present(self):
+        message = self.processor.native_contract_message({
+            "lifecycle": "accepted", "accepting_player": "not-exposed-by-native-mission",
+            "accepting_farm_id": "4", "accepting_farm_name": "SiN Harvest"
+        })
+        self.assertIn("SiN Harvest", message)
+        self.assertNotIn("Farm 4", message)
+
     def test_duplicate_processed_event_key_is_safe(self):
         self.database.db.processed_server_events.insert_one.side_effect = DuplicateKeyError("duplicate key")
         result = self.processor.process(self.event("heartbeat"))

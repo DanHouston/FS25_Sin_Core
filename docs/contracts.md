@@ -185,7 +185,7 @@ and
 
 ## Discord native-contract threads
 
-When `SiN_FS25_Server` and `SiN_FS25_Contracts` are installed together, the
+When `FS25_SiN_Server` and `SiN_FS25_Contracts` are installed together, the
 Contracts mod observes native MissionManager registration, successful
 acceptance, successful completion, and cancellation on the authoritative
 server. It emits those facts through the server mod's authenticated event
@@ -193,9 +193,19 @@ mailbox; it does not create or modify missions. The Central service projects
 each mission by server/save/world/mission ID, and JiN publishes one available
 parent card to that server's configured Activity channel with a Discord thread.
 Claimed, completed, and cancelled updates are posted into that contract's
-thread. The accepting farm is reported when the native mission exposes it;
+thread and refresh the parent card's current status. The accepting farm is
+reported when the native mission exposes it;
 FS25 does not consistently expose the human player identity, so the bot does
 not guess a name.
+
+On map load, the server scans native offers already on the board and queues
+their availability once. A running mission is backfilled in availability-then-
+acceptance order. If the server mailbox is temporarily unavailable, each
+pending lifecycle fact is retained independently and retried in order; later
+claims or completion cannot overwrite the missing parent post. The mailbox
+agent and JiN publisher preserve that order so the thread exists before its
+updates. The native accepting farm name is included where FS25 exposes it;
+the bot falls back to the farm ID when it cannot identify a person.
 
 The bot needs `View Channel`, `Send Messages`, `Create Public Threads`, and
 `Send Messages in Threads` in the configured Activity channel. Missing thread
@@ -206,9 +216,12 @@ channel used by Discord-created SiN work contracts.
 
 ## Deployment and limitations
 
-Build `SiN_FS25_Contracts.zip` and install identical bytes on the dedicated
-server and validation clients, alongside the existing SiN server mod. Reload
-the map/save after updating because this is a script mod. It is independent of
-`SiN_FS25_Server`; native contract events use its authenticated mailbox and
-Central/JiN projection described above. This does not redesign SiN jobs or
-native contract economics.
+Build `SiN_FS25_Contracts.zip` and `FS25_SiN_Server.zip` and install identical
+bytes on the dedicated server and validation clients. Update the mailbox agent
+and Central/JiN service together with them, then reload the map/save. Native
+contract events use the server mod's authenticated mailbox and the Central/JiN
+projection described above. This does not redesign SiN jobs or native contract
+economics. After startup, confirm `native contract lifecycle listener
+installed`, followed by `queued type=native_contract_available` and JiN's
+`published type=native_contract_available` before treating Discord delivery
+as live-validated.

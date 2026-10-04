@@ -8,6 +8,10 @@ local MAX_RECORDS = 128
 local MAX_EQUIPMENT = 16
 local MAX_VALIDATION_FAILURE_DIAGNOSTICS = 16
 local DEBUG = false
+-- Shared MessageCenter contract with FS25_SiN_Server. Mod globals are not a
+-- cross-mod API; this stable, namespaced integer is the local event channel.
+local SIN_NATIVE_CONTRACT_LIFECYCLE_MESSAGE = 0x53494E43
+local CONTRACT_LIFECYCLE_ORDER = {"available", "accepted", "completed", "cancelled"}
 local EFFICIENCY = 0.70
 local POLL_INTERVAL_MS = 1000
 local RECOVERY_SOFT_TARGET_OFFERS = 9
@@ -206,51 +210,89 @@ local function fieldData(mission)
 end
 
 local function emitNativeContractLifecycle(owner, mission, record, eventName, finishState)
-    if type(FS25SiNServer) ~= "table" or type(FS25SiNServer.emitServerEvent) ~= "function" then return end
-    local lifecycle = record.lifecycleToPublish
-    if eventName == "generated" then
-        lifecycle = "available"
-    elseif eventName == "accepted" then
-        lifecycle = "accepted"
-    elseif eventName == "cancelled" then
-        lifecycle = "cancelled"
-    elseif eventName == "finished" then
-        local state = string.upper(tostring(record.finishState or finishName(finishState) or ""))
-        if string.find(state, "SUCCESS", 1, true) or string.find(state, "COMPLETED", 1, true) then
-            lifecycle = "completed"
-        end
-    end
-    if lifecycle == nil then return end
-    record.lifecycleToPublish = lifecycle
     owner.lifecycleEvents = owner.lifecycleEvents or {}
     local id = tostring(record.missionId)
     local emitted = owner.lifecycleEvents[id] or {}
     owner.lifecycleEvents[id] = emitted
-    if emitted[lifecycle] then return end
-
-    local payload = {
-        mission_id = id,
-        mission_type = record.missionType,
-        field_id = record.field and record.field.id,
-        field_name = record.field and record.field.name,
-        area_ha = record.field and record.field.areaHa,
-        farmland_id = record.field and record.field.farmlandId,
-        reward = record.reward,
-        estimated_hours = record.estimatedHours,
-        estimated_dollars_per_hour = record.estimatedNativeDollarsPerHour,
-        accepting_farm_id = record.acceptingFarmId
-    }
-    local player = record.acceptingPlayer
-    if player ~= nil and player ~= "not-exposed-by-native-mission" then payload.accepting_player = player end
-    local ok, written = pcall(FS25SiNServer.emitServerEvent, FS25SiNServer,
-        "native_contract_" .. lifecycle, payload)
-    if ok and written == true then
-        emitted[lifecycle] = true
-        record.lifecycleToPublish = nil
-    elseif not owner.lifecycleWriteWarningLogged then
-        owner.lifecycleWriteWarningLogged = true
-        logWarning("native contract lifecycle mailbox unavailable; Discord contract updates are paused")
+    record.pendingLifecycles = record.pendingLifecycles or {}
+    local pending = record.pendingLifecycles
+    local status = string.upper(tostring(record.status or ""))
+    local finish = string.upper(tostring(record.finishState or finishName(finishState) or ""))
+    local succeeded = string.find(finish, "SUCCESS", 1, true) ~= nil
+        or string.find(finish, "COMPLETED", 1, true) ~= nil
+    local cancelled = eventName == "cancelled" or string.find(finish, "CANCELED", 1, true) ~= nil
+        or string.find(finish, "CANCELLED", 1, true) ~= nil
+    local started = eventName == "accepted" or status == "PREPARING" or status == "RUNNING"
+        or ((status == "FINISHED" or eventName == "finished") and (succeeded or cancelled))
+    local available = eventName == "generated" or status == "CREATED" or started or cancelled
+    -- A load-time scan sees missions that native FS25 restored before this
+    -- mod's hooks ran. Backfill their current lifecycle through the same
+    -- deterministic mailbox IDs as newly generated missions.
+    if available and not emitted.available then pending.available = true end
+    if started and not emitted.accepted then pending.accepted = true end
+    if succeeded and (status == "FINISHED" or eventName == "finished") and not emitted.completed then
+        pending.completed = true
     end
+    if cancelled and not emitted.cancelled then pending.cancelled = true end
+
+    -- Dispatch in lifecycle order. A failed availability write must not be
+    -- replaced by acceptance/completion, since Discord needs the parent card
+    -- before it can post those updates into the thread.
+    local current = nowMs()
+    record.lifecycleLastDispatchMs = record.lifecycleLastDispatchMs or {}
+    for _, lifecycle in ipairs(CONTRACT_LIFECYCLE_ORDER) do
+        if pending[lifecycle] == true and not emitted[lifecycle] then
+            record.lifecycleToPublish = lifecycle
+            local lastDispatch = record.lifecycleLastDispatchMs[lifecycle]
+            if current ~= nil and lastDispatch ~= nil and current - lastDispatch < 5000 then return end
+            record.lifecycleLastDispatchMs[lifecycle] = current
+            local payload = {
+                mission_id = id,
+                mission_type = record.missionType,
+                field_id = record.field and record.field.id,
+                field_name = record.field and record.field.name,
+                area_ha = record.field and record.field.areaHa,
+                farmland_id = record.field and record.field.farmlandId,
+                reward = record.reward,
+                estimated_hours = record.estimatedHours,
+                estimated_dollars_per_hour = record.estimatedNativeDollarsPerHour,
+                accepting_farm_id = record.acceptingFarmId,
+                accepting_farm_name = record.acceptingFarmName
+            }
+            local player = record.acceptingPlayer
+            if player ~= nil and player ~= "not-exposed-by-native-mission" then payload.accepting_player = player end
+            local function acknowledge(written)
+                if written ~= true then return end
+                emitted[lifecycle] = true
+                pending[lifecycle] = nil
+                record.lifecycleToPublish = nil
+                if owner.lifecycleBridgeUnavailableLogged then
+                    logInfo("native contract lifecycle bridge available; pending notifications resumed")
+                    owner.lifecycleBridgeUnavailableLogged = nil
+                end
+            end
+            local eventType = "native_contract_" .. lifecycle
+            -- MessageCenter is the shared cross-mod boundary; the server
+            -- listener acknowledges only after its mailbox write succeeds.
+            if type(FS25SiNServer) == "table" and type(FS25SiNServer.emitServerEvent) == "function" then
+                local ok, written = pcall(FS25SiNServer.emitServerEvent, FS25SiNServer, eventType, payload)
+                if ok and written == true then acknowledge(true) end
+            end
+            if not emitted[lifecycle] and g_messageCenter ~= nil and type(g_messageCenter.publish) == "function" then
+                local envelope = {eventType=eventType, payload=payload, acknowledge=acknowledge}
+                pcall(g_messageCenter.publish, g_messageCenter,
+                    SIN_NATIVE_CONTRACT_LIFECYCLE_MESSAGE, {envelope})
+            end
+            if not emitted[lifecycle] then
+                if not owner.lifecycleBridgeUnavailableLogged then
+                    logWarning("native contract lifecycle bridge unavailable; notifications will retry")
+                    owner.lifecycleBridgeUnavailableLogged = true
+                end
+                return
+            end
+        end
+    end
+    record.lifecycleToPublish = nil
 end
 
 -- WorkAreaSpecialization owns the authoritative implement width. A vehicle's
@@ -486,13 +528,19 @@ function SiNContracts:observe(mission, eventName, finishState)
     record.missionType = missionType(mission)
     record.status = statusName(mission)
     record.completion = completionValue(mission)
-    record.finishState = finishName(finishState) or record.finishState
+    local observedFinish = finishName(finishState) or finishName(fieldValue(mission, {"finishState"}))
+    if observedFinish ~= nil and string.upper(observedFinish) ~= "NONE" and observedFinish ~= "0" then
+        record.finishState = observedFinish
+    end
     record.field = field
     record.targetLocation = targetLocation
     record.targetX, record.targetY, record.targetZ = number(targetX), number(targetY), number(targetZ)
     record.reward = reward
     record.acceptingFarmId = number(fieldValue(mission, {"farmId", "acceptingFarmId"}))
-    record.acceptingPlayer = text(fieldValue(mission, {"playerId", "acceptingPlayerId", "userId"})) or "not-exposed-by-native-mission"
+    local acceptingFarm = record.acceptingFarmId ~= nil and call(g_farmManager, "getFarmById", record.acceptingFarmId) or nil
+    record.acceptingFarmName = text(fieldValue(acceptingFarm, {"name"})) or record.acceptingFarmName
+    record.acceptingPlayer = text(fieldValue(mission, {"playerId", "acceptingPlayerId", "userId"}))
+        or record.acceptingPlayer or "not-exposed-by-native-mission"
     record.equipment = equipment
     record.equipmentSource = equipmentSource
     record.estimatedHours = estimatedHours
@@ -544,13 +592,17 @@ function SiNContracts:observe(mission, eventName, finishState)
     if self.recordCount > MAX_RECORDS then
         local oldestId, oldest = nil, nil
         for candidateId, candidate in pairs(self.records) do
-            if candidate._counted == true and (oldest == nil or (candidate.lastSeenMs or 0) < (oldest.lastSeenMs or 0)) then
+            -- Pending mailbox facts are not disposable diagnostics. Retain
+            -- them until acknowledged even when the report reaches its cap.
+            if candidate._counted == true and next(candidate.pendingLifecycles or {}) == nil
+                and (oldest == nil or (candidate.lastSeenMs or 0) < (oldest.lastSeenMs or 0)) then
                 oldestId, oldest = candidateId, candidate
             end
         end
         if oldestId ~= nil and oldestId ~= id then
             self.records[oldestId] = nil
             self.fingerprints[oldestId] = nil
+            if self.lifecycleEvents ~= nil then self.lifecycleEvents[oldestId] = nil end
             self.recordCount = self.recordCount - 1
         end
     end
@@ -565,6 +617,14 @@ function SiNContracts:scan(reason)
         if mission ~= nil then self:observe(mission, reason or "observed"); count = count + 1 end
     end
     return count
+end
+
+function SiNContracts:retryPendingLifecycle()
+    for _, record in pairs(self.records) do
+        if next(record.pendingLifecycles or {}) ~= nil then
+            emitNativeContractLifecycle(self, nil, record, "retry")
+        end
+    end
 end
 
 local function missionIsAvailable(mission)
@@ -1835,6 +1895,8 @@ function SiNContracts:installHooks()
 end
 
 function SiNContracts:loadMap()
+    self.records, self.fingerprints, self.lifecycleEvents = {}, {}, {}
+    self.recordCount, self.lastPollMs, self.lifecycleBridgeUnavailableLogged = 0, nil, nil
     if call(g_currentMission, "getIsServer") == true and MissionManager ~= nil then
         MissionManager.MISSION_GENERATION_INTERVAL = NATIVE_GENERATION_INTERVAL_MS
         logInfo("native mission generation interval configured interval=%dms", NATIVE_GENERATION_INTERVAL_MS)
@@ -1865,6 +1927,9 @@ function SiNContracts:update()
     -- startMissionGeneration/finishMissionGeneration classify empty cycles and
     -- trigger bounded supply recovery when needed. This poll remains read-only.
     self:scan("observed")
+    -- Native FS25 may dismiss/remove a finished mission while the mailbox is
+    -- unavailable. Retry its retained facts even after it leaves the board.
+    self:retryPendingLifecycle()
 end
 
 function SiNContracts:deleteMap()
