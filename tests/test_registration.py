@@ -389,6 +389,18 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("if not pseudo then", snapshot)
         self.assertIn("currentPlayers[identityKey]", snapshot)
 
+    def test_server_runtime_equity_uses_native_resale_and_excludes_leases(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8")
+        self.assertIn("pcall(item.getSellPrice, item)", source)
+        self.assertIn("paidPrice * 0.5", source)
+        self.assertIn("item.propertyState == VehiclePropertyState.OWNED", source)
+        self.assertIn("item.isPallet == true", source)
+        self.assertIn('xml:setString(farmlandKey .. "#price", tostring(price))', source)
+        self.assertIn('xml:setBool("networkLocal#farmlandPriceSourceReady", true)', source)
+        self.assertIn('xml:setString(key .. "#structureSellValue"', source)
+        self.assertIn('xml:setString(key .. "#vehicleSellValue"', source)
+
     def test_server_runtime_farm_operations_use_verified_authoritative_apis(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
             encoding="utf-8")

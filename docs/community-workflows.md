@@ -1,5 +1,20 @@
 # Community workflow boundaries
 
+## Mod suggestions forum
+
+`channels.mod_suggestions` identifies the existing Discord forum (currently
+`1556486221092487219`); `DISCORD_MOD_SUGGESTIONS_CHANNEL_ID` can override it
+for another deployment. On a new forum post, JiN applies the `Under Review`
+tag without removing the author's other tags. If that tag does not exist, JiN
+creates it as a moderator-only tag. JiN then reacts to the starter message with
+both 🟢 and 🔴. Discord counts these two bot reactions in its visible totals,
+so a member-only tally is `max(0, green - 1)` and `max(0, red - 1)`. The pair
+contributes zero net preference; it does not make either displayed count zero.
+Setup is idempotent across duplicate gateway events and restarts. JiN needs
+View Channel, Read Message History, Add Reactions, Manage Threads, and, if it
+must create the tag, Manage Channels. Missing permissions or a full five-tag
+post are logged and do not silently claim the post was prepared.
+
 The first central-only foundations for community features live in
 `fs25_network_core/business_workflows.py`. They are intentionally separate
 from farm membership and manager authority.
@@ -51,15 +66,44 @@ or alter an existing farm's initial economy.  `/deposit` debits the
 authenticated farm only after the deployed FS25 money adapter proves the native
 balance change; `/withdraw` reserves wallet funds and credits that same farm
 only after authoritative readback.  Invoice payments move value between SiN
-wallets without mutating FS25 farm balances.
-The command acknowledges submission, then a private Discord message reports
-the confirmed outcome and balances. The FS25 balance in a success notice is
-the native receipt's balance read-back, not an older server snapshot. A
-definitive failure says to retry later; an uncertain or delayed operation
-remains reserved/queued and is never falsely called failed. Members who block
-bot DMs can still inspect pending amounts and the latest definitive transfer
-state with `/balance`. Staff should check the operational log if a completion
-notice cannot be delivered.
+wallets without mutating FS25 farm balances. `/pay player:<member> amount:<whole-number>
+memo:<text>` immediately transfers available SiN bank funds between two
+registered players in one MongoDB transaction. It rejects self-payments,
+unlinked recipients, invalid memos, and insufficient funds; the payer receives
+a private confirmation only after the recipient credit is read back in the
+transaction. The confirmation includes a payment reference and the payer's
+updated available balance, but does not reveal the recipient's total balance.
+The recipient gets a best-effort private receipt with the memo and reference.
+A blocked recipient DM does not undo the payment. Repeating the same Discord
+interaction cannot debit twice or send a second receipt. `/pay` never queues
+an FS25 money operation or changes either farm's in-game balance.
+Deposit and withdrawal commands acknowledge submission in an ephemeral reply
+visible only to the caller in the channel where they invoked the command. If
+the game confirms within Discord's 15-minute interaction window, JiN edits
+that same reply with the definitive outcome and balances. No bank DM is sent.
+If confirmation arrives later or JiN restarts, `/balance` shows pending amounts
+and the latest definitive outcome; the short-lived interaction token is never
+stored in MongoDB. The FS25 balance in a success notice is the native receipt's
+balance read-back, not an older server snapshot. A definitive failure says to
+retry later; an uncertain or delayed operation remains reserved/queued and is
+never falsely called failed.
+
+`/equity` is an ephemeral, caller-only snapshot. It combines the caller's SiN
+checking balance with the active, verified farm's native cash balance; the
+farm's assets are shared by its members, not personally owned by the caller.
+The FS25 server mod exports owned parcel prices from the live farmland manager,
+native `getSellPrice()` values for owned equipment and structures, and the
+farm ID attached to those objects. Leased vehicles and consumable inventory
+(pallets, bales, big bags) are excluded. When a structure has no usable native
+sell price, the mod uses 50% of its live purchase price and `/equity` discloses
+the number of such estimates. Vehicle values are never estimated from catalog
+prices. Missing or stale data, or even one unpriced owned item in a category,
+is shown as unavailable rather than silently counted as zero; the total is
+withheld until every component is available. Loans, crops, stored products,
+and pending bank transfers are not included. Both the updated FS25 server mod
+and Agent must be running, and the mod must export a new snapshot, before the
+new asset fields can appear in Discord. The displayed game snapshot timestamp
+is interpreted as UTC even when MongoDB returns a timezone-naive datetime.
 
 ## Contracts, invoices, and events
 
@@ -136,7 +180,7 @@ REQUIRED` until a verified GIANTS runtime API and replication path is proven.
 
 ## Current Discord command surface
 
-- Money: `/balance`, `/deposit`, `/withdraw` (withdrawal availability is
+- Money: `/balance`, `/equity`, `/deposit`, `/withdraw`, `/pay` (withdrawal availability is
   server-configured).
 - Contracts: `/contract_create`, `/contract_list`, `/contract_view`,
   `/contract_accept`, `/contract_complete`. Cancellation is performed from the
@@ -155,6 +199,8 @@ REQUIRED` until a verified GIANTS runtime API and replication path is proven.
 Bank deposits and withdrawals resolve the invoking registered identity's
 authenticated server/save context and no longer expose a redundant server
 selector. Ambiguous or unavailable identity context fails closed.
+`/pay` is central-wallet-only, so it checks both linked player identities but
+does not require either player to be online or select a game server/save.
 
 Server/save selectors use the central registry and friendly display names;
 internal keys remain the durable scope identifiers.  Operations that touch

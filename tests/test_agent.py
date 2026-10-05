@@ -424,6 +424,29 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(payload["farms"], {"2": "Player Farm"})
         self.assertEqual(payload["farm_balances"], {"2": 602651.5})
 
+    def test_snapshot_payload_preserves_native_resale_values_and_omits_invalid_ones(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "snapshot.xml").write_text(
+                '<networkLocal source="game" savegameIndex="3" worldId="hobo-world" '
+                'farmlandPriceSourceReady="true">'
+                '<farms><farm farmId="2" name="Player Farm" balance="500" '
+                'structureSellValue="1200" structureCount="2" structureUnpriced="0" '
+                'structureFallback="1" '
+                'vehicleSellValue="4500" vehicleCount="3" vehicleUnpriced="1"/>'
+                '<farm farmId="3" name="Other Farm" structureSellValue="nan" '
+                'structureCount="1" structureUnpriced="0"/></farms>'
+                '<farmlands><farmland id="10" farmId="2" price="750000"/>'
+                '<farmland id="11" farmId="3" price="nan"/></farmlands>'
+                '</networkLocal>', encoding="utf-8")
+            payload = PairingAgent(root, "https://central", MagicMock())._snapshot_payload()
+        self.assertEqual(payload["farmland_prices"], {"10": 750000.0})
+        self.assertIs(payload["farmland_price_source_ready"], True)
+        self.assertEqual(payload["farm_asset_values"], {"2": {
+            "structures": {"sell_value": 1200.0, "count": 2, "unpriced": 0, "fallback": 1},
+            "vehicles": {"sell_value": 4500.0, "count": 3, "unpriced": 1, "fallback": 0},
+        }})
+
     def test_agent_materializes_central_farm_operation_without_mongo(self):
         class OperationResponse:
             status = 200

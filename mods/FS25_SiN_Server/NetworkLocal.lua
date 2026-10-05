@@ -3176,6 +3176,72 @@ function FS25SiNServer:reconcileManagerAuthorityDrift()
     end
 end
 
+local function sinValidResaleValue(value)
+    return type(value) == "number" and value >= 0 and value == value
+        and value ~= math.huge and value ~= -math.huge
+end
+
+-- Read the same live objects and getSellPrice methods used by the native
+-- shop. Never derive depreciation from catalog prices or savegame XML.
+local function sinCollectResaleValues(items, ownedVehicleOnly)
+    if type(items) ~= "table" then return nil end
+    if ownedVehicleOnly and (VehiclePropertyState == nil or VehiclePropertyState.OWNED == nil) then
+        return nil
+    end
+    local byFarm = {}
+    for _, item in pairs(items) do
+        if item ~= nil then
+            if type(item.getOwnerFarmId) ~= "function" then return nil end
+            local ownerOk, owner = pcall(item.getOwnerFarmId, item)
+            if not ownerOk then return nil end
+            local farmId = tonumber(owner)
+            if farmId ~= nil and farmId > 0 and farmId <= 254 then
+                -- Pallets, bales and bulk containers are consumable inventory,
+                -- not shop equipment. Leased/mission vehicles are not assets.
+                local isInventory = ownedVehicleOnly and
+                    (item.isPallet == true or item.isBale == true or item.isBigBag == true)
+                local isOwned = not ownedVehicleOnly or item.propertyState == VehiclePropertyState.OWNED
+                if not isInventory and isOwned then
+                    local record = byFarm[farmId]
+                    if record == nil then
+                        record = {value=0, count=0, unpriced=0, fallback=0}
+                        byFarm[farmId] = record
+                    end
+                    record.count = record.count + 1
+                    local priceOk, price = false, nil
+                    if type(item.getSellPrice) == "function" then
+                        priceOk, price = pcall(item.getSellPrice, item)
+                    end
+                    if (not priceOk or not sinValidResaleValue(price)) and not ownedVehicleOnly then
+                        -- FS25 structures normally expose getSellPrice. Some
+                        -- mod placeables do not; use the requested 50% of the
+                        -- live object's paid price, never a catalog guess.
+                        local paidPrice = tonumber(item.price)
+                        if type(item.getPrice) == "function" then
+                            local paidOk, paidValue = pcall(item.getPrice, item)
+                            if paidOk and sinValidResaleValue(paidValue) then
+                                paidPrice = paidValue
+                            end
+                        end
+                        if sinValidResaleValue(paidPrice) then
+                            priceOk, price = true, paidPrice * 0.5
+                            record.fallback = record.fallback + 1
+                        end
+                    end
+                    if priceOk and sinValidResaleValue(price) then
+                        record.value = record.value + price
+                    else
+                        record.unpriced = record.unpriced + 1
+                    end
+                elseif ownedVehicleOnly and not isInventory and item.propertyState == nil then
+                    return nil
+                end
+            end
+        end
+    end
+    return byFarm
+end
+
 function FS25SiNServer:exportSnapshot()
     self.sequence = self.sequence + 1
     local xml = XMLFile.create("networkLocal", self.directory .. "snapshot.xml", "networkLocal")
@@ -3215,6 +3281,12 @@ function FS25SiNServer:exportSnapshot()
     end
     xml:setString("networkLocal#worldId", tostring(self.worldId))
     xml:setString("networkLocal#mapId", tostring(info and (info.mapId or info.mapFilename or info.mapXMLFilename) or ""))
+    local placeableSystem = g_currentMission.placeableSystem
+    local vehicleSystem = g_currentMission.vehicleSystem
+    local structureValues = sinCollectResaleValues(
+        placeableSystem ~= nil and placeableSystem.placeables or nil, false)
+    local vehicleValues = sinCollectResaleValues(
+        vehicleSystem ~= nil and vehicleSystem.vehicles or nil, true)
     local index = 0
     -- Farm IDs are bounded for this initial local probe; skip spectator/NPC farms.
     for farmId = 1, 254 do
@@ -3235,15 +3307,40 @@ function FS25SiNServer:exportSnapshot()
                     xml:setString(key .. "#balance", tostring(balance))
                 end
             end
+            local structure = structureValues ~= nil and structureValues[farmId] or nil
+            if structureValues ~= nil then
+                xml:setString(key .. "#structureSellValue", tostring(structure ~= nil and structure.value or 0))
+                xml:setInt(key .. "#structureCount", structure ~= nil and structure.count or 0)
+                xml:setInt(key .. "#structureUnpriced", structure ~= nil and structure.unpriced or 0)
+                xml:setInt(key .. "#structureFallback", structure ~= nil and structure.fallback or 0)
+            end
+            local vehicles = vehicleValues ~= nil and vehicleValues[farmId] or nil
+            if vehicleValues ~= nil then
+                xml:setString(key .. "#vehicleSellValue", tostring(vehicles ~= nil and vehicles.value or 0))
+                xml:setInt(key .. "#vehicleCount", vehicles ~= nil and vehicles.count or 0)
+                xml:setInt(key .. "#vehicleUnpriced", vehicles ~= nil and vehicles.unpriced or 0)
+            end
             index = index + 1
         end
     end
     local farmlandIndex = 0
-    if g_farmlandManager ~= nil and g_farmlandManager.getFarmlands ~= nil then
-        for farmlandId, _ in pairs(g_farmlandManager:getFarmlands() or {}) do
+    local farmlands = g_farmlandManager ~= nil and g_farmlandManager.getFarmlands ~= nil
+        and g_farmlandManager:getFarmlands() or nil
+    if type(farmlands) == "table" and type(g_farmlandManager.getFarmlandOwner) == "function" then
+        xml:setBool("networkLocal#farmlandPriceSourceReady", true)
+        for farmlandId, farmland in pairs(farmlands) do
             local farmlandKey = string.format("networkLocal.farmlands.farmland(%d)", farmlandIndex)
             xml:setInt(farmlandKey .. "#id", farmlandId)
             xml:setInt(farmlandKey .. "#farmId", g_farmlandManager:getFarmlandOwner(farmlandId) or 0)
+            local price = farmland ~= nil and tonumber(farmland.price) or nil
+            if type(g_farmlandManager.getFarmlandById) == "function" then
+                local lookupOk, current = pcall(g_farmlandManager.getFarmlandById,
+                    g_farmlandManager, farmlandId)
+                if lookupOk and current ~= nil then price = tonumber(current.price) end
+            end
+            if sinValidResaleValue(price) then
+                xml:setString(farmlandKey .. "#price", tostring(price))
+            end
             farmlandIndex = farmlandIndex + 1
         end
     end

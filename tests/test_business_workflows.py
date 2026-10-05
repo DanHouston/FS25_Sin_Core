@@ -183,8 +183,100 @@ class BusinessWorkflowTests(unittest.TestCase):
         self.assertEqual(self.db.wallets.update_one.call_count, 2)
         self.db.wallet_transfers.find_one.return_value = {
             "_id": "tx-1", "payer_id": "payer", "payee_id": "payee", "amount": 50,
-            "state": "completed"}
+            "reason": "invoice", "state": "completed"}
         self.assertEqual(engine.transfer_wallet("tx-1", "payer", "payee", 50, "invoice"), "completed")
+
+    def test_player_payment_debits_and_credits_linked_wallets_without_game_operation(self):
+        engine = BankingEngine(self.database)
+        self.db.game_identities.find_one.side_effect = [
+            {"discord_id": "payer"}, {"discord_id": "payee"}]
+        self.db.wallet_transfers.find_one.return_value = None
+        self.db.wallets.update_one.return_value.modified_count = 1
+        self.db.wallets.find_one.side_effect = [
+            {"_id": "payee", "balance": 40},
+            {"_id": "payee", "balance": 65},
+            {"_id": "payer", "balance": 75}]
+
+        result = engine.pay_player("interaction-1", "payer", "payee", 25, "  tractor fuel  ")
+
+        self.assertEqual(result, {"state": "completed", "new": True,
+                                  "recipient_verified": True, "payment_reference": "interaction-1",
+                                  "available_balance": 75})
+        self.assertEqual(self.db.wallets.update_one.call_count, 2)
+        self.assertEqual(self.db.ledger_entries.insert_one.call_count, 2)
+        transfer = self.db.wallet_transfers.insert_one.call_args.args[0]
+        self.assertEqual((transfer["_id"], transfer["payer_id"], transfer["payee_id"],
+                          transfer["amount"], transfer["reason"]),
+                         ("player-pay:interaction-1", "payer", "payee", 25,
+                          "player payment: tractor fuel"))
+        self.db.farm_operations.insert_one.assert_not_called()
+        self.db.farm_operations.update_one.assert_not_called()
+
+    def test_player_payment_requires_two_linked_players_and_sufficient_funds(self):
+        engine = BankingEngine(self.database)
+        self.db.game_identities.find_one.side_effect = [
+            {"discord_id": "payer"}, None]
+        with self.assertRaisesRegex(ValueError, "Recipient's Discord account is not linked"):
+            engine.pay_player("interaction-2", "payer", "payee", 25, "seed")
+        self.db.wallets.update_one.assert_not_called()
+
+        self.db.game_identities.find_one.side_effect = [
+            {"discord_id": "payer"}, {"discord_id": "payee"}]
+        self.db.wallet_transfers.find_one.return_value = None
+        self.db.wallets.update_one.return_value.modified_count = 0
+        self.db.wallets.find_one.return_value = {"balance": 0}
+        with self.assertRaisesRegex(ValueError, "Insufficient available balance"):
+            engine.pay_player("interaction-3", "payer", "payee", 25, "seed")
+        self.db.ledger_entries.insert_one.assert_not_called()
+        self.db.wallet_transfers.insert_one.assert_not_called()
+
+    def test_player_payment_replay_does_not_debit_again_or_change_details(self):
+        engine = BankingEngine(self.database)
+        self.db.game_identities.find_one.side_effect = [
+            {"discord_id": "payer"}, {"discord_id": "payee"},
+            {"discord_id": "payer"}, {"discord_id": "payee"}]
+        self.db.wallet_transfers.find_one.return_value = {
+            "_id": "player-pay:interaction-4", "payer_id": "payer", "payee_id": "payee",
+            "amount": 25, "reason": "player payment: seed", "state": "completed"}
+        self.db.wallets.find_one.side_effect = [
+            {"_id": "payee", "balance": 25}, {"_id": "payer", "balance": 75}]
+
+        self.assertEqual(engine.pay_player("interaction-4", "payer", "payee", 25, "seed"),
+                         {"state": "completed", "new": False, "recipient_verified": True,
+                          "payment_reference": "interaction-4", "available_balance": 75})
+        self.db.wallets.update_one.assert_not_called()
+        with self.assertRaisesRegex(ValueError, "reused with different details"):
+            engine.pay_player("interaction-4", "payer", "payee", 25, "different memo")
+
+    def test_player_payment_does_not_confirm_without_recipient_credit_readback(self):
+        engine = BankingEngine(self.database)
+        self.db.game_identities.find_one.side_effect = [
+            {"discord_id": "payer"}, {"discord_id": "payee"}]
+        self.db.wallet_transfers.find_one.return_value = None
+        self.db.wallets.update_one.return_value.modified_count = 1
+        self.db.wallets.find_one.side_effect = [
+            {"_id": "payee", "balance": 40}, {"_id": "payee", "balance": 40}]
+
+        with self.assertRaisesRegex(ValueError, "Recipient credit could not be verified"):
+            engine.pay_player("interaction-5", "payer", "payee", 25, "seed")
+
+    def test_incomplete_wallet_transfer_is_not_mistaken_for_a_completed_payment(self):
+        engine = BankingEngine(self.database)
+        self.db.wallet_transfers.find_one.return_value = {
+            "_id": "tx-2", "payer_id": "payer", "payee_id": "payee", "amount": 25,
+            "reason": "seed", "state": "pending"}
+        with self.assertRaisesRegex(ValueError, "not complete"):
+            engine.transfer_wallet("tx-2", "payer", "payee", 25, "seed")
+        self.db.wallets.update_one.assert_not_called()
+
+    def test_player_payment_rejects_self_pay_and_invalid_memo(self):
+        engine = BankingEngine(self.database)
+        with self.assertRaisesRegex(ValueError, "yourself"):
+            engine.pay_player("interaction", "payer", "payer", 10, "seed")
+        for memo in ("", "line\nbreak", "x" * 201):
+            with self.assertRaisesRegex(ValueError, "Memo"):
+                engine.pay_player("interaction", "payer", "payee", 10, memo)
+        self.database.atomic.assert_not_called()
 
     def test_transfer_requires_confirmed_active_manager_role(self):
         authorization = MagicMock()

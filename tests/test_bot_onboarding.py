@@ -6,6 +6,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import discord
 from discord import app_commands
 
 from fs25_network_core.bot_frontend import (CommunityEventView, ContractView, FarmRequestView,
@@ -438,7 +439,7 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         interaction.user.id = 42
         interaction.response.send_message = AsyncMock()
         interaction.response.defer = AsyncMock()
-        interaction.followup.send = AsyncMock()
+        interaction.edit_original_response = AsyncMock()
         self.bot.resolve_identity_context = MagicMock(return_value={
             "server_key": "server-a", "save_key": "save-a", "world_id": "world-a",
         })
@@ -454,8 +455,106 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.bot.bank.request_withdrawal.assert_called_once_with(
             "9001", "42", "server-a", "save-a", 1, world_id="world-a")
         self.assertEqual(interaction.response.defer.await_count, 2)
-        self.assertNotIn("Withdrawal is pending", interaction.followup.send.await_args.args[0])
-        self.assertIn("confirmed result", interaction.followup.send.await_args.args[0])
+        self.assertIn("This private reply will update",
+                      interaction.edit_original_response.await_args.kwargs["content"])
+        self.assertNotIn("DM", interaction.edit_original_response.await_args.kwargs["content"])
+        self.assertEqual(self.bot.bank_notification_publisher.interactions
+                         [("deposit", "9001")], interaction)
+        self.assertEqual(self.bot.bank_notification_publisher.interactions
+                         [("withdrawal", "9001")], interaction)
+
+    async def test_equity_is_ephemeral_and_uses_only_callers_identity(self):
+        command = self.bot.tree.get_command("equity")
+        self.assertEqual(command.to_dict(self.bot.tree).get("options", []), [])
+        interaction = MagicMock()
+        interaction.user.id = 42
+        interaction.response.defer = AsyncMock()
+        interaction.followup.send = AsyncMock()
+        self.bot.resolve_identity_context = MagicMock(return_value={
+            "server_key": "server", "save_key": "save", "world_id": "world"})
+        self.bot.bank.equity_summary = MagicMock(return_value={
+            "checking_balance": 100, "game_balance": 200, "land_value": 300,
+            "structure_value": 400, "vehicle_value": 500, "total": 1500,
+            "farm_name": "Test Farm", "snapshot_at": None,
+            "structure_fallback_count": 1, "unavailable": {}})
+
+        await command.callback(interaction)
+
+        self.bot.bank.equity_summary.assert_called_once_with(
+            "42", server_id="server", save_id="save", world_id="world")
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        message = interaction.followup.send.await_args.args[0]
+        self.assertIn("SiN checking: $100", message)
+        self.assertIn("Owned structures (sell-back): $400", message)
+        self.assertIn("Total listed value before loans: $1,500", message)
+        self.assertIn("1 item(s) valued at 50% of paid price", message)
+        self.assertTrue(interaction.followup.send.await_args.kwargs["ephemeral"])
+
+    async def test_pay_uses_linked_player_wallets_and_reports_final_balance(self):
+        command = self.bot.tree.get_command("pay")
+        options = command.to_dict(self.bot.tree)["options"]
+        self.assertEqual([option["name"] for option in options], ["player", "amount", "memo"])
+        interaction = MagicMock()
+        interaction.id = 9002
+        interaction.user.id = 42
+        interaction.response.defer = AsyncMock()
+        interaction.followup.send = AsyncMock()
+        interaction.user.mention = "<@42>"
+        player = SimpleNamespace(id=77, bot=False, mention="<@77>", send=AsyncMock())
+        self.bot.bank.pay_player = MagicMock(return_value={
+            "state": "completed", "new": True, "recipient_verified": True,
+            "payment_reference": "9002", "available_balance": 75})
+
+        await command.callback(interaction, player, 25, "seed")
+
+        self.bot.bank.pay_player.assert_called_once_with("9002", "42", "77", 25, "seed")
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        message = interaction.followup.send.await_args.args[0]
+        self.assertIn("Payment confirmed: $25 credited to <@77>'s SiN checking account", message)
+        self.assertIn("Your available SiN bank balance: $75", message)
+        self.assertIn("Reference: `9002`", message)
+        self.assertIn("No FS25 farm balance was changed", message)
+        self.assertTrue(interaction.followup.send.await_args.kwargs["ephemeral"])
+        self.assertIn("Memo: seed", player.send.await_args.args[0])
+
+        player.send.reset_mock()
+        self.bot.bank.pay_player.return_value["new"] = False
+        await command.callback(interaction, player, 25, "seed")
+        player.send.assert_not_awaited()
+
+        self.bot.bank.pay_player.return_value["recipient_verified"] = False
+        with self.assertRaisesRegex(ValueError, "could not be confirmed"):
+            await command.callback(interaction, player, 25, "seed")
+        player.send.assert_not_awaited()
+
+    async def test_pay_rejects_bot_recipient_before_wallet_mutation(self):
+        interaction = MagicMock()
+        interaction.response.defer = AsyncMock()
+        self.bot.bank.pay_player = MagicMock()
+        with self.assertRaisesRegex(ValueError, "not a bot"):
+            await self.bot.tree.get_command("pay").callback(
+                interaction, SimpleNamespace(id=77, bot=True), 25, "seed")
+        self.bot.bank.pay_player.assert_not_called()
+
+    async def test_pay_recipient_dm_failure_does_not_report_payment_failure(self):
+        interaction = MagicMock()
+        interaction.id = 9003
+        interaction.user.id = 42
+        interaction.user.mention = "<@42>"
+        interaction.response.defer = AsyncMock()
+        interaction.followup.send = AsyncMock()
+        response = MagicMock(status=403, reason="Forbidden")
+        player = SimpleNamespace(id=77, bot=False, mention="<@77>",
+                                 send=AsyncMock(side_effect=discord.Forbidden(response, "DM blocked")))
+        self.bot.bank.pay_player = MagicMock(return_value={
+            "state": "completed", "new": True, "recipient_verified": True,
+            "payment_reference": "9003", "available_balance": 75})
+
+        await self.bot.tree.get_command("pay").callback(interaction, player, 25, "seed")
+
+        message = interaction.followup.send.await_args.args[0]
+        self.assertIn("Payment confirmed: $25 credited", message)
+        self.assertIn("DM could not be delivered; their SiN account was still credited", message)
 
     async def test_balance_shows_latest_definitive_bank_outcome_when_dm_unavailable(self):
         interaction = MagicMock()

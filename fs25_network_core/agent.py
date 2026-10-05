@@ -236,6 +236,7 @@ class PairingAgent:
             raise ValueError("invalid game snapshot")
         farms = {}
         farm_balances = {}
+        farm_asset_values = {}
         for node in root.findall("./farms/farm"):
             if node.get("farmId") is not None:
                 farm_id = node.get("farmId")
@@ -248,6 +249,25 @@ class PairingAgent:
                         balance = None
                     if balance is not None and math.isfinite(balance):
                         farm_balances[farm_id] = balance
+                asset_values = {}
+                for kind, prefix in (("structures", "structure"), ("vehicles", "vehicle")):
+                    raw_value = node.get(prefix + "SellValue")
+                    raw_count = node.get(prefix + "Count")
+                    raw_unpriced = node.get(prefix + "Unpriced")
+                    raw_fallback = node.get(prefix + "Fallback", "0")
+                    try:
+                        value = float(raw_value)
+                        count = int(raw_count)
+                        unpriced = int(raw_unpriced)
+                        fallback = int(raw_fallback)
+                    except (TypeError, ValueError):
+                        continue
+                    if (math.isfinite(value) and value >= 0 and count >= 0
+                            and 0 <= unpriced <= count and 0 <= fallback <= count - unpriced):
+                        asset_values[kind] = {"sell_value": value, "count": count,
+                                              "unpriced": unpriced, "fallback": fallback}
+                if asset_values:
+                    farm_asset_values[farm_id] = asset_values
         players = {}
         for node in root.findall("./players/player"):
             unique = node.get("uniqueId")
@@ -255,16 +275,28 @@ class PairingAgent:
                 players[unique] = {"name": node.get("name", ""), "user_id": node.get("userId"),
                                    "farm_id": int(node.get("farmId", "0")), "connected": True}
         farmlands = {}
+        farmland_prices = {}
         for node in root.findall("./farmlands/farmland"):
             if node.get("id") is not None:
-                farmlands[node.get("id")] = int(node.get("farmId", "0"))
+                farmland_id = node.get("id")
+                farmlands[farmland_id] = int(node.get("farmId", "0"))
+                raw_price = node.get("price")
+                try:
+                    price = float(raw_price)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(price) and price >= 0:
+                    farmland_prices[farmland_id] = price
         payload = {"source": "game", "session": root.get("session", ""),
                 "runtime_generation": int(root.get("runtimeGeneration", "0")),
                 "sequence": int(root.get("sequence", "0")),
                 "savegame_index": int(root.get("savegameIndex", "0")),
                 "world_id": root.get("worldId", ""), "map_id": root.get("mapId", ""),
                 "farms": farms, "farm_balances": farm_balances,
-                "players": players, "farmlands": farmlands}
+                "farm_asset_values": farm_asset_values,
+                "players": players, "farmlands": farmlands,
+                "farmland_prices": farmland_prices,
+                "farmland_price_source_ready": root.get("farmlandPriceSourceReady") == "true"}
         optional_numbers = (("currentMonth", "current_month", int),
                             ("currentDay", "current_day", int),
                             ("dayTimeMinutes", "day_time_minutes", int),

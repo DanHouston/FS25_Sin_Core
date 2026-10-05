@@ -2,6 +2,7 @@
 from datetime import datetime, timezone
 import hashlib
 import math
+import re
 
 from .admin_manager import AdminManager
 from .world_generation import WorldGenerationRegistry
@@ -41,6 +42,18 @@ class BankingEngine:
         relationship.  Wallet activity and pending operations are never used
         as a balance proxy.
         """
+        snapshot, farm_id = self._authoritative_farm_snapshot(
+            discord_id, server_id, save_id, world_id)
+        if snapshot is None:
+            return None
+        balances = snapshot.get("farm_balances")
+        if not isinstance(balances, dict):
+            return None
+        return self._money_value(balances.get(str(farm_id), balances.get(farm_id)),
+                                 allow_negative=True)
+
+    def _authoritative_farm_snapshot(self, discord_id, server_id, save_id, world_id=None):
+        """Return only the active world's latest game snapshot for this manager."""
         active_world = self._world_id(server_id, save_id, world_id)
         link = self.admin.lookup(str(discord_id), server_id, save_id, world_id=active_world)
         query = {"server_key": str(server_id), "save_key": str(save_id), "source": "game"}
@@ -48,22 +61,109 @@ class BankingEngine:
             query["world_id"] = str(active_world)
         snapshot = self.db.server_snapshots.find_one(query, sort=[("received_at", -1)])
         if not isinstance(snapshot, dict):
-            return None
+            return None, None
         farms = snapshot.get("farms")
         farm_id = link.get("farm_id")
         if not isinstance(farms, dict) or (str(farm_id) not in farms and farm_id not in farms):
+            return None, None
+        return snapshot, farm_id
+
+    @staticmethod
+    def _money_value(raw, *, allow_negative=False):
+        if raw is None or isinstance(raw, bool):
             return None
-        balances = snapshot.get("farm_balances")
-        if not isinstance(balances, dict):
-            return None
-        raw = balances.get(str(farm_id), balances.get(farm_id))
         try:
             value = float(raw)
         except (TypeError, ValueError):
             return None
-        if not math.isfinite(value):
+        if not math.isfinite(value) or (not allow_negative and value < 0):
             return None
         return value
+
+    def equity_summary(self, discord_id, server_id=None, save_id=None, world_id=None):
+        """Read one manager's checking and live farm resale values, never estimates."""
+        result = {"checking_balance": int(self.balance(discord_id) or 0),
+                  "game_balance": None, "land_value": None,
+                  "structure_value": None, "vehicle_value": None,
+                  "structure_fallback_count": 0,
+                  "total": None, "farm_name": None, "snapshot_at": None,
+                  "unavailable": {"total": "one or more game values are unavailable"}}
+        if not server_id or not save_id:
+            result["unavailable"].update({name: "no game context selected" for name in
+                                          ("game_balance", "land_value", "structure_value", "vehicle_value")})
+            return result
+        try:
+            snapshot, farm_id = self._authoritative_farm_snapshot(
+                discord_id, server_id, save_id, world_id)
+        except ValueError:
+            snapshot, farm_id = None, None
+        if snapshot is None:
+            result["unavailable"].update({name: "no current, verified farm snapshot" for name in
+                                          ("game_balance", "land_value", "structure_value", "vehicle_value")})
+            return result
+
+        received_at = snapshot.get("received_at")
+        if not isinstance(received_at, datetime):
+            result["unavailable"].update({name: "game snapshot timestamp unavailable" for name in
+                                          ("game_balance", "land_value", "structure_value", "vehicle_value")})
+            return result
+        observed_at = received_at.replace(tzinfo=timezone.utc) if received_at.tzinfo is None else received_at
+        result["snapshot_at"] = observed_at
+        if (datetime.now(timezone.utc) - observed_at).total_seconds() > 120:
+            result["unavailable"].update({name: "game snapshot is older than two minutes" for name in
+                                          ("game_balance", "land_value", "structure_value", "vehicle_value")})
+            return result
+        result["farm_name"] = (snapshot["farms"].get(str(farm_id),
+                               snapshot["farms"].get(farm_id)))
+        balances = snapshot.get("farm_balances")
+        result["game_balance"] = self._money_value(
+            balances.get(str(farm_id), balances.get(farm_id)) if isinstance(balances, dict) else None,
+            allow_negative=True)
+        if result["game_balance"] is None:
+            result["unavailable"]["game_balance"] = "native farm balance unavailable"
+
+        ownership = snapshot.get("farmlands")
+        prices = snapshot.get("farmland_prices")
+        if (snapshot.get("farmland_price_source_ready") is True
+                and isinstance(ownership, dict) and isinstance(prices, dict)):
+            prices_by_id = {str(land_id): price for land_id, price in prices.items()}
+            owned_ids = [str(land_id) for land_id, owner in ownership.items()
+                         if str(owner) == str(farm_id)]
+            values = [self._money_value(prices_by_id.get(land_id)) for land_id in owned_ids]
+            if all(value is not None for value in values):
+                result["land_value"] = sum(values)
+            else:
+                result["unavailable"]["land_value"] = "one or more owned parcels lack a native price"
+        else:
+            result["unavailable"]["land_value"] = "native farmland prices unavailable"
+
+        assets = snapshot.get("farm_asset_values")
+        farm_assets = (assets.get(str(farm_id), assets.get(farm_id))
+                       if isinstance(assets, dict) else None)
+        for kind, result_key in (("structures", "structure_value"), ("vehicles", "vehicle_value")):
+            record = farm_assets.get(kind) if isinstance(farm_assets, dict) else None
+            value = self._money_value(record.get("sell_value")) if isinstance(record, dict) else None
+            count = record.get("count") if isinstance(record, dict) else None
+            unpriced = record.get("unpriced") if isinstance(record, dict) else None
+            fallback = record.get("fallback", 0) if isinstance(record, dict) else 0
+            if (value is not None and type(count) is int and type(unpriced) is int
+                    and type(fallback) is int and count >= 0 and 0 <= unpriced <= count
+                    and 0 <= fallback <= count - unpriced):
+                if unpriced == 0:
+                    result[result_key] = value
+                    if kind == "structures":
+                        result["structure_fallback_count"] = fallback
+                else:
+                    result["unavailable"][result_key] = f"{unpriced} of {count} assets lack a native sell price"
+            else:
+                result["unavailable"][result_key] = "native resale valuation unavailable"
+
+        parts = ("checking_balance", "game_balance", "land_value", "structure_value", "vehicle_value")
+        if all(result[name] is not None for name in parts):
+            result["total"] = sum(result[name] for name in parts)
+        else:
+            result["unavailable"]["total"] = "one or more game values are unavailable"
+        return result
 
     def account_summary(self, discord_id, server_id=None, save_id=None, world_id=None):
         """Return central wallet state and, when proven, native FS25 money."""
@@ -95,7 +195,7 @@ class BankingEngine:
         }
 
     def recent_operation_status(self, discord_id, server_id, save_id, world_id=None):
-        """Show the last request in this world even when Discord DMs are blocked."""
+        """Show the last request when its ephemeral reply is no longer editable."""
         query = {"discord_id": str(discord_id), "server_id": str(server_id),
                  "save_id": str(save_id)}
         active_world = self._world_id(server_id, save_id, world_id)
@@ -151,10 +251,13 @@ class BankingEngine:
         def transfer(session):
             existing = self.db.wallet_transfers.find_one({"_id": transaction_id}, session=session)
             if existing:
-                expected = (existing.get("payer_id"), existing.get("payee_id"), existing.get("amount"))
-                if expected != (payer_id, payee_id, amount):
+                expected = (existing.get("payer_id"), existing.get("payee_id"),
+                            existing.get("amount"), existing.get("reason"))
+                if expected != (payer_id, payee_id, amount, reason):
                     raise ValueError("Wallet transaction ID was reused with different details")
-                return existing.get("state", "completed")
+                if existing.get("state") != "completed":
+                    raise ValueError("Existing wallet transfer is not complete")
+                return "completed"
 
             result = self.db.wallets.update_one(
                 {"_id": payer_id, "balance": {"$gte": amount}},
@@ -174,6 +277,48 @@ class BankingEngine:
             return "completed"
 
         return transfer(session) if session is not None else self.database.atomic(transfer)
+
+    def pay_player(self, payment_id, payer_id, payee_id, amount, memo):
+        """Pay another linked player using only central SiN wallet funds."""
+        amount_units(amount)
+        payment_id = str(payment_id or "").strip()
+        payer_id, payee_id = str(payer_id), str(payee_id)
+        memo = str(memo or "").strip()
+        if not payment_id:
+            raise ValueError("A stable payment ID is required")
+        if payer_id == payee_id:
+            raise ValueError("You cannot pay yourself")
+        if not memo or len(memo) > 200 or re.search(r"[\x00-\x1f\x7f]", memo):
+            raise ValueError("Memo must contain 1-200 characters without control characters")
+
+        def pay(session):
+            for discord_id, label in ((payer_id, "Your"), (payee_id, "Recipient's")):
+                if not self.db.game_identities.find_one({"discord_id": discord_id}, session=session):
+                    raise ValueError(f"{label} Discord account is not linked to a Farming Simulator player")
+            transfer_id = f"player-pay:{payment_id}"
+            is_new = not self.db.wallet_transfers.find_one({"_id": transfer_id}, session=session)
+            recipient_before = self.db.wallets.find_one({"_id": payee_id}, session=session) if is_new else None
+            previous_balance = (recipient_before or {}).get("balance", 0)
+            if is_new and type(previous_balance) is not int:
+                raise ValueError("Recipient account balance could not be verified")
+            state = self.transfer_wallet(
+                transfer_id, payer_id, payee_id, amount,
+                f"player payment: {memo}", session=session)
+            if state != "completed":
+                raise ValueError("Payment did not complete")
+            recipient_after = self.db.wallets.find_one({"_id": payee_id}, session=session)
+            recipient_balance = (recipient_after or {}).get("balance")
+            if (type(recipient_balance) is not int or
+                    (is_new and recipient_balance != previous_balance + amount)):
+                raise ValueError("Recipient credit could not be verified; contact an operator before retrying")
+            wallet = self.db.wallets.find_one({"_id": payer_id}, session=session)
+            available_balance = (wallet or {}).get("balance")
+            if type(available_balance) is not int:
+                raise ValueError("Sender balance could not be verified; contact an operator before retrying")
+            return {"state": state, "new": is_new, "recipient_verified": True,
+                    "payment_reference": payment_id, "available_balance": available_balance}
+
+        return self.database.atomic(pay)
 
     def _project_wallet(self, discord_id, amount, session=None):
         self.db.wallets.update_one({"_id": str(discord_id)}, {"$inc": {"balance": amount}},
