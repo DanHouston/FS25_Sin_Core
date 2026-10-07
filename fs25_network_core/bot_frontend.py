@@ -4,6 +4,7 @@ import io
 import json
 import logging
 import os
+import time
 from collections.abc import Mapping
 
 import discord
@@ -19,13 +20,16 @@ from .community import CommunityApplications
 from .server_registry import ServerRegistry
 from .activity import ActivityPublisher
 from .bank_notifications import BankNotificationPublisher
+from .bot_health import BotHealthReporter, runtime_dir, singleton_lock
 from .server_status import ServerStatusPublisher
 from .activity_telemetry import ActivityTelemetryProcessor
 from .business_workflows import (ChatService, ContractService, InvoiceService,
                                   CommunityEventService, TransferService)
 from .farm_lifecycle import FarmLifecycle, SYSTEM_FARM_NAME, FIRST_FIELD_MAX_PRICE
+from .vehicle_inventory import VehicleInventoryService
 from .map_service import MapService, MapStore, MapUnavailable, MapValidationError
-from .mod_suggestions import prepare_suggestion
+from .mod_suggestions import (ModSuggestionModal, build_suggestion_post,
+                              ensure_review_tag, prepare_suggestion, update_vote_title)
 
 
 class DiscordSetupError(RuntimeError):
@@ -413,6 +417,7 @@ class NetworkBot(discord.Client):
         intents.guilds = True
         intents.members = True
         intents.messages = True
+        intents.reactions = True
         intents.message_content = True
         super().__init__(intents=intents)
         self.bank, self.servers = bank, servers
@@ -426,12 +431,14 @@ class NetworkBot(discord.Client):
         self.community = CommunityApplications(bank.database)
         self.server_registry = ServerRegistry(bank.database)
         self.farm_lifecycle = FarmLifecycle(bank.database, self.authorization)
+        self.vehicle_inventory = VehicleInventoryService(bank.database)
         self.activity_publisher = ActivityPublisher(self, bank.database)
         self.bank_notification_publisher = BankNotificationPublisher(self, bank)
         # This is a durable one-card-per-server projection, not an activity
         # feed.  Its message IDs are stored in Mongo so gateway reconnects and
         # process restarts edit the same cards.
         self.server_status_publisher = ServerStatusPublisher(self, bank.database)
+        self.health_reporter = BotHealthReporter(self, os.environ.get("FS25_JIN_HEALTH_FILE"))
         self.telemetry = ActivityTelemetryProcessor(bank.database)
         self.chat = ChatService(bank.database)
         self.contracts = ContractService(bank.database)
@@ -556,6 +563,15 @@ class NetworkBot(discord.Client):
         async def apply(interaction, nickname: str, farm_name: str):
             record = await asyncio.to_thread(self.community.apply, str(interaction.user.id), nickname, farm_name)
             await interaction.response.send_message(f"Community application pending. Requested SiN display name: **{record['server_nickname']}**", ephemeral=True)
+
+        @self.tree.command(name="suggest_mod", description="Suggest a mod using the SiN template")
+        @app_commands.check(channel_check)
+        async def suggest_mod(interaction: discord.Interaction):
+            if not self.channels.get("mod_suggestions"):
+                await interaction.response.send_message(
+                    "The mod-suggestions forum is not configured yet.", ephemeral=True)
+                return
+            await interaction.response.send_modal(ModSuggestionModal(self._submit_mod_suggestion))
 
         @self.tree.command(name="application_pending", description="Staff: list pending community applications")
         @app_commands.check(channel_check)
@@ -1055,11 +1071,18 @@ class NetworkBot(discord.Client):
                 summary_kwargs = {"server_id": context.get("server_key"),
                                   "save_id": context.get("save_key"),
                                   "world_id": context.get("world_id")}
-            summary = await asyncio.to_thread(
-                self.bank.account_summary, str(interaction.user.id), **summary_kwargs)
+            summary = await self._balance_summary_for_display(
+                str(interaction.user.id), summary_kwargs)
             if summary["game_balance"] is None:
                 reason = summary.get("game_balance_reason") or "no authoritative FS25 farm balance"
-                game_balance = f"unavailable ({reason})"
+                if reason == "updating after recent transfer":
+                    verified = summary.get("last_verified_game_balance")
+                    game_balance = (
+                        f"updating after transfer (last verified ${verified:,.0f}; "
+                        "snapshot not caught up—try again shortly)"
+                        if verified is not None else "updating after transfer—try again shortly")
+                else:
+                    game_balance = f"unavailable ({reason})"
             else:
                 game_balance = f"${summary['game_balance']:,.0f}"
             recent_lines = []
@@ -1122,6 +1145,48 @@ class NetworkBot(discord.Client):
                          "Loans, crops, inventory, and pending bank transfers are not included.")
             await interaction.followup.send("\n".join(lines), ephemeral=True,
                                             allowed_mentions=discord.AllowedMentions.none())
+
+        @self.tree.command(name="vehicles", description="List your verified farm's live FS25 vehicles")
+        @app_commands.check(channel_check)
+        async def vehicles(interaction: discord.Interaction, server: str | None = None,
+                           page: app_commands.Range[int, 1, 500] = 1):
+            await interaction.response.defer(ephemeral=True)
+            try:
+                context = await asyncio.to_thread(
+                    self.resolve_identity_context, str(interaction.user.id), server, "reconcile")
+                inventory = await asyncio.to_thread(
+                    self.vehicle_inventory.for_manager, str(interaction.user.id),
+                    context["server_key"], context["save_key"], context["world_id"])
+            except ValueError as error:
+                await interaction.followup.send(str(error), ephemeral=True)
+                return
+            rows = inventory["vehicles"]
+            page_size = 10
+            total_pages = max(1, (len(rows) + page_size - 1) // page_size)
+            if page > total_pages:
+                await interaction.followup.send(
+                    f"That farm has {total_pages} vehicle page(s).", ephemeral=True)
+                return
+            first = (page - 1) * page_size
+            lines = [f"**Farm vehicles — {discord.utils.escape_markdown(str(inventory['farm_name'] or 'verified farm'))}**",
+                     f"Server: {discord.utils.escape_markdown(context['server_name'])} | "
+                     f"{len(rows)} live vehicle(s) | page {page}/{total_pages}"]
+            for row in rows[first:first + page_size]:
+                name = row.get("name") or row["filename"].rsplit("/", 1)[-1]
+                label = discord.utils.escape_markdown(name[:70])
+                value = row.get("sell_value")
+                price = f"${value:,.0f}" if value is not None else "sell-back unavailable"
+                vehicle_id = discord.utils.escape_markdown(row["unique_id"][-36:])
+                lines.append(f"• {label} — {price} — ID suffix `{vehicle_id}`")
+            if not rows:
+                lines.append("No owned vehicles are currently loaded for this farm.")
+            lines.append("Live inventory only; no garage deposit or transfer has occurred.")
+            await interaction.followup.send("\n".join(lines), ephemeral=True,
+                                            allowed_mentions=discord.AllowedMentions.none())
+
+        @vehicles.autocomplete("server")
+        async def vehicles_server_autocomplete(interaction: discord.Interaction, current: str):
+            return await server_choices(interaction, current)
 
         @self.tree.command(name="deposit", description="Queue a game-to-SiN bank deposit")
         @app_commands.check(channel_check)
@@ -1199,6 +1264,38 @@ class NetworkBot(discord.Client):
                 f"Payment confirmed: ${amount:,} credited to {player.mention}'s SiN checking account. "
                 f"Memo: {safe_memo}\nYour available SiN bank balance: ${result['available_balance']:,}. "
                 f"Reference: `{reference}`. No FS25 farm balance was changed.{notice}",
+                ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+        @self.tree.command(name="admin_pay", description="Staff: credit a player's SiN checking account")
+        @app_commands.check(channel_check)
+        @app_commands.default_permissions(administrator=True)
+        async def admin_pay(interaction: discord.Interaction, player: discord.Member,
+                            amount: app_commands.Range[int, 1, 1_000_000_000], memo: str):
+            staff_check(interaction)
+            if player.bot:
+                raise ValueError("Choose a player, not a bot")
+            await interaction.response.defer(ephemeral=True)
+            result = await asyncio.to_thread(
+                self.bank.admin_pay_player, str(interaction.id), str(interaction.user.id),
+                str(player.id), amount, memo)
+            if result.get("state") != "completed" or result.get("recipient_verified") is not True:
+                raise ValueError("Admin payment could not be confirmed; contact an operator before retrying")
+            safe_memo = discord.utils.escape_markdown(
+                discord.utils.escape_mentions(memo.strip()))
+            reference = result["payment_reference"]
+            notice = ""
+            if result["new"]:
+                try:
+                    await player.send(
+                        f"SiN Administration credited ${amount:,} to your SiN checking account.\n"
+                        f"Memo: {safe_memo}\nPayment reference: `{reference}`.",
+                        allowed_mentions=discord.AllowedMentions.none())
+                except (discord.Forbidden, discord.HTTPException):
+                    notice = " The recipient's DM could not be delivered; their account was still credited."
+            await interaction.followup.send(
+                f"Admin payment confirmed: ${amount:,} credited to {player.mention}'s SiN checking account. "
+                f"Memo: {safe_memo}\nReference: `{reference}`. "
+                f"No personal SiN checking or FS25 farm balance was debited.{notice}",
                 ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
         @self.tree.command(name="chat_send", description="Staff: send a message to an FS25 server chat")
@@ -1809,6 +1906,57 @@ class NetworkBot(discord.Client):
             if channel_id and message_id:
                 self.add_view(CommunityEventView(self, record["event_id"]), message_id=int(message_id))
 
+    async def _balance_summary_for_display(self, discord_id, summary_kwargs,
+                                           max_wait_seconds=26, poll_seconds=2):
+        """Wait briefly for a game snapshot after a verified money transfer."""
+        deadline = time.monotonic() + max_wait_seconds
+        summary = await asyncio.to_thread(self.bank.account_summary,
+                                          discord_id, **summary_kwargs)
+        while summary.get("game_balance_reason") == "updating after recent transfer":
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(poll_seconds, remaining))
+            summary = await asyncio.to_thread(self.bank.account_summary,
+                                              discord_id, **summary_kwargs)
+        return summary
+
+    async def _submit_mod_suggestion(self, interaction, **fields):
+        if interaction.guild_id != self.guild.id:
+            await interaction.response.send_message(
+                "Use this form in the configured SiN Discord server.", ephemeral=True)
+            return
+        try:
+            title, content = build_suggestion_post(
+                **fields, submitter_id=interaction.user.id)
+        except (ValueError, TypeError) as error:
+            await interaction.response.send_message(str(error), ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        forum_id = self.channels.get("mod_suggestions")
+        try:
+            if not forum_id:
+                raise ValueError("mod-suggestions forum is not configured")
+            forum = await self.fetch_channel(forum_id)
+            if not isinstance(forum, discord.ForumChannel):
+                raise ValueError("configured mod-suggestions channel is not a forum")
+            review_tag = await ensure_review_tag(forum)
+            created = await forum.create_thread(
+                name=title, content=content, applied_tags=[review_tag],
+                allowed_mentions=discord.AllowedMentions.none(),
+                reason=f"SiN mod suggestion submitted by Discord user {interaction.user.id}")
+        except (discord.DiscordException, ValueError) as error:
+            logging.warning("Mod suggestion submission unconfirmed user=%s reason=%s",
+                            interaction.user.id, error)
+            await interaction.followup.send(
+                "I couldn't confirm the suggestion was posted. Check #mod-suggestions before retrying.",
+                ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"Suggestion posted in #mod-suggestions: {created.thread.jump_url}", ephemeral=True)
+        await self._handle_mod_suggestion(created.thread)
+
     async def _handle_mod_suggestion(self, thread):
         forum_id = self.channels.get("mod_suggestions")
         if not forum_id or int(getattr(thread, "parent_id", 0) or 0) != forum_id:
@@ -1826,6 +1974,8 @@ class NetworkBot(discord.Client):
                 # returns a current Thread from Discord's API.
                 current = await self.fetch_channel(thread.id)
                 thread_id, changed = await prepare_suggestion(current, forum, self.user)
+                starter = await current.fetch_message(current.id)
+                await update_vote_title(current, starter)
                 if changed:
                     logging.info("Mod suggestion prepared thread=%s", thread_id)
             except (discord.DiscordException, ValueError) as error:
@@ -1837,6 +1987,50 @@ class NetworkBot(discord.Client):
 
     async def on_thread_create(self, thread):
         await self._handle_mod_suggestion(thread)
+
+    async def on_thread_update(self, before, after):
+        """Refresh the forum card when a moderator changes suggestion tags."""
+        forum_id = self.channels.get("mod_suggestions")
+        if (not forum_id
+                or int(getattr(after, "parent_id", 0) or 0) != forum_id):
+            return
+        before_tags = tuple(tag.id for tag in before.applied_tags)
+        after_tags = tuple(tag.id for tag in after.applied_tags)
+        if before_tags != after_tags:
+            await self._refresh_mod_suggestion_votes(after.id, after.guild.id)
+
+    async def _refresh_mod_suggestion_votes(self, thread_id, guild_id=None):
+        if guild_id is not None and int(guild_id) != int(self.guild.id):
+            return
+        forum_id = self.channels.get("mod_suggestions")
+        if not forum_id:
+            return
+        async with self._mod_suggestion_lock:
+            try:
+                thread = await self.fetch_channel(thread_id)
+                if int(getattr(thread, "parent_id", 0) or 0) != forum_id:
+                    return
+                starter = await thread.fetch_message(thread.id)
+                await update_vote_title(thread, starter)
+            except discord.DiscordException as error:
+                logging.warning("Mod suggestion vote refresh failed thread=%s reason=%s",
+                                thread_id, error)
+
+    async def on_raw_reaction_add(self, payload):
+        if payload.message_id == payload.channel_id:
+            await self._refresh_mod_suggestion_votes(payload.channel_id, payload.guild_id)
+
+    async def on_raw_reaction_remove(self, payload):
+        if payload.message_id == payload.channel_id:
+            await self._refresh_mod_suggestion_votes(payload.channel_id, payload.guild_id)
+
+    async def on_raw_reaction_clear(self, payload):
+        if payload.message_id == payload.channel_id:
+            await self._refresh_mod_suggestion_votes(payload.channel_id, payload.guild_id)
+
+    async def on_raw_reaction_clear_emoji(self, payload):
+        if payload.message_id == payload.channel_id:
+            await self._refresh_mod_suggestion_votes(payload.channel_id, payload.guild_id)
 
     async def on_message(self, message):
         """Prepare forum starters, then bridge configured Activity-channel text.
@@ -1929,12 +2123,23 @@ class NetworkBot(discord.Client):
         self.activity_publisher.start()
         self.bank_notification_publisher.start()
         self.server_status_publisher.start()
+        self.health_reporter.start()
+        guild = self.get_guild(self.guild.id)
+        if guild is not None and self.channels.get("mod_suggestions"):
+            for thread in guild.threads:
+                if thread.parent_id == self.channels["mod_suggestions"]:
+                    await self._refresh_mod_suggestion_votes(thread.id, guild.id)
 
     async def on_resumed(self):
         logging.info("Discord gateway resumed; refreshing command registry")
+        self.activity_publisher.start()
+        self.bank_notification_publisher.start()
+        self.server_status_publisher.start()
+        self.health_reporter.start()
         await self._sync_command_registry("gateway_resumed")
 
     async def close(self):
+        await self.health_reporter.stop()
         await self.activity_publisher.stop()
         await self.bank_notification_publisher.stop()
         await self.server_status_publisher.stop()
@@ -2006,8 +2211,9 @@ def main():
             logging.info("[SiN DB] environment=%s community=%s authorization=%s banking=%s",
                          server_id, database.name, database.name, database.name)
     try:
-        NetworkBot(BankingEngine(database), servers, int(guild_id), operator_role_ids, channels, authorizations,
-                   sin_member_role_id, os.environ.get("DISCORD_TIMEZONE", "UTC")).run(token, log_handler=None)
+        with singleton_lock(runtime_dir() / "bot.lock"):
+            NetworkBot(BankingEngine(database), servers, int(guild_id), operator_role_ids, channels, authorizations,
+                       sin_member_role_id, os.environ.get("DISCORD_TIMEZONE", "UTC")).run(token, log_handler=None)
     except DiscordSetupError as error:
         raise SystemExit(str(error)) from None
 

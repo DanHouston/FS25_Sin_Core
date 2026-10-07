@@ -98,10 +98,13 @@ class ProductionPolicyTests(unittest.TestCase):
         self.assertEqual(rates(small[0]), rates(small[1]))
         self.assertEqual(rates(large[0]), rates(large[1]))
         self.assertEqual(rates(small[0]), {
-            "hay": "4000", "chaffSilage": "4000", "grassSilage": "4000",
-            "haySilage": "4000", "strawSilage": "4000", "Pigfood": "1.5",
+            "hay": "4000", "chaffSilage": "16000", "grassSilage": "16000",
+            "haySilage": "16000", "strawSilage": "16000", "Pigfood": "1.5",
             "forage mixer": "2.5"})
-        self.assertIn("forage mixer", rates(large[0]))
+        self.assertEqual(rates(large[0]), {
+            "hay": "5000", "chaffSilage": "20000", "grassSilage": "20000",
+            "haySilage": "20000", "strawSilage": "20000", "Pigfood": "2",
+            "forage mixer": "3.5"})
 
     def test_runtime_recipe_policy_is_explicit_and_narrow(self):
         source = (MOD / "scripts/SiNProductionPolicy.lua").read_text(encoding="utf-8")

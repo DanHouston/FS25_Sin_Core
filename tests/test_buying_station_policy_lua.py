@@ -127,6 +127,78 @@ class BuyingStationPolicyLuaTests(unittest.TestCase):
         ''')
         self.assertFalse(lua.eval('SiNBuyingStationPolicy:authorizeIncomingPurchase({storeItem=storeItem}, {user=admin})'))
 
+    def test_used_equipment_yards_placeables_are_admin_only(self):
+        lua = runtime()
+        lua.execute(r'''
+        g_currentMission = {getIsServer=function() return true end,
+            userManager={getUserByConnection=function(_, connection) return connection.user end}}
+        ordinary = {getIsMasterUser=function() return false end}
+        admin = {getIsMasterUser=function() return true end}
+        ''')
+        for path in (
+            "xml/UsedEquipmentYard.xml", "xml/SaleZone.xml", "xml/YardFence.xml",
+            "xml/smallAdBoard.xml", "xml/largeAdBoard.xml", "xml/plotBoard.xml",
+        ):
+            with self.subTest(path=path):
+                lua.globals().itemPath = path
+                lua.execute(r'''
+                storeItem = {customEnvironment="FS25_UsedEquipmentYards",
+                    xmlFilename="C:/mods/FS25_UsedEquipmentYards/" .. itemPath}
+                denied = {storeItem=storeItem}
+                ''')
+                self.assertFalse(lua.eval('SiNBuyingStationPolicy:authorizeIncomingPurchase(denied, {user=ordinary})'))
+                self.assertTrue(lua.eval('denied.__sinBuyingStationPurchaseDenied'))
+                self.assertTrue(lua.eval('SiNBuyingStationPolicy:authorizeIncomingPurchase({storeItem=storeItem}, {user=admin})'))
+
+    def test_yard_policy_matches_exact_mod_and_path(self):
+        lua = runtime()
+        lua.execute(r'''
+        g_currentMission = {getIsServer=function() return true end,
+            userManager={getUserByConnection=function(_, connection) return connection.user end}}
+        ordinary = {getIsMasterUser=function() return false end}
+        ''')
+        for environment, path in (
+            ("OtherMod", "xml/UsedEquipmentYard.xml"),
+            ("FS25_UsedEquipmentYards", "xml/OtherPlaceable.xml"),
+            ("FS25_UsedEquipmentYards", "UsedEquipmentYard.xml"),
+        ):
+            with self.subTest(environment=environment, path=path):
+                lua.globals().environment = environment
+                lua.globals().path = path
+                lua.execute('data = {storeItem={customEnvironment=environment, xmlFilename=path}}')
+                self.assertTrue(lua.eval('SiNBuyingStationPolicy:authorizeIncomingPurchase(data, {user=ordinary})'))
+                self.assertFalse(lua.eval('data.__sinBuyingStationPurchaseDenied == true'))
+
+    def test_yard_restriction_remains_when_buying_station_policy_is_disabled(self):
+        lua = runtime()
+        lua.execute(r'''
+        SiNBuyingStationPolicy.config.enabled = false
+        g_currentMission = {getIsServer=function() return true end,
+            userManager={getUserByConnection=function(_, connection) return connection.user end}}
+        ordinary = {getIsMasterUser=function() return false end}
+        yard = {storeItem={customEnvironment="FS25_UsedEquipmentYards",
+            xmlFilename="FS25_UsedEquipmentYards/xml/UsedEquipmentYard.xml"}}
+        buying = {storeItem={customEnvironment="FS25_Multifruit_Buying_Station",
+            xmlFilename="FS25_Multifruit_Buying_Station/xmls/multifruitstation_real.xml"}}
+        ''')
+        self.assertFalse(lua.eval('SiNBuyingStationPolicy:authorizeIncomingPurchase(yard, {user=ordinary})'))
+        self.assertTrue(lua.eval('SiNBuyingStationPolicy:authorizeIncomingPurchase(buying, {user=ordinary})'))
+
+    def test_yard_restriction_can_be_disabled_without_disabling_buying_station_policy(self):
+        lua = runtime()
+        lua.execute(r'''
+        SiNBuyingStationPolicy.config.usedEquipmentYards.enabled = false
+        g_currentMission = {getIsServer=function() return true end,
+            userManager={getUserByConnection=function(_, connection) return connection.user end}}
+        ordinary = {getIsMasterUser=function() return false end}
+        yard = {storeItem={customEnvironment="FS25_UsedEquipmentYards",
+            xmlFilename="FS25_UsedEquipmentYards/xml/UsedEquipmentYard.xml"}}
+        buying = {storeItem={customEnvironment="FS25_Multifruit_Buying_Station",
+            xmlFilename="FS25_Multifruit_Buying_Station/xmls/multifruitstation_real.xml"}}
+        ''')
+        self.assertTrue(lua.eval('SiNBuyingStationPolicy:authorizeIncomingPurchase(yard, {user=ordinary})'))
+        self.assertFalse(lua.eval('SiNBuyingStationPolicy:authorizeIncomingPurchase(buying, {user=ordinary})'))
+
     def test_installed_server_guard_marks_remote_non_admin_request_invalid(self):
         lua = runtime()
         lua.execute(r'''
@@ -157,12 +229,51 @@ class BuyingStationPolicyLuaTests(unittest.TestCase):
         }
         g_currentMission = {getIsServer=function() return true end,
             userManager={getUserByConnection=function(_, connection) return connection.user end}}
-        request = {storeItem={customEnvironment="FS25_Multifruit_Buying_Station",
-            xmlFilename="FS25_Multifruit_Buying_Station/xmls/multifruitstation_real.xml"}}
+        request = setmetatable({storeItem={customEnvironment="FS25_Multifruit_Buying_Station",
+            xmlFilename="FS25_Multifruit_Buying_Station/xmls/multifruitstation_real.xml"}},
+            {__index=BuyPlaceableData})
         ''')
         self.assertTrue(lua.eval("SiNBuyingStationPolicy:installHooks()"))
-        lua.execute("BuyPlaceableData:readStream(0, {user={getIsMasterUser=function() return false end}})")
-        self.assertFalse(lua.eval("BuyPlaceableData:isValid(request)"))
+        lua.execute("request:readStream(0, {user={getIsMasterUser=function() return false end}})")
+        self.assertTrue(lua.eval("request.__sinBuyingStationPurchaseDenied"))
+        self.assertFalse(lua.eval("request:isValid()"))
+
+    def test_installed_server_guard_rejects_yard_and_keeps_admin_purchase_valid(self):
+        lua = runtime()
+        lua.execute(r'''
+        Utils = {
+            appendedFunction=function(native, after)
+                return function(self, ...)
+                    local result = native(self, ...)
+                    after(self, ...)
+                    return result
+                end
+            end,
+            overwrittenFunction=function(native, replacement)
+                return function(self, ...)
+                    return replacement(self, function(object, ...) return native(object, ...) end, ...)
+                end
+            end
+        }
+        BuyPlaceableData = {
+            readStream=function() end,
+            isValid=function(data) return data.storeItem ~= nil end
+        }
+        g_currentMission = {getIsServer=function() return true end,
+            userManager={getUserByConnection=function(_, connection) return connection.user end}}
+        function makeRequest()
+            return setmetatable({storeItem={customEnvironment="FS25_UsedEquipmentYards",
+                xmlFilename="FS25_UsedEquipmentYards/xml/UsedEquipmentYard.xml"}},
+                {__index=BuyPlaceableData})
+        end
+        ''')
+        lua.eval("SiNBuyingStationPolicy:installHooks()")
+        lua.execute('ordinaryRequest = makeRequest()')
+        lua.execute('ordinaryRequest:readStream(0, {user={getIsMasterUser=function() return false end}})')
+        self.assertFalse(lua.eval('ordinaryRequest:isValid()'))
+        lua.execute('adminRequest = makeRequest()')
+        lua.execute('adminRequest:readStream(0, {user={getIsMasterUser=function() return true end}})')
+        self.assertTrue(lua.eval('adminRequest:isValid()'))
 
     def test_unrelated_placeable_purchase_is_unchanged(self):
         lua = runtime()

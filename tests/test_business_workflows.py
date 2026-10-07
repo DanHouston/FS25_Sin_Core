@@ -278,6 +278,67 @@ class BusinessWorkflowTests(unittest.TestCase):
                 engine.pay_player("interaction", "payer", "payee", 10, memo)
         self.database.atomic.assert_not_called()
 
+    def test_admin_payment_credits_only_linked_recipient_and_records_issuer(self):
+        engine = BankingEngine(self.database)
+        self.db.game_identities.find_one.return_value = {"discord_id": "payee"}
+        self.db.admin_payments.find_one.return_value = None
+        self.db.wallets.find_one.side_effect = [
+            {"_id": "payee", "balance": 40}, {"_id": "payee", "balance": 65}]
+
+        result = engine.admin_pay_player("interaction-9", "operator", "payee", 25, "  bonus  ")
+
+        self.assertEqual(result, {"state": "completed", "new": True,
+                                  "recipient_verified": True, "payment_reference": "interaction-9"})
+        self.db.wallets.update_one.assert_called_once_with(
+            {"_id": "payee"}, {"$inc": {"balance": 25}}, upsert=True, session="session")
+        ledger = self.db.ledger_entries.insert_one.call_args.args[0]
+        self.assertEqual((ledger["actor_discord_id"], ledger["amount"],
+                          ledger["transaction_type"], ledger["reference"]),
+                         ("payee", 25, "admin_payment_credit", "admin-pay:interaction-9"))
+        payment = self.db.admin_payments.insert_one.call_args.args[0]
+        self.assertEqual((payment["admin_id"], payment["payee_id"],
+                          payment["amount"], payment["memo"], payment["state"]),
+                         ("operator", "payee", 25, "bonus", "completed"))
+        self.db.wallet_transfers.insert_one.assert_not_called()
+        self.db.farm_operations.insert_one.assert_not_called()
+
+    def test_admin_payment_replay_is_idempotent_and_rejects_changed_details(self):
+        engine = BankingEngine(self.database)
+        self.db.game_identities.find_one.return_value = {"discord_id": "payee"}
+        self.db.admin_payments.find_one.return_value = {
+            "_id": "admin-pay:interaction-9", "admin_id": "operator", "payee_id": "payee",
+            "amount": 25, "memo": "bonus", "state": "completed"}
+
+        self.assertEqual(engine.admin_pay_player("interaction-9", "operator", "payee", 25, "bonus"),
+                         {"state": "completed", "new": False,
+                          "recipient_verified": True, "payment_reference": "interaction-9"})
+        self.db.wallets.update_one.assert_not_called()
+        self.db.ledger_entries.insert_one.assert_not_called()
+        with self.assertRaisesRegex(ValueError, "different details"):
+            engine.admin_pay_player("interaction-9", "operator", "payee", 26, "bonus")
+
+    def test_admin_payment_fails_closed_for_unlinked_or_unverified_recipient(self):
+        engine = BankingEngine(self.database)
+        with self.assertRaisesRegex(ValueError, "themselves"):
+            engine.admin_pay_player("interaction", "operator", "operator", 10, "bonus")
+        for memo in ("", "line\nbreak", "x" * 201):
+            with self.assertRaisesRegex(ValueError, "Memo"):
+                engine.admin_pay_player("interaction", "operator", "payee", 10, memo)
+        self.database.atomic.assert_not_called()
+
+        self.db.game_identities.find_one.return_value = None
+        with self.assertRaisesRegex(ValueError, "not linked"):
+            engine.admin_pay_player("interaction", "operator", "payee", 10, "bonus")
+        self.db.wallets.update_one.assert_not_called()
+
+        self.db.game_identities.find_one.return_value = {"discord_id": "payee"}
+        self.db.admin_payments.find_one.return_value = None
+        self.db.wallets.find_one.side_effect = [
+            {"_id": "payee", "balance": 40}, {"_id": "payee", "balance": 40}]
+        with self.assertRaisesRegex(ValueError, "credit could not be verified"):
+            engine.admin_pay_player("interaction", "operator", "payee", 10, "bonus")
+        self.db.admin_payments.insert_one.assert_not_called()
+
     def test_transfer_requires_confirmed_active_manager_role(self):
         authorization = MagicMock()
         # A real Mongo query with state=active/applied_role=farm_manager would

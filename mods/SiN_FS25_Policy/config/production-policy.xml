@@ -60,40 +60,40 @@
     <production id="FS25_BaseGame:data/placeables/mapUS/tailorUS/tailorUS.xml" purchasePrice="2455000"/>
     <production id="FS25_BaseGame:data/placeables/brandless/productionPointsSmall/tailorShop/tailorShop.xml" purchasePrice="245000"/>
 
-    <!-- American Silos Production Pack: common recipe set and tier rates. -->
+    <!-- American Silos Production Pack: 4x silage throughput; other recipes retain tier rates. -->
     <production id="FS25_AmericanSilosProductionPack:silos/staveSiloSmall.xml" purchasePrice="302500">
         <recipe id="hay" cyclesPerHour="4000"/>
-        <recipe id="chaffSilage" cyclesPerHour="4000"/>
-        <recipe id="grassSilage" cyclesPerHour="4000"/>
-        <recipe id="haySilage" cyclesPerHour="4000"/>
-        <recipe id="strawSilage" cyclesPerHour="4000"/>
+        <recipe id="chaffSilage" cyclesPerHour="16000"/>
+        <recipe id="grassSilage" cyclesPerHour="16000"/>
+        <recipe id="haySilage" cyclesPerHour="16000"/>
+        <recipe id="strawSilage" cyclesPerHour="16000"/>
         <recipe id="Pigfood" cyclesPerHour="1.5"/>
         <recipe id="forage mixer" cyclesPerHour="2.5"/>
     </production>
     <production id="FS25_AmericanSilosProductionPack:silos/steelSiloSmall.xml" purchasePrice="302500">
         <recipe id="hay" cyclesPerHour="4000"/>
-        <recipe id="chaffSilage" cyclesPerHour="4000"/>
-        <recipe id="grassSilage" cyclesPerHour="4000"/>
-        <recipe id="haySilage" cyclesPerHour="4000"/>
-        <recipe id="strawSilage" cyclesPerHour="4000"/>
+        <recipe id="chaffSilage" cyclesPerHour="16000"/>
+        <recipe id="grassSilage" cyclesPerHour="16000"/>
+        <recipe id="haySilage" cyclesPerHour="16000"/>
+        <recipe id="strawSilage" cyclesPerHour="16000"/>
         <recipe id="Pigfood" cyclesPerHour="1.5"/>
         <recipe id="forage mixer" cyclesPerHour="2.5"/>
     </production>
     <production id="FS25_AmericanSilosProductionPack:silos/staveSiloLarge.xml" purchasePrice="403000">
         <recipe id="hay" cyclesPerHour="5000"/>
-        <recipe id="chaffSilage" cyclesPerHour="5000"/>
-        <recipe id="grassSilage" cyclesPerHour="5000"/>
-        <recipe id="haySilage" cyclesPerHour="5000"/>
-        <recipe id="strawSilage" cyclesPerHour="5000"/>
+        <recipe id="chaffSilage" cyclesPerHour="20000"/>
+        <recipe id="grassSilage" cyclesPerHour="20000"/>
+        <recipe id="haySilage" cyclesPerHour="20000"/>
+        <recipe id="strawSilage" cyclesPerHour="20000"/>
         <recipe id="Pigfood" cyclesPerHour="2"/>
         <recipe id="forage mixer" cyclesPerHour="3.5"/>
     </production>
     <production id="FS25_AmericanSilosProductionPack:silos/steelSiloLarge.xml" purchasePrice="403000">
         <recipe id="hay" cyclesPerHour="5000"/>
-        <recipe id="chaffSilage" cyclesPerHour="5000"/>
-        <recipe id="grassSilage" cyclesPerHour="5000"/>
-        <recipe id="haySilage" cyclesPerHour="5000"/>
-        <recipe id="strawSilage" cyclesPerHour="5000"/>
+        <recipe id="chaffSilage" cyclesPerHour="20000"/>
+        <recipe id="grassSilage" cyclesPerHour="20000"/>
+        <recipe id="haySilage" cyclesPerHour="20000"/>
+        <recipe id="strawSilage" cyclesPerHour="20000"/>
         <recipe id="Pigfood" cyclesPerHour="2"/>
         <recipe id="forage mixer" cyclesPerHour="3.5"/>
     </production>

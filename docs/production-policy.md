@@ -41,28 +41,28 @@ Silos `forage mixer` recipe). Applying the policy is idempotent:
 the original price is retained before the one matched catalog item is updated,
 and repeated discovery does not compound the effective value.
 
-The narrow interception point is `EconomyManager:getBuyPrice`. FS25 uses that
-method when `BuyPlaceableData:updatePrice` creates its purchase data, therefore
-it feeds both construction pricing and the server-side purchase calculation.
-The hook returns the native value unchanged unless the store item’s canonical
-production ID is explicitly configured. It deliberately does not globally
-change `EconomyManager` prices, store item registration, farm balances, or
-unrelated placeables.
+The purchase-price seam updates only matched registered store items. The
+`EconomyManager:getBuyPrice` hook is disabled; FS25's native purchase-data
+calculation reads the effective catalog price. The policy does not change farm
+balances or unrelated placeables.
 
 The same immutable mod ZIP belongs on server and clients so the construction UI
 matches the server. FS25's `BuyPlaceableData` stream does not carry a price;
 after its server-side `readStream` resolves the store item/configurations, this
 mod forces native `updatePrice()` again. The dedicated server therefore computes
-the charge itself through the same `getBuyPrice` hook; a client does not supply
-a policy-selected price.
+the charge from the authoritative effective catalog price; a client does not
+supply a policy-selected price.
 
 ### Runtime recipe seam
 
-`ProductionPoint.load` is wrapped with `Utils.overwrittenFunction`. Native
-recipe loading completes first; the mod then resolves the placeable's canonical
-XML identity and applies only configured recipe IDs. At this seam FS25 has
-created both the `productions` lookup used by simulation and the
-`sortedProductions` list used by the production UI.
+`ProductionPoint.load` is wrapped with `Utils.overwrittenFunction`. For an
+explicitly matched rate-only recipe policy, the mod temporarily stages the
+configured `cyclesPerHour` values in the in-memory XMLFile before native load,
+then restores the XMLFile immediately afterward. Native FS25 builds its own
+simulation and UI state from those values on both server and clients; neither
+the source ZIP nor savegame is edited. The entire rate override fails closed
+if any configured native recipe or XML API is unavailable. Policies that also
+change amounts or disable recipes retain the separate post-load path.
 
 The current recipe policy is intentionally limited to:
 
@@ -76,10 +76,12 @@ The current recipe policy is intentionally limited to:
   `$300,000` and removal of the four explicitly named `*_rush` recipes. Normal
   seed recipes are unchanged;
 - the four `FS25_AmericanSilosProductionPack` entries: small-tier purchase
-  price `$302,500` with the common `4,000/1.5/2.5` hay/silage, pig-food, and
-  forage rates; large-tier purchase price `$403,000` with the common
-  `5,000/2/3.5` rates. Storage capacities remain native because no safe
-  authoritative capacity seam is implemented.
+  price `$302,500` with hay at `4,000`, each silage recipe at `16,000`, pig
+  food at `1.5`, and forage at `2.5` cycles/hour; large-tier purchase price
+  `$403,000` with hay at `5,000`, each silage recipe at `20,000`, pig food at
+  `2`, and forage at `3.5` cycles/hour. The four silage recipes retain their
+  native 1 L input to 1 L output ratios. Storage capacities remain native
+  because no safe authoritative capacity seam is implemented.
 
 The remaining approved purchase prices are data-only entries in
 `config/production-policy.xml`; they do not change native input/output ratios

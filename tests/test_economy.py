@@ -186,6 +186,89 @@ class EconomyTests(unittest.TestCase):
         self.assertEqual(query["world_id"], "world")
         self.assertEqual(query["source"], "game")
 
+    def test_account_summary_hides_pretransfer_snapshot_until_it_catches_up(self):
+        database = MagicMock()
+        database.db.wallets.find_one.return_value = {"balance": 600006}
+        database.db.deposit_requests.find.return_value = []
+        database.db.withdrawals.find.return_value = []
+        completed_at = datetime.now(timezone.utc)
+        snapshot = {
+            "source": "game", "world_id": "world", "received_at": completed_at - timedelta(seconds=5),
+            "farms": {"2": "Player Farm"}, "farm_balances": {"2": 355374.44}}
+        database.db.server_snapshots.find_one.return_value = snapshot
+        database.db.deposit_requests.find_one.return_value = {
+            "state": "completed", "completed_at": completed_at,
+            "receipt": {"after_balance": "55374.44", "authoritative_readback": "true"}}
+        database.db.withdrawals.find_one.return_value = None
+        engine = BankingEngine(database)
+        engine._world_id = lambda server, save, world: "world"
+        engine.admin = MagicMock()
+        engine.admin.lookup.return_value = {"farm_id": 2}
+
+        summary = engine.account_summary("player", "server", "save", "world")
+        self.assertIsNone(summary["game_balance"])
+        self.assertEqual(summary["game_balance_reason"], "updating after recent transfer")
+        self.assertEqual(summary["last_verified_game_balance"], 55374.44)
+        receipt_query = database.db.deposit_requests.find_one.call_args.args[0]
+        self.assertEqual(receipt_query["world_id"], "world")
+        self.assertEqual(set(receipt_query["farm_id"]["$in"]), {2, "2"})
+
+        snapshot["farm_balances"]["2"] = 55374.44
+        summary = engine.account_summary("player", "server", "save", "world")
+        self.assertEqual(summary["game_balance"], 55374.44)
+        self.assertIsNone(summary["game_balance_reason"])
+
+    def test_account_summary_accepts_later_snapshot_even_if_farm_spent_more(self):
+        database = MagicMock()
+        database.db.wallets.find_one.return_value = {"balance": 600006}
+        database.db.deposit_requests.find.return_value = []
+        database.db.withdrawals.find.return_value = []
+        completed_at = datetime.now(timezone.utc) - timedelta(minutes=2)
+        database.db.server_snapshots.find_one.return_value = {
+            "source": "game", "world_id": "world",
+            "received_at": completed_at + timedelta(seconds=60),
+            "farms": {"2": "Player Farm"}, "farm_balances": {"2": 54000}}
+        database.db.deposit_requests.find_one.return_value = {
+            "state": "completed", "completed_at": completed_at,
+            "receipt": {"after_balance": "55374.44", "authoritative_readback": "true"}}
+        database.db.withdrawals.find_one.return_value = None
+        engine = BankingEngine(database)
+        engine._world_id = lambda server, save, world: "world"
+        engine.admin = MagicMock()
+        engine.admin.lookup.return_value = {"farm_id": 2}
+
+        summary = engine.account_summary("player", "server", "save", "world")
+        self.assertEqual(summary["game_balance"], 54000)
+        self.assertIsNone(summary["game_balance_reason"])
+
+    def test_account_summary_compares_latest_completed_withdrawal(self):
+        database = MagicMock()
+        database.db.wallets.find_one.return_value = {"balance": 10}
+        database.db.deposit_requests.find.return_value = []
+        database.db.withdrawals.find.return_value = []
+        completed_at = datetime.now(timezone.utc)
+        database.db.server_snapshots.find_one.return_value = {
+            "source": "game", "world_id": "world",
+            "received_at": completed_at - timedelta(seconds=10),
+            "farms": {"2": "Player Farm"}, "farm_balances": {"2": 100}}
+        database.db.deposit_requests.find_one.return_value = {
+            "state": "completed", "completed_at": completed_at - timedelta(seconds=30),
+            "receipt": {"after_balance": "90", "authoritative_readback": "true"}}
+        database.db.withdrawals.find_one.return_value = {
+            "state": "completed", "completed_at": completed_at,
+            "receipt": {"after_balance": "110", "authoritative_readback": "true"}}
+        engine = BankingEngine(database)
+        engine._world_id = lambda server, save, world: "world"
+        engine.admin = MagicMock()
+        engine.admin.lookup.return_value = {"farm_id": 2}
+
+        summary = engine.account_summary("player", "server", "save", "world")
+        self.assertEqual(summary["game_balance_reason"], "updating after recent transfer")
+        self.assertEqual(summary["last_verified_game_balance"], 110)
+        withdrawal_query = database.db.withdrawals.find_one.call_args.args[0]
+        self.assertEqual(withdrawal_query["world_id"], "world")
+        self.assertEqual(set(withdrawal_query["farm_id"]["$in"]), {2, "2"})
+
     def test_account_summary_keeps_native_balance_unavailable_without_snapshot_field(self):
         database = MagicMock()
         database.db.wallets.find_one.return_value = {"_id": "player", "balance": 1}

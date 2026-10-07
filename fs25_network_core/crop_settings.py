@@ -336,6 +336,15 @@ def _annual_lifecycle_plan(entry: FruitPolicy, period_map: dict[str, dict[str, A
     harvest_indices = [_PERIOD_ORDER.index(name) + 1 for name in harvest]
     offsets = [((index - first_plant) % 12) for index in harvest_indices]
     last_harvest_offset = max(offsets)
+    first_harvest_offset = min(offsets)
+    second_plant = _PERIOD_ORDER[first_plant % 12]
+    if (len(planting) > 2 or first_harvest_offset < 2 or
+            (len(planting) == 2 and
+             (second_plant not in planting or first_harvest_offset >= 11 or
+              first_harvest_offset + 1 not in offsets))):
+        result.unsupported += 1
+        result.diagnostics.append(f"{entry.name}: annual lifecycle aligned planting/harvest windows unsupported")
+        return None
     runtimes: dict[str, dict[str, Any]] = {}
     for period_name in _PERIOD_ORDER:
         runtime = period_map.get(period_name) or period_map.get(period_name.lower())
@@ -353,6 +362,7 @@ def _annual_lifecycle_plan(entry: FruitPolicy, period_map: dict[str, dict[str, A
             result.diagnostics.append(f"{entry.name}/{period_name}: annual period gates unsupported")
             return None
         runtimes[period_name] = runtime
+    anchor_index = min(len(states) - 1, first_harvest_offset - 1)
     replacements: dict[str, dict[int, int]] = {}
     for index, period_name in enumerate(_PERIOD_ORDER, start=1):
         offset = (index - first_plant) % 12
@@ -370,10 +380,16 @@ def _annual_lifecycle_plan(entry: FruitPolicy, period_map: dict[str, dict[str, A
         if period_name in planting:
             replacement[invisible] = states[0]
         if offset <= last_harvest_offset:
-            for state_index in range(len(states) - 2):
+            # One state of separation is retained between sowing cohorts.
+            # Long paths skip visual stages at harvest; short paths hold the
+            # later cohort so it does not mature with the first.
+            for state_index in range(anchor_index - 2):
                 replacement[states[state_index]] = states[state_index + 1]
-            if period_name in harvest:
-                replacement[states[-2]] = states[-1]
+            if anchor_index > 1 and (offset <= anchor_index or offset >= first_harvest_offset):
+                replacement[states[anchor_index - 2]] = states[anchor_index - 1]
+            if offset >= first_harvest_offset and period_name in harvest:
+                for state_index in range(anchor_index - 1, len(states) - 1):
+                    replacement[states[state_index]] = states[-1]
                 replacement[states[-1]] = states[-1]
         # Keep the terminal transition active after the harvest window. Also
         # apply it at a planting boundary: an existing ready crop must not
@@ -406,7 +422,9 @@ def _annual_lifecycle_plan(entry: FruitPolicy, period_map: dict[str, dict[str, A
             outgoing = _PERIOD_ORDER[(start + step - 1) % 12]
             current = replacements[outgoing].get(current, current)
             if current == states[-1]:
-                valid = valid and name in harvest
+                valid = valid and name in harvest and step >= first_harvest_offset
+                if not reached_ready and step != first_harvest_offset:
+                    valid = False
                 reached_ready = True
             elif reached_ready:
                 valid = False

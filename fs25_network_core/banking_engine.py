@@ -1,5 +1,5 @@
 """Atomic integer-unit ledger. Adapter callbacks are trusted operator interfaces."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import math
 import re
@@ -16,6 +16,11 @@ def amount_units(amount):
 
 
 class BankingEngine:
+    # A snapshot uploaded just after settlement can still contain a game
+    # export made before the money command. After this grace period, a
+    # different balance may represent legitimate later farm activity.
+    BALANCE_SNAPSHOT_GRACE = timedelta(seconds=45)
+
     def __init__(self, database):
         self.database = database
         self.db = database.db
@@ -173,26 +178,85 @@ class BankingEngine:
         withdrawals = list(self.db.withdrawals.find({"discord_id": user_id, "state": "pending"}))
         game_balance = None
         game_balance_reason = "no game context selected"
+        last_verified_game_balance = None
         if server_id and save_id:
             game_balance_reason = "no active, mod-confirmed farm manager mapping"
             mapping_verified = False
             try:
-                game_balance = self._authoritative_game_balance(
+                snapshot, farm_id = self._authoritative_farm_snapshot(
                     user_id, server_id, save_id, world_id=world_id)
                 mapping_verified = True
             except ValueError:
-                game_balance = None
+                snapshot, farm_id = None, None
             if mapping_verified:
-                game_balance_reason = (
-                    "the current FS25 snapshot has no authoritative balance for this farm"
-                    if game_balance is None else None)
-        return {
+                balances = snapshot.get("farm_balances") if snapshot is not None else None
+                if isinstance(balances, dict):
+                    game_balance = self._money_value(
+                        balances.get(str(farm_id), balances.get(farm_id)), allow_negative=True)
+                if game_balance is None:
+                    game_balance_reason = "the current FS25 snapshot has no authoritative balance for this farm"
+                else:
+                    game_balance_reason = None
+                    transfer = self._latest_verified_money_transfer(
+                        user_id, server_id, save_id, world_id or snapshot.get("world_id"), farm_id)
+                    if transfer is not None:
+                        after_balance, completed_at = transfer
+                        snapshot_at = self._utc_datetime(snapshot.get("received_at"))
+                        if (abs(game_balance - after_balance) >= 0.01
+                                and (snapshot_at is None
+                                     or snapshot_at <= completed_at + self.BALANCE_SNAPSHOT_GRACE)):
+                            game_balance = None
+                            game_balance_reason = "updating after recent transfer"
+                            last_verified_game_balance = after_balance
+        result = {
             "available_balance": int(wallet.get("balance", 0) or 0),
             "pending_deposits": sum(int(row.get("amount", 0) or 0) for row in deposits),
             "pending_withdrawals": sum(int(row.get("amount", 0) or 0) for row in withdrawals),
             "game_balance": game_balance,
             "game_balance_reason": game_balance_reason,
         }
+        if last_verified_game_balance is not None:
+            result["last_verified_game_balance"] = last_verified_game_balance
+        return result
+
+    @staticmethod
+    def _utc_datetime(value):
+        if not isinstance(value, datetime):
+            return None
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+    def _latest_verified_money_transfer(self, discord_id, server_id, save_id, world_id, farm_id):
+        """Find the most recent receipt for this manager's current farm/world."""
+        farm_ids = [farm_id]
+        if str(farm_id) != farm_id:
+            farm_ids.append(str(farm_id))
+        else:
+            try:
+                farm_ids.append(int(farm_id))
+            except (TypeError, ValueError):
+                pass
+        query = {"discord_id": str(discord_id), "server_id": str(server_id),
+                 "save_id": str(save_id), "farm_id": {"$in": farm_ids},
+                 "state": "completed"}
+        if world_id:
+            query["world_id"] = str(world_id)
+        candidates = []
+        for collection in (self.db.deposit_requests, self.db.withdrawals):
+            record = collection.find_one(query, sort=[("completed_at", -1)])
+            if not isinstance(record, dict):
+                continue
+            receipt = record.get("receipt")
+            completed_at = self._utc_datetime(record.get("completed_at"))
+            after_balance = self._money_value(
+                receipt.get("after_balance") if isinstance(receipt, dict) else None,
+                allow_negative=True)
+            if (completed_at is not None and after_balance is not None
+                    and self._receipt_bool(receipt, "authoritative_readback")):
+                candidates.append((completed_at, after_balance))
+        if not candidates:
+            return None
+        completed_at, after_balance = max(candidates, key=lambda item: item[0])
+        return after_balance, completed_at
 
     def recent_operation_status(self, discord_id, server_id, save_id, world_id=None):
         """Show the last request when its ephemeral reply is no longer editable."""
@@ -319,6 +383,60 @@ class BankingEngine:
                     "payment_reference": payment_id, "available_balance": available_balance}
 
         return self.database.atomic(pay)
+
+    def admin_pay_player(self, payment_id, admin_id, payee_id, amount, memo):
+        """Issue one audited, system-funded credit to a linked player's wallet."""
+        amount_units(amount)
+        payment_id = str(payment_id or "").strip()
+        admin_id, payee_id = str(admin_id), str(payee_id)
+        memo = str(memo or "").strip()
+        if not payment_id:
+            raise ValueError("A stable payment ID is required")
+        if not admin_id or not payee_id:
+            raise ValueError("Administrator and recipient IDs are required")
+        if admin_id == payee_id:
+            raise ValueError("Administrators cannot issue payments to themselves")
+        if not memo or len(memo) > 200 or re.search(r"[\x00-\x1f\x7f]", memo):
+            raise ValueError("Memo must contain 1-200 characters without control characters")
+
+        def credit(session):
+            if not self.db.game_identities.find_one({"discord_id": payee_id}, session=session):
+                raise ValueError("Recipient's Discord account is not linked to a Farming Simulator player")
+            reference = f"admin-pay:{payment_id}"
+            existing = self.db.admin_payments.find_one({"_id": reference}, session=session)
+            if existing is not None:
+                expected = (existing.get("admin_id"), existing.get("payee_id"),
+                            existing.get("amount"), existing.get("memo"))
+                if expected != (admin_id, payee_id, amount, memo):
+                    raise ValueError("Admin payment ID was reused with different details")
+                if existing.get("state") != "completed":
+                    raise ValueError("Existing admin payment is not complete")
+                return {"state": "completed", "new": False, "recipient_verified": True,
+                        "payment_reference": payment_id}
+
+            recipient_before = self.db.wallets.find_one({"_id": payee_id}, session=session) or {}
+            previous_balance = recipient_before.get("balance", 0)
+            if type(previous_balance) is not int:
+                raise ValueError("Recipient account balance could not be verified")
+            inserted = self._ledger(
+                self.transaction_id("admin-pay", payment_id), payee_id, amount,
+                "admin_payment_credit", f"admin payment by {admin_id}: {memo}",
+                reference=reference, session=session)
+            if not inserted:
+                raise ValueError("Admin payment ledger already exists without a completed payment")
+            self._project_wallet(payee_id, amount, session=session)
+            recipient_after = self.db.wallets.find_one({"_id": payee_id}, session=session) or {}
+            new_balance = recipient_after.get("balance")
+            if type(new_balance) is not int or new_balance != previous_balance + amount:
+                raise ValueError("Recipient credit could not be verified; contact an operator before retrying")
+            self.db.admin_payments.insert_one({
+                "_id": reference, "payment_id": payment_id, "admin_id": admin_id,
+                "payee_id": payee_id, "amount": amount, "memo": memo,
+                "state": "completed", "created_at": datetime.now(timezone.utc)}, session=session)
+            return {"state": "completed", "new": True, "recipient_verified": True,
+                    "payment_reference": payment_id}
+
+        return self.database.atomic(credit)
 
     def _project_wallet(self, discord_id, amount, session=None):
         self.db.wallets.update_one({"_id": str(discord_id)}, {"$inc": {"balance": amount}},

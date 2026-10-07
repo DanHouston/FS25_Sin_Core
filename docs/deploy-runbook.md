@@ -80,12 +80,46 @@ $env:SIN_API_PORT = "8787"
 python -m fs25_network_core.server_api
 ```
 
-In another Central-host window:
+In another Central-host window, run the supervised JiN process (not a second
+unsupervised `bot_frontend` instance):
 
 ```powershell
 $env:MONGODB_DATABASE = "fs25_network"
-python -m fs25_network_core.bot_frontend
+python -m fs25_network_core.bot_supervisor
 ```
+
+JiN's supervisor writes `health.json`, `bot.log`, and `supervisor.log` under
+`$env:LOCALAPPDATA\SiN\JiN` by default. Set `FS25_JIN_RUNTIME_DIR` before
+launch if those files belong elsewhere. The health marker requires the Discord
+gateway to be ready and the activity, bank, and status publishers to complete
+their scan loops. The supervisor checks it every 15 seconds, allows three
+minutes for startup or a transient outage, then restarts only its own child
+process if progress stops. It caps recovery at five restarts in 30 minutes;
+investigate `bot.log` and `supervisor.log` if that limit is reached. A process
+lock prevents two new JiN instances using the same runtime directory.
+
+For unattended operation, configure **one** Windows Scheduled Task to run
+`python -m fs25_network_core.bot_supervisor` from the Central checkout at
+machine startup under the Central service account. Use the full path to that
+account's Python interpreter, set the task's working directory to the checkout,
+select "Do not start a new instance" and restart the task on failure. The
+task must have access to the same private `.env`/Mongo credentials as JiN.
+Stop the old manually launched bot before enabling the task; an older build
+does not hold the new single-instance lock. Scheduled Task failure recovery
+protects the supervisor itself; JiN's health marker handles a bot that is
+still running but no longer publishing.
+
+Read-only health check on the Central host:
+
+```powershell
+Get-Content -LiteralPath "$env:LOCALAPPDATA\SiN\JiN\health.json" -Raw | ConvertFrom-Json |
+    Select-Object pid, healthy, updated_at, last_healthy_at, reasons
+Get-Content -LiteralPath "$env:LOCALAPPDATA\SiN\JiN\supervisor.log" -Tail 30
+```
+
+Do not treat a process listing or Discord's connection state alone as proof
+that publications are flowing. A restart replays the durable activity outbox;
+it cannot fix permanent Discord permission errors or a failed outbox record.
 
 If the FS25 money bridge is intentionally enabled for this server, configure it
 once from the Central repository environment:

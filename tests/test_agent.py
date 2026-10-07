@@ -447,6 +447,49 @@ class AgentTests(unittest.TestCase):
             "vehicles": {"sell_value": 4500.0, "count": 3, "unpriced": 1, "fallback": 0},
         }})
 
+    def test_snapshot_payload_preserves_owner_scoped_vehicle_inventory(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "snapshot.xml").write_text(
+                '<networkLocal source="game" savegameIndex="3" worldId="hobo-world" '
+                'vehicleInventoryReady="true" vehicleInventoryCount="2">'
+                '<farms><farm farmId="2" name="Repton Does"/>'
+                '<farm farmId="4" name="Other Farm"/></farms>'
+                '<vehicles><vehicle uniqueId="veh-1" farmId="2" '
+                'filename="$data/vehicles/tractor.xml" name="Tractor" sellValue="125000"/>'
+                '<vehicle uniqueId="veh-2" farmId="4" '
+                'filename="FS25_Test/vehicle.xml" modName="FS25_Test"/></vehicles>'
+                '</networkLocal>', encoding="utf-8")
+            payload = PairingAgent(root, "https://central", MagicMock())._snapshot_payload()
+        self.assertTrue(payload["vehicle_inventory_ready"])
+        self.assertEqual(payload["vehicles"], [
+            {"unique_id": "veh-1", "farm_id": 2, "filename": "$data/vehicles/tractor.xml",
+             "name": "Tractor", "mod_name": "", "sell_value": 125000.0},
+            {"unique_id": "veh-2", "farm_id": 4, "filename": "FS25_Test/vehicle.xml",
+             "name": "", "mod_name": "FS25_Test"},
+        ])
+
+    def test_incomplete_vehicle_inventory_fails_closed(self):
+        for vehicles, count in (
+            ('<vehicle uniqueId="veh-1" farmId="2" filename="tractor.xml"/>'
+             '<vehicle uniqueId="veh-1" farmId="2" filename="tractor.xml"/>', 2),
+            ('<vehicle uniqueId="veh-1" farmId="9" filename="tractor.xml"/>', 1),
+            ('<vehicle uniqueId="veh-1" farmId="2" filename="tractor.xml" sellValue="nan"/>', 1),
+            ('<vehicle uniqueId="veh-1" farmId="2" filename="tractor.xml"/>', 2),
+        ):
+            with self.subTest(vehicles=vehicles, count=count):
+                with tempfile.TemporaryDirectory() as folder:
+                    root = Path(folder)
+                    (root / "snapshot.xml").write_text(
+                        '<networkLocal source="game" vehicleInventoryReady="true" '
+                        f'vehicleInventoryCount="{count}"><farms><farm farmId="2" '
+                        f'name="Farm"/></farms><vehicles>{vehicles}</vehicles></networkLocal>',
+                        encoding="utf-8")
+                    payload = PairingAgent(root, "https://central", MagicMock())._snapshot_payload()
+                    self.assertFalse(payload["vehicle_inventory_ready"])
+                    self.assertEqual(payload["vehicles"], [])
+                    self.assertEqual(payload["farms"], {"2": "Farm"})
+
     def test_agent_materializes_central_farm_operation_without_mongo(self):
         class OperationResponse:
             status = 200

@@ -10,6 +10,7 @@ from pymongo.errors import DuplicateKeyError
 from .database import Database
 from .world_generation import WorldGenerationRegistry
 from .map_service import MapStore, MapValidationError
+from .vehicle_inventory import validate_vehicle_inventory
 
 
 SYSTEM_FARM_NAME = "SiN Harvest"
@@ -425,6 +426,7 @@ class FarmLifecycle:
     def record_snapshot(self, server_key, save_key, snapshot):
         if not isinstance(snapshot, dict) or snapshot.get("source") != "game":
             raise ValueError("game snapshot is required")
+        validate_vehicle_inventory(snapshot)
         world_id = snapshot.get("world_id")
 
         def persist(session=None):

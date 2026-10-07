@@ -7,3 +7,5 @@ atlas-credentials.env
 dist/
 local-test/
 deployment_notes.txt
+# Windows Explorer shortcut accidentally placed in the workspace root.
+Local Disk (C) - Shortcut.lnk

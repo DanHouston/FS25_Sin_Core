@@ -12,6 +12,19 @@ SiNBuyingStationPolicy = {
         },
         disabledXmlSuffixes = {"xmls/multipurposestation.xml"},
         adminOnlyPurchase = true,
+        usedEquipmentYards = {
+            enabled = true,
+            customEnvironment = "FS25_UsedEquipmentYards",
+            adminOnlyPurchase = true,
+            placeableXmlSuffixes = {
+                "xml/UsedEquipmentYard.xml",
+                "xml/SaleZone.xml",
+                "xml/YardFence.xml",
+                "xml/smallAdBoard.xml",
+                "xml/largeAdBoard.xml",
+                "xml/plotBoard.xml"
+            }
+        },
         allowedFillTypes = {"FERTILIZER", "LIQUIDFERTILIZER", "LIME", "SEEDS"},
         defaultPriceScale = 0.9
     },
@@ -43,14 +56,19 @@ end
 
 function SiNBuyingStationPolicy:getVariant(storeItemOrPlaceable)
     if storeItemOrPlaceable == nil then return nil end
-    local environment = storeItemOrPlaceable.customEnvironment
+    local environment = normalized(storeItemOrPlaceable.customEnvironment)
     local configPath = storeItemOrPlaceable.configFileName or storeItemOrPlaceable.xmlFilename
-    if environment == nil or normalized(environment) ~= normalized(self.config.customEnvironment) then return nil end
-    for _, suffix in ipairs(self.config.buyingXmlSuffixes) do
-        if suffixMatches(configPath, suffix) then return "buying" end
-    end
-    for _, suffix in ipairs(self.config.disabledXmlSuffixes) do
-        if suffixMatches(configPath, suffix) then return "disabled" end
+    if environment == normalized(self.config.customEnvironment) then
+        for _, suffix in ipairs(self.config.buyingXmlSuffixes) do
+            if suffixMatches(configPath, suffix) then return "buying" end
+        end
+        for _, suffix in ipairs(self.config.disabledXmlSuffixes) do
+            if suffixMatches(configPath, suffix) then return "disabled" end
+        end
+    elseif environment == normalized(self.config.usedEquipmentYards.customEnvironment) then
+        for _, suffix in ipairs(self.config.usedEquipmentYards.placeableXmlSuffixes) do
+            if suffixMatches(configPath, suffix) then return "usedEquipmentYards" end
+        end
     end
     return nil
 end
@@ -64,9 +82,13 @@ function SiNBuyingStationPolicy:isMasterUser(user)
 end
 
 function SiNBuyingStationPolicy:authorizeIncomingPurchase(data, connection)
-    if self.config.enabled ~= true then return true end
     local variant = self:getVariant(data ~= nil and data.storeItem or nil)
     if variant == nil then return true end
+    if variant == "usedEquipmentYards" then
+        if self.config.usedEquipmentYards.enabled ~= true then return true end
+    elseif self.config.enabled ~= true then
+        return true
+    end
     if g_currentMission == nil or type(g_currentMission.getIsServer) ~= "function"
         or g_currentMission:getIsServer() ~= true then return true end
 
@@ -75,7 +97,11 @@ function SiNBuyingStationPolicy:authorizeIncomingPurchase(data, connection)
         warning("rejected multipurpose variant; goods-selling area is disabled by policy")
         return false
     end
-    if self.config.adminOnlyPurchase ~= true then return true end
+    if variant == "usedEquipmentYards" then
+        if self.config.usedEquipmentYards.adminOnlyPurchase ~= true then return true end
+    elseif self.config.adminOnlyPurchase ~= true then
+        return true
+    end
 
     local user
     if connection ~= nil and g_currentMission.userManager ~= nil
@@ -88,7 +114,7 @@ function SiNBuyingStationPolicy:authorizeIncomingPurchase(data, connection)
 
     if self:isMasterUser(user) then return true end
     data.__sinBuyingStationPurchaseDenied = true
-    warning("rejected non-admin purchase request")
+    warning("rejected non-admin purchase request variant=" .. variant)
     return false
 end
 
@@ -209,7 +235,9 @@ function SiNBuyingStationPolicy:loadMap()
         .. " purchaseGuard=" .. tostring(self.purchaseGuardInstalled)
         .. " enabled=" .. tostring(self.config.enabled)
         .. " adminOnly=" .. tostring(self.config.adminOnlyPurchase)
-        .. " buyingVariants=2 multipurpose=disabled")
+        .. " buyingVariants=2 multipurpose=disabled"
+        .. " usedEquipmentYards=" .. tostring(self.config.usedEquipmentYards.enabled)
+        .. " yardAdminOnly=" .. tostring(self.config.usedEquipmentYards.adminOnlyPurchase))
 end
 
 function SiNBuyingStationPolicy:deleteMap()

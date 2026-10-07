@@ -8,6 +8,7 @@ COMMAND_CHANNELS = {
     "farm_reject": "staff", "farm_assign": "staff", "event_create": "staff",
     "event_cancel": "staff", "event_complete": "staff", "transfer_request": "staff",
     "transfer_list": "staff", "transfer_accept": "staff", "transfer_dispatch": "staff",
+    "admin_pay": "staff",
     "server_reconcile": "operations", "chat_send": "operations", "activity_status": "operations",
 }
 
@@ -15,7 +16,7 @@ COMMAND_CHANNELS = {
 # channel is an organization/noise concern rather than an authorization
 # boundary. Staff/operator workflows remain channel-scoped below.
 UNRESTRICTED_MEMBER_COMMANDS = {
-    "register", "farm_request", "farm_status", "balance", "equity", "deposit", "withdraw", "pay",
+    "register", "suggest_mod", "farm_request", "farm_status", "balance", "equity", "vehicles", "deposit", "withdraw", "pay",
     "contract_create", "contract_list", "contract_view", "contract_accept",
     "contract_complete", "invoice_create", "invoice_list", "invoice_view", "invoice_pay",
     "invoice_cancel", "event_list", "event_view", "event_join", "event_leave",

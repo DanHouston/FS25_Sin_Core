@@ -3195,7 +3195,8 @@ local function sinCollectResaleValues(items, ownedVehicleOnly)
             local ownerOk, owner = pcall(item.getOwnerFarmId, item)
             if not ownerOk then return nil end
             local farmId = tonumber(owner)
-            if farmId ~= nil and farmId > 0 and farmId <= 254 then
+            if farmId ~= nil and farmId == math.floor(farmId)
+                and farmId > 0 and farmId <= 254 then
                 -- Pallets, bales and bulk containers are consumable inventory,
                 -- not shop equipment. Leased/mission vehicles are not assets.
                 local isInventory = ownedVehicleOnly and
@@ -3242,6 +3243,57 @@ local function sinCollectResaleValues(items, ownedVehicleOnly)
     return byFarm
 end
 
+-- The equity aggregate cannot identify an individual machine. Export an
+-- all-or-nothing read-only inventory from the same live VehicleSystem; never
+-- infer ownership from savegame files or from a player's current farm.
+local function sinCollectOwnedVehicleInventory(items)
+    if type(items) ~= "table" or VehiclePropertyState == nil
+        or VehiclePropertyState.OWNED == nil or NetworkUtil == nil
+        or type(NetworkUtil.convertToNetworkFilename) ~= "function" then
+        return nil
+    end
+    local rows, seen = {}, {}
+    for _, vehicle in pairs(items) do
+        if vehicle ~= nil and not (vehicle.isPallet == true or vehicle.isBale == true
+                or vehicle.isBigBag == true) then
+            if type(vehicle.getOwnerFarmId) ~= "function" then return nil end
+            local ownerOk, owner = pcall(vehicle.getOwnerFarmId, vehicle)
+            if not ownerOk then return nil end
+            local farmId = tonumber(owner)
+            if farmId ~= nil and farmId == math.floor(farmId)
+                and farmId > 0 and farmId <= 254 then
+                if vehicle.propertyState == nil then return nil end
+                if vehicle.propertyState == VehiclePropertyState.OWNED then
+                    if type(vehicle.getUniqueId) ~= "function"
+                        or type(vehicle.configFileName) ~= "string" then return nil end
+                    local idOk, uniqueId = pcall(vehicle.getUniqueId, vehicle)
+                    if not idOk or type(uniqueId) ~= "string" or uniqueId == ""
+                        or seen[uniqueId] then return nil end
+                    local filenameOk, filename = pcall(NetworkUtil.convertToNetworkFilename,
+                        vehicle.configFileName)
+                    if not filenameOk or type(filename) ~= "string" or filename == "" then return nil end
+                    seen[uniqueId] = true
+                    local row = {uniqueId=uniqueId, farmId=farmId, filename=filename,
+                        modName=vehicle.customEnvironment}
+                    if type(vehicle.getName) == "function" then
+                        local nameOk, name = pcall(vehicle.getName, vehicle)
+                        if nameOk and type(name) == "string" then row.name = name end
+                    end
+                    if type(vehicle.getSellPrice) == "function" then
+                        local priceOk, price = pcall(vehicle.getSellPrice, vehicle)
+                        if priceOk and sinValidResaleValue(price) then row.sellValue = price end
+                    end
+                    table.insert(rows, row)
+                    if #rows > 5000 then return nil end
+                end
+            end
+        end
+    end
+    table.sort(rows, function(a, b) return a.uniqueId < b.uniqueId end)
+    return rows
+end
+FS25SiNServer.collectOwnedVehicleInventory = sinCollectOwnedVehicleInventory
+
 function FS25SiNServer:exportSnapshot()
     self.sequence = self.sequence + 1
     local xml = XMLFile.create("networkLocal", self.directory .. "snapshot.xml", "networkLocal")
@@ -3287,6 +3339,21 @@ function FS25SiNServer:exportSnapshot()
         placeableSystem ~= nil and placeableSystem.placeables or nil, false)
     local vehicleValues = sinCollectResaleValues(
         vehicleSystem ~= nil and vehicleSystem.vehicles or nil, true)
+    local vehicleInventory = sinCollectOwnedVehicleInventory(
+        vehicleSystem ~= nil and vehicleSystem.vehicles or nil)
+    xml:setBool("networkLocal#vehicleInventoryReady", vehicleInventory ~= nil)
+    if vehicleInventory ~= nil then
+        xml:setInt("networkLocal#vehicleInventoryCount", #vehicleInventory)
+        for vehicleIndex, row in ipairs(vehicleInventory) do
+            local key = string.format("networkLocal.vehicles.vehicle(%d)", vehicleIndex - 1)
+            xml:setString(key .. "#uniqueId", row.uniqueId)
+            xml:setInt(key .. "#farmId", row.farmId)
+            xml:setString(key .. "#filename", row.filename)
+            if row.modName ~= nil then xml:setString(key .. "#modName", row.modName) end
+            if row.name ~= nil then xml:setString(key .. "#name", row.name) end
+            if row.sellValue ~= nil then xml:setString(key .. "#sellValue", tostring(row.sellValue)) end
+        end
+    end
     local index = 0
     -- Farm IDs are bounded for this initial local probe; skip spectator/NPC farms.
     for farmId = 1, 254 do

@@ -2,6 +2,15 @@
 
 ## Mod suggestions forum
 
+Members can run `/suggest_mod` in any ordinary channel in the configured
+Discord server. JiN opens a four-field form: Mod Name, Link, What does it add?,
+and Why should SiN add it? Submitting creates a post in `#mod-suggestions`,
+credits the member in its body, applies `Under Review`, and privately returns a link to
+the post. The link must be an HTTP(S) URL. JiN is the Discord author of these
+form-created posts, so members cannot later edit the starter message; the
+native New Post button remains available for member-authored posts. Discord
+does not route its New Post button through this form.
+
 `channels.mod_suggestions` identifies the existing Discord forum (currently
 `1556486221092487219`); `DISCORD_MOD_SUGGESTIONS_CHANNEL_ID` can override it
 for another deployment. On a new forum post, JiN applies the `Under Review`
@@ -11,9 +20,25 @@ both 🟢 and 🔴. Discord counts these two bot reactions in its visible totals
 so a member-only tally is `max(0, green - 1)` and `max(0, red - 1)`. The pair
 contributes zero net preference; it does not make either displayed count zero.
 Setup is idempotent across duplicate gateway events and restarts. JiN needs
-View Channel, Read Message History, Add Reactions, Manage Threads, and, if it
-must create the tag, Manage Channels. Missing permissions or a full five-tag
+View Channel, Send Messages in the forum for form-created posts, Read Message
+History, Add Reactions, Manage Threads, and, if it must create the tag, Manage
+Channels. Missing permissions or a full five-tag
 post are logged and do not silently claim the post was prepared.
+
+Discord's forum list only exposes its one default reaction, so JiN also
+prefixes active suggestion titles with a member-only `🟢n 🔴n` tally. JiN's
+two seed reactions are excluded, and the older `❎` reaction is counted as
+a no vote. The title refreshes after starter-message reaction changes and
+for active posts when JiN connects. The original post title is retained;
+posts already at Discord's 100-character title limit are left unchanged.
+When a moderator applies `Accepted` or `Rejected`, JiN replaces the vote
+prefix with `Accepted ·` or `Rejected ·` in the title; the native decision tag
+also remains visible on the forum card. Tag changes refresh the title
+immediately, and reaction changes cannot put vote counts back on a decided
+post. Removing the decision tag restores the active vote tally. A later setup
+retry does not reapply `Under Review` to a decided post. If a title is too long
+for Discord's 100-character limit, JiN removes the vote prefix but retains the
+full original name and the native decision tag rather than truncating it.
 
 The first central-only foundations for community features live in
 `fs25_network_core/business_workflows.py`. They are intentionally separate
@@ -77,6 +102,15 @@ The recipient gets a best-effort private receipt with the memo and reference.
 A blocked recipient DM does not undo the payment. Repeating the same Discord
 interaction cannot debit twice or send a second receipt. `/pay` never queues
 an FS25 money operation or changes either farm's in-game balance.
+Staff can use `/admin_pay player:<member> amount:<whole-number> memo:<text>`
+in `#staff` to issue a system-funded reimbursement or bonus to a linked
+player's SiN checking account. It requires the configured Network Admin role
+and Discord administrator command permission. The credit is one MongoDB
+transaction with an immutable ledger entry and an admin/recipient/memo audit
+record keyed by the Discord interaction ID; replay cannot credit twice.
+Neither the administrator's checking account nor any FS25 farm balance is
+debited. Confirmation is private to the administrator and sent only after
+recipient credit read-back; the recipient receives a best-effort DM receipt.
 Deposit and withdrawal commands acknowledge submission in an ephemeral reply
 visible only to the caller in the channel where they invoked the command. If
 the game confirms within Discord's 15-minute interaction window, JiN edits
@@ -87,6 +121,16 @@ stored in MongoDB. The FS25 balance in a success notice is the native receipt's
 balance read-back, not an older server snapshot. A definitive failure says to
 retry later; an uncertain or delayed operation remains reserved/queued and is
 never falsely called failed.
+
+`/balance` still reads the authoritative game snapshot, not a reconstructed
+cash balance. If that snapshot disagrees with the latest completed deposit or
+withdrawal read-back, JiN waits up to 26 seconds for another snapshot. It
+returns immediately when values agree. If they still disagree after the wait,
+the game balance is shown as updating alongside the verified transfer read-back;
+the SiN wallet balance and operation status remain available. A later snapshot
+may legitimately differ because the farm earned or spent more money, so a
+snapshot received more than 45 seconds after settlement is treated as newer
+game state rather than forced to equal the old receipt.
 
 `/equity` is an ephemeral, caller-only snapshot. It combines the caller's SiN
 checking balance with the active, verified farm's native cash balance; the
@@ -180,8 +224,8 @@ REQUIRED` until a verified GIANTS runtime API and replication path is proven.
 
 ## Current Discord command surface
 
-- Money: `/balance`, `/equity`, `/deposit`, `/withdraw`, `/pay` (withdrawal availability is
-  server-configured).
+- Money: `/balance`, `/equity`, `/deposit`, `/withdraw`, `/pay`; staff-only
+  `/admin_pay` in `#staff` (withdrawal availability is server-configured).
 - Contracts: `/contract_create`, `/contract_list`, `/contract_view`,
   `/contract_accept`, `/contract_complete`. Cancellation is performed from the
   posted contract card by its creator.

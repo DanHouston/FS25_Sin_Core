@@ -177,10 +177,6 @@ class CropLuaTests(unittest.TestCase):
                     harness = Harness([desc])
                     harness.apply()
                     actual = harness.periods(entry.name)
-                    if entry.name == "SUNFLOWER" and not short:
-                        self.assertIn("unsupported=1", harness.logs[-1])
-                        self.assertEqual(actual, desc["growthDataSeasonal"]["periods"])
-                        continue
                     self.assertIn("unsupported=0", harness.logs[-1])
                     expected = copy.deepcopy(desc)
                     self.assertEqual(apply_policy(policy, [expected]).unsupported, 0)
@@ -191,9 +187,11 @@ class CropLuaTests(unittest.TestCase):
                     self.assertEqual({i for i, p in enumerate(PERIODS) if actual[p]["isHarvestable"]}, harvest)
                     ids = desc["nameToGrowthState"]
                     last = max((h - planting[0]) % 12 for h in harvest) + planting[0]
+                    first_harvest_offset = min((h - planting[0]) % 12 for h in harvest)
                     for start in planting:
                         current = ids["INVISIBLE"]
                         seen_ready = False
+                        first_ready_step = None
                         visited = []
                         for step in range(1, last - start + 1):
                             month = (start + step) % 12
@@ -202,11 +200,18 @@ class CropLuaTests(unittest.TestCase):
                                 visited.append(current)
                             if current == ids[path[-1]]:
                                 self.assertIn(month, harvest)
+                                if first_ready_step is None:
+                                    first_ready_step = step
                                 seen_ready = True
                             elif seen_ready:
                                 self.fail("mature crop lost inside harvest window")
                         self.assertTrue(seen_ready, (entry.name, start))
-                        self.assertEqual(visited, [ids[s] for s in path])
+                        self.assertEqual(first_ready_step, first_harvest_offset,
+                                         (entry.name, short, PERIODS[start]))
+                        path_ids = [ids[s] for s in path]
+                        self.assertEqual(visited[0], path_ids[0])
+                        self.assertEqual(visited[-1], path_ids[-1])
+                        self.assertEqual(visited, sorted(set(visited), key=path_ids.index))
                         next_period = PERIODS[last % 12]
                         self.assertEqual(actual[next_period]["growthMapping"].get(current, current), ids["DEAD"])
                         later_period = PERIODS[(last + 1) % 12]
@@ -258,6 +263,16 @@ class CropLuaTests(unittest.TestCase):
         harness.apply()
         self.assertIn("unsupported=0", harness.logs[-1])
         self.assertTrue(harness.periods("MAIZE")["MID_SPRING"]["plantingAllowed"])
+
+    def test_missing_second_harvest_month_rejects_without_partial_mutation(self):
+        entry = next(x for x in parse_policy(POLICY).fruits if x.name == "MAIZE")
+        desc, _ = descriptor(entry)
+        root = ET.fromstring(POLICY.read_text())
+        root.find("./fruits/fruit[@name='MAIZE']").set("harvestPeriods", "EARLY_AUTUMN")
+        harness = Harness([desc], ET.tostring(root, encoding="unicode"))
+        harness.apply()
+        self.assertIn("unsupported=1", harness.logs[-1])
+        self.assertEqual(harness.periods("MAIZE"), desc["growthDataSeasonal"]["periods"])
 
     def test_sorghum_uses_annual_policy_and_both_cohorts_complete(self):
         entry = next(x for x in parse_policy(POLICY).fruits if x.name == "SORGHUM")

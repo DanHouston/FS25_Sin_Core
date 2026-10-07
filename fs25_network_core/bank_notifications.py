@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 
 import discord
@@ -42,6 +43,7 @@ class BankNotificationPublisher:
     def __init__(self, bot, bank, interval=2.0):
         self.bot, self.bank, self.db, self.interval = bot, bank, bank.database.db, interval
         self.task = None
+        self.last_cycle_at = None
         # Interaction tokens are short-lived and must not be persisted in Mongo.
         # A restart or late game receipt falls back to the durable /balance view.
         self.interactions = {}
@@ -90,6 +92,7 @@ class BankNotificationPublisher:
                                                       "state": {"$in": states}}).limit(25)))
                     for record in records:
                         await self.publish(kind, collection, record)
+                self.last_cycle_at = time.time()
             except Exception:
                 LOG.exception("Bank completion notification scan failed")
             await asyncio.sleep(self.interval)

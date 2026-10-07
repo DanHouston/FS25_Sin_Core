@@ -167,11 +167,6 @@ class CropSettingsTests(unittest.TestCase):
                 }},
             }
             result = apply_policy(policy, [descriptor])
-            if fruit.name == "SUNFLOWER":
-                # Full seven-stage native path cannot mature a May sowing by
-                # November once germination occurs on the June boundary.
-                self.assertEqual(result.unsupported, 1)
-                continue
             self.assertEqual(result.unsupported, 0, fruit.name)
             periods = descriptor["growthDataSeasonal"]["periods"]
             terminal = state_ids[fruit.state_chain[-1]]
@@ -186,6 +181,21 @@ class CropSettingsTests(unittest.TestCase):
                     self.assertEqual(mapping.get(terminal), terminal, fruit.name)
                 else:
                     self.assertNotEqual(mapping.get(preterminal), terminal, fruit.name)
+            sowing = [i for i, name in enumerate(period_names) if name in
+                      {p.name for p in fruit.periods if p.planting_allowed}]
+            first_harvest_offset = min((period_names.index(name) - sowing[0]) % 12
+                                       for name in harvest_names)
+            for start in sowing:
+                state = state_ids["INVISIBLE"]
+                first_ready = None
+                for step in range(1, 13):
+                    outgoing = period_names[(start + step - 1) % 12]
+                    state = periods[outgoing]["growthMapping"].get(state, state)
+                    if state == terminal:
+                        first_ready = step
+                        break
+                self.assertEqual(first_ready, first_harvest_offset,
+                                 (fruit.name, period_names[start]))
 
     def test_annual_lifecycle_withholds_maturity_until_harvest_window(self):
         policy = parse_policy('''

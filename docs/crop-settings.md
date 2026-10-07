@@ -2,7 +2,7 @@
 
 `SiN_FS25_Crop_Settings.zip` is a standalone multiplayer mod. It is deliberately
 separate from `FS25_SiN_Server` and from every map. The shipped
-`config/fruit-policy.xml` is the canonical SiN calendar (`policyVersion="0.3.3-native-harvest-range-guard"`).
+`config/fruit-policy.xml` is the canonical SiN calendar (`policyVersion="0.3.4-aligned-cohort-maturity"`).
 Only fruit types registered by the active map are touched; absent map fruits are
 reported as skipped and are never fabricated.
 
@@ -68,15 +68,15 @@ The policy windows are:
 
 Annual crops use their validated native state names to rebuild only the seasonal
 state mappings needed for the requested window. `stateChain` is an ordering hint,
-not a promise that every visual state is present or used by every map. Before the
-rewrite, the runtime derives the longest native path from the active descriptor;
-optional states are therefore omitted when the map uses a direct transition (for
-example `harvestReadyGreen -> harvestReady3`). Each period advances at most one
-native stage; the terminal transition to the final harvest-ready state is withheld
-until the harvest window, then the ready state is held through the window and
-mapped to the native dead state in every subsequent period. This preserves
-staggered maturity without inventing map stages or
-changing `growthTime`.
+not a promise that every visual state is present or used by every map. The
+runtime derives the longest native path from the active descriptor; optional
+states are omitted when the map uses a direct transition (for example
+`harvestReadyGreen -> harvestReady3`). For the current one- or two-month sowing
+windows, the first sowing month now reaches the final native harvest-ready state
+in the first harvest month, and the second in the second. Longer paths may skip
+intermediate visual stages at harvest; shorter paths hold the later cohort back.
+The ready state is held through the window and mapped to the native dead state
+afterward. No new state is invented and `growthTime` is not changed.
 
 The wither guard also reads the native fruit descriptor's
 `minHarvestingGrowthState`/`maxHarvestingGrowthState` range. If a map exposes
@@ -102,14 +102,15 @@ both `plantingAllowed` and `isHarvestable`. Without `lifecycle="annual"`, the
 preserve-native entries retain their original growth mappings.
 
 Before any annual mutation, each planting period is simulated from `invisible`
-to the final ready state, through the last harvest period and into `dead`.
+to the final ready state on its aligned harvest month, through the last harvest
+period and into `dead`.
 Missing initial/final states, a missing native path, malformed descriptors, or
 a cohort that cannot finish in the window reject the entire fruit policy; the
 original flags and mappings remain intact. There is no fallback that invents a
-path merely because the state names exist. Intermediate stages follow native
-edges; final readiness is held until the allowed window. The generated schedule
-does not preserve the map's original monthly timing or winter pauses: those
-timings are replaced by the configured SiN annual cycle.
+path merely because the state names exist. Intermediate states follow the map's
+ordered native path, but some may be skipped to meet the target month. The
+generated schedule does not preserve the map's original monthly timing or
+winter pauses: those timings are replaced by the configured SiN annual cycle.
 
 ### Executable lifecycle verification
 
@@ -141,12 +142,12 @@ shortened paths where the reference descriptors skip optional visual states:
 | Wheat | Oct, Nov | Jul | Aug |
 | Sorghum | Apr, May | Nov | Dec |
 
-Every tested cohort must traverse the selected path, first reach maturity within
-the crop's configured harvest window, remain ready until that window ends, then
-enter the native dead state in every subsequent post-window period.
-Different planting dates can converge on the same maturity period if both reach
-the pre-maturity state before the window opens. Tests also prove rejection is
-atomic and a repeat map-load hook does not reapply the policy. These are executable
+Every tested annual cohort must follow an ordered subset of the selected native
+path, first reach maturity in its corresponding harvest month, remain ready
+until the window ends, then enter the native dead state in every subsequent
+post-window period. The two planting months must not converge on the same
+maturity month. Tests also prove rejection is atomic and a repeat map-load hook
+does not reapply the policy. These are executable
 descriptor tests; density-map scheduling and actual harvesting remain live FS25
 validation responsibilities. Perennial/regrowth entries are not claimed to pass
 this annual-cycle test.
@@ -160,7 +161,7 @@ lifecycles cannot be safely reconstructed from a generic annual state chain.
 
 Source XML changes do not update an installed ZIP. Rebuild and copy
 `dist/SiN_FS25_Crop_Settings.zip` to the game's configured mod directory, then
-fully reload the save. Version 0.2.3.0 packages the user-edited XML unchanged.
+fully reload the save.
 The policy version string alone cannot distinguish edits made without bumping
 that string: compare the ZIP's `config/fruit-policy.xml` bytes to the source.
 The reported Oilseed Radish visual glitch is not yet reproduced or resolved;
@@ -188,6 +189,25 @@ late sowing: it cannot finish by November at one stage per boundary. The shorter
 native Sunflower path remains supported. Actual map support is checked at load;
 look for unsupported diagnostics. Rice's missing-state limitation and Spinach's
 preserved-native lifecycle remain unresolved and are not fixed by this change.
+
+### Aligned annual cohorts (mod 0.2.6.0)
+
+The current annual policy guarantees first planting month → first harvest month
+and second planting month → second harvest month, assuming the map exposes a
+usable native path. For maize this means April → September and May → October,
+for both full and shortened native paths. The previous one-stage-per-month rule
+could not meet this for all maps: full maize matured in October/November, while
+some short paths let both sowing cohorts ripen together. The revised mappings
+hold or skip existing intermediate states as needed, and validation rejects a
+fruit unless both cohorts mature on the exact target months. The former full
+Sunflower synthetic path is now supported by skipping visual stages. This
+supersedes the timing limitation documented for 0.2.5.0 above.
+
+Native density-map growth remains authoritative. Reloading the mod does not
+rewrite existing planted field states or recover their sowing dates, so a crop
+already behind schedule may not become ready retroactively in its current
+harvest month. Validate with fresh sowings and month-boundary observations on
+the active map before relying on the new schedule for production fields.
 
 Live retest: install 0.2.5.0, reload before the end of a harvest window, run
 `sinCropGrowth PEA`, then cross October to November. Period 8 should now show
@@ -261,7 +281,7 @@ For a live validation, build the ZIP, install the same bytes on server and every
 client, and restart/reload the save (policy application is map-load scoped).
 Verify one bounded log line like:
 
-`[SiN Crop Settings] policy=0.3.3-native-harvest-range-guard map=<map> applied=<n> changed=<n> skipped=<n> unsupported=0 conflicts=0`
+`[SiN Crop Settings] policy=0.3.4-aligned-cohort-maturity map=<map> applied=<n> changed=<n> skipped=<n> unsupported=0 conflicts=0`
 
 Then inspect the in-game calendar against the table above. Existing crop
 density states are not rewritten; changing future calendar transitions should

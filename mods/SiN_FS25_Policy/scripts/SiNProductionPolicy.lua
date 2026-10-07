@@ -188,6 +188,10 @@ local function runtimeFilename(productionPoint, xmlFile)
         for _, key in ipairs({"configFileName", "xmlFilename", "xmlFileName"}) do
             if type(productionPoint[key]) == "string" then return productionPoint[key] end
         end
+        local placeable = productionPoint.owningPlaceable
+        if type(placeable) == "table" and type(placeable.configFileName) == "string" then
+            return placeable.configFileName
+        end
     end
     if type(xmlFile) == "table" then
         for _, key in ipairs({"filename", "fileName"}) do
@@ -195,6 +199,86 @@ local function runtimeFilename(productionPoint, xmlFile)
         end
     end
     return nil
+end
+
+-- FS25 stores native productions as an indexed array and an ID lookup, not
+-- necessarily in sortedProductions. Override rate-only policies on the XMLFile
+-- passed to the native loader, then restore that in-memory XMLFile immediately.
+-- Native load consequently builds all derived rate/UI state itself, on both
+-- server and clients, without changing the source mod on disk.
+local function isRateOnlyPolicy(policy)
+    if policy == nil or type(policy.recipes) ~= "table" then return false end
+    local hasRate = false
+    for _, recipe in pairs(policy.recipes) do
+        if recipe.enabled == false or next(recipe.inputs) ~= nil or next(recipe.outputs) ~= nil then return false end
+        if recipe.cyclesPerHour ~= nil then hasRate = true end
+    end
+    return hasRate
+end
+
+function SiNProductionPolicy:loadWithNativeRecipeRates(productionPoint, superFunc, components, xmlFile, key,
+    customEnvironment, i3dMappings)
+    local id = canonicalIdForFilename(runtimeFilename(productionPoint, xmlFile))
+    local policy = id ~= nil and self.policies[id] or nil
+    local function loadUnchanged()
+        local success = superFunc(productionPoint, components, xmlFile, key, customEnvironment, i3dMappings)
+        if success ~= false then self:applyRuntimeRecipePolicy(productionPoint, xmlFile) end
+        return success
+    end
+    if not isRateOnlyPolicy(policy) then return loadUnchanged() end
+    if xmlFile == nil or type(xmlFile.iterate) ~= "function"
+        or type(xmlFile.getValue) ~= "function" or type(xmlFile.setValue) ~= "function"
+        or type(key) ~= "string" then
+        warning("native recipe rate policy unavailable id=" .. id .. " reason=xml-api-unavailable")
+        return loadUnchanged()
+    end
+
+    local changes, seen = {}, {}
+    xmlFile:iterate(key .. ".productions.production", function(_, productionKey)
+        local recipeId = xmlFile:getValue(productionKey .. "#id")
+        local recipe = policy.recipes[recipeId]
+        if recipe ~= nil and recipe.cyclesPerHour ~= nil then
+            local path = productionKey .. "#cyclesPerHour"
+            local previous = xmlFile:getValue(path)
+            if seen[recipeId] == nil and type(previous) == "number" and previous > 0 then
+                table.insert(changes, {path = path, previous = previous, effective = recipe.cyclesPerHour})
+                seen[recipeId] = true
+            end
+        end
+    end)
+    local expected = 0
+    for _, recipe in pairs(policy.recipes) do
+        if recipe.cyclesPerHour ~= nil then expected = expected + 1 end
+    end
+    if #changes ~= expected then
+        warning("native recipe rate policy unavailable id=" .. id .. " reason=unmatched-native-recipe")
+        return loadUnchanged()
+    end
+
+    local staged, attempted = 0, 0
+    for index, change in ipairs(changes) do
+        attempted = index
+        local ok = pcall(xmlFile.setValue, xmlFile, change.path, change.effective)
+        if not ok or xmlFile:getValue(change.path) ~= change.effective then break end
+        staged = staged + 1
+    end
+    if staged ~= #changes then
+        for index = attempted, 1, -1 do
+            local change = changes[index]
+            xmlFile:setValue(change.path, change.previous)
+        end
+        warning("native recipe rate policy unavailable id=" .. id .. " reason=xml-override-failed")
+        return loadUnchanged()
+    end
+
+    local ok, success = pcall(superFunc, productionPoint, components, xmlFile, key, customEnvironment, i3dMappings)
+    for index = #changes, 1, -1 do
+        local change = changes[index]
+        xmlFile:setValue(change.path, change.previous)
+    end
+    if not ok then error(success) end
+    if success ~= false then info("native recipe rates applied id=" .. id .. " recipes=" .. tostring(#changes)) end
+    return success
 end
 
 local function fillTypeName(entry)
@@ -428,9 +512,8 @@ function SiNProductionPolicy:installRuntimeRecipeHook()
     end
     ProductionPoint.load = Utils.overwrittenFunction(ProductionPoint.load,
         function(productionPoint, superFunc, components, xmlFile, key, customEnvironment, i3dMappings)
-            local success = superFunc(productionPoint, components, xmlFile, key, customEnvironment, i3dMappings)
-            if success ~= false then SiNProductionPolicy:applyRuntimeRecipePolicy(productionPoint, xmlFile) end
-            return success
+            return SiNProductionPolicy:loadWithNativeRecipeRates(productionPoint, superFunc, components, xmlFile,
+                key, customEnvironment, i3dMappings)
         end)
     ProductionPoint.__sinProductionPolicyRecipeHookInstalled = true
     return true

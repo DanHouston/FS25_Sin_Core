@@ -2,6 +2,7 @@
 import asyncio
 import hashlib
 import logging
+import time
 from datetime import datetime, timezone
 import discord
 from pymongo.errors import DuplicateKeyError
@@ -40,6 +41,7 @@ class ActivityPublisher:
     def __init__(self, bot, database, interval=2.0, max_attempts=5):
         self.bot, self.outbox, self.interval, self.max_attempts = bot, ActivityOutbox(database), interval, max_attempts
         self.task = None
+        self.last_cycle_at = None
     def start(self):
         if self.task is None or self.task.done():
             self.task = asyncio.create_task(self.run()); LOG.info("[SiN Activity] publisher started")
@@ -58,6 +60,7 @@ class ActivityPublisher:
                     {"status": "pending", "world_generation_state": {"$ne": "historical"}})
                     .sort("created_at", 1).limit(25)):
                 await self.publish(record)
+            self.last_cycle_at = time.time()
             await asyncio.sleep(self.interval)
 
     async def _channel_member(self, channel):

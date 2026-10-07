@@ -581,10 +581,14 @@ local function buildAnnualLifecycle(fruitType, entry, seasonal, state)
     local planting = {}
     local harvest = {}
     local firstPlant = nil
+    local plantingCount = 0
     local harvestCount = 0
     for _, period in ipairs(entry.periods) do
         planting[period.index] = period.plantingAllowed == true
         harvest[period.index] = period.harvestAllowed == true
+        if planting[period.index] then
+            plantingCount = plantingCount + 1
+        end
         if planting[period.index] and firstPlant == nil then
             firstPlant = period.index
         end
@@ -612,9 +616,13 @@ local function buildAnnualLifecycle(fruitType, entry, seasonal, state)
         return reject("annual lifecycle requires initial and final growth states")
     end
     local lastHarvestOffset = -1
+    local firstHarvestOffset = 12
     for period = 1, 12 do
         if harvest[period] then
             local offset = periodOffset(firstPlant, period)
+            if offset < firstHarvestOffset then
+                firstHarvestOffset = offset
+            end
             if offset > lastHarvestOffset then
                 lastHarvestOffset = offset
             end
@@ -622,6 +630,16 @@ local function buildAnnualLifecycle(fruitType, entry, seasonal, state)
     end
     if lastHarvestOffset < 0 then
         return reject("annual lifecycle harvest window unsupported")
+    end
+    -- SiN annual policy uses one or two consecutive sowing months. Enforce a
+    -- corresponding first/second harvest month instead of merely becoming
+    -- ready somewhere in the wider harvest window.
+    if plantingCount > 2 or firstHarvestOffset < 2 or
+       (plantingCount == 2 and
+        (not planting[(firstPlant % 12) + 1] or
+         firstHarvestOffset >= 11 or
+         not harvest[((firstPlant + firstHarvestOffset) % 12) + 1])) then
+        return reject("annual lifecycle aligned planting/harvest windows unsupported")
     end
     -- Validate every period before changing any mapping.  A partially
     -- rewritten annual descriptor is worse than leaving the map native when a
@@ -644,6 +662,7 @@ local function buildAnnualLifecycle(fruitType, entry, seasonal, state)
     else
         return reject("native growth path unavailable")
     end
+    local anchorIndex = math.min(#states - 1, firstHarvestOffset - 1)
     local plan = {}
     for period = 1, 12 do
         local offset = periodOffset(firstPlant, period)
@@ -658,15 +677,19 @@ local function buildAnnualLifecycle(fruitType, entry, seasonal, state)
             replacement[invisible] = states[1]
         end
         if offset <= lastHarvestOffset then
-            -- Advance one native stage per period.  The terminal transition is
-            -- deliberately withheld until the harvest window, preventing a
-            -- crop from becoming harvest-ready early while retaining
-            -- staggered maturity for different planting dates.
-            for stateIndex = 1, #states - 2 do
+            -- Maintain one state of separation between sowing cohorts. Long
+            -- paths skip intermediate visual states at harvest; short paths
+            -- hold the later cohort until the following harvest month.
+            for stateIndex = 1, anchorIndex - 2 do
                 replacement[states[stateIndex]] = states[stateIndex + 1]
             end
-            if harvest[period] then
-                replacement[states[#states - 1]] = states[#states]
+            if anchorIndex > 1 and (offset <= anchorIndex or offset >= firstHarvestOffset) then
+                replacement[states[anchorIndex - 1]] = states[anchorIndex]
+            end
+            if offset >= firstHarvestOffset and harvest[period] then
+                for stateIndex = anchorIndex, #states - 1 do
+                    replacement[states[stateIndex]] = states[#states]
+                end
                 replacement[states[#states]] = states[#states]
             end
         end
@@ -709,8 +732,9 @@ local function buildAnnualLifecycle(fruitType, entry, seasonal, state)
                 local outgoing = (period + 10) % 12 + 1
                 current = plan[outgoing][current] or current
                 if current == states[#states] then
-                    if not harvest[period] then
-                        return reject("maturity outside harvest window")
+                    if not harvest[period] or step < firstHarvestOffset or
+                       (not reachedReady and step ~= firstHarvestOffset) then
+                        return reject("maturity outside aligned harvest month")
                     end
                     reachedReady = true
                 elseif reachedReady then

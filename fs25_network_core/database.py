@@ -46,6 +46,7 @@ class Database:
         )
         self.db.ledger_entries.create_index("transaction_id", unique=True)
         self.db.wallet_transfers.create_index("transaction_id", unique=True)
+        self.db.admin_payments.create_index("created_at")
         self.db.withdrawals.create_index([("state", 1), ("created_at", 1)])
         self.db.deposit_requests.create_index([("state", 1), ("created_at", 1)])
         self.db.link_codes.create_index("expires_at", expireAfterSeconds=0)

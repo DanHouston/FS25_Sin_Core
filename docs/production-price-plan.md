@@ -133,46 +133,45 @@ treating the output's gross value consistently with crop production.
 | Small Sawmill | $36k | Hold native |
 | Small Cement Factory; EU Cement Factory; US Cement Factory | $37k | Hold native |
 
-## G. Livestock feed and forage silos - proposed for review
+## G. Livestock feed and forage silos - historical price basis and current rates
 
 The American Silos Production Pack is identified by the stable canonical IDs
 below, not its localized display title. These are storage/animal-feed assets;
 they should not receive the crop-converter revenue multiplier.
 
-| Canonical asset | Tier | Native price | Capacity | Target recipe capability/rates | Native annual gross / recipe | Candidate price |
+| Canonical asset | Tier | Native price | Capacity | Current policy recipe rates | Original policy annual gross / recipe (before 4x silage change) | Candidate price |
 |---|---|---:|---:|---|---:|---:|
-| `FS25_AmericanSilosProductionPack:silos/staveSiloSmall.xml` | Small | $50k | 250,000 L | Common full set; hay/silage 4,000 cycles/h, pig food 1.5, forage 2.5 | $65k-$605k | **$302.5k** |
-| `FS25_AmericanSilosProductionPack:silos/steelSiloSmall.xml` | Small | $75k | 250,000 L | Common full set; hay/silage 4,000 cycles/h, pig food 1.5, forage 2.5 | $65k-$605k | **$302.5k** |
-| `FS25_AmericanSilosProductionPack:silos/staveSiloLarge.xml` | Large | $100k | 500,000 L | Common full set; hay/silage 5,000 cycles/h, pig food 2, forage 3.5 | $81k-$806k | **$403k** |
-| `FS25_AmericanSilosProductionPack:silos/steelSiloLarge.xml` | Large | $125k | 500,000 L | Common full set; hay/silage 5,000 cycles/h, pig food 2, forage 3.5 | $81k-$806k | **$403k** |
+| `FS25_AmericanSilosProductionPack:silos/staveSiloSmall.xml` | Small | $50k | 250,000 L | Hay 4,000; silage 16,000; pig food 1.5; forage 2.5 cycles/h | $65k-$605k | **$302.5k** |
+| `FS25_AmericanSilosProductionPack:silos/steelSiloSmall.xml` | Small | $75k | 750,000 L | Hay 4,000; silage 16,000; pig food 1.5; forage 2.5 cycles/h | $65k-$605k | **$302.5k** |
+| `FS25_AmericanSilosProductionPack:silos/staveSiloLarge.xml` | Large | $100k | 500,000 L | Hay 5,000; silage 20,000; pig food 2; forage 3.5 cycles/h | $81k-$806k | **$403k** |
+| `FS25_AmericanSilosProductionPack:silos/steelSiloLarge.xml` | Large | $125k | 1,000,000 L | Hay 5,000; silage 20,000; pig food 2; forage 3.5 cycles/h | $81k-$806k | **$403k** |
 
 “Aligned capability” means matching recipe IDs, input amounts, output amounts,
 and cycles/hour within each tier. The large pair already meets that rule in the
 source XMLs. The small pair has matching inputs/outputs but native rates of
 4,000/1.5/2.5 (stave) versus 4,500/2/3 (steel) for hay/silage, pig food, and
-forage respectively. The target uses the lower existing small-tier rates, so
-the steel small silo is normalized down to the stave small profile rather than
-raising the smaller stave silo. The source ZIP remains untouched; these are the
-rates to encode in the SiN runtime policy after live validation.
+forage respectively. The policy targets the lower existing small-tier rates, so
+the steel small silo is configured to match the stave small profile for hay,
+pig food, and forage rather than raising the smaller stave silo. All four
+silage recipes are now configured at four times the original small/large tier
+rates. The source ZIP remains untouched.
 
 Every silo can convert grass to hay; chaff, grass, hay, or straw to silage;
 the crop recipe `500 maize + 250 wheat + 175 canola + 75 sugar beet` to
 1,000 pig food; and `400 silage + 400 hay + 200 straw` to 1,000 forage. The
-The capability policy should make the two small silos and the two large silos
-identical within their tier: matching recipe IDs, input/output amounts,
-cycles/hour, and capacity. Each tier should expose the complete common set
-above: hay, silage, pig food, and forage. The small/large distinction remains
-250,000 L versus 500,000 L, with separately reviewed purchase prices, rather
-than one sibling silently having a different capacity or recipe profile.
+capability policy targets matching recipe IDs, input/output amounts, and
+cycles/hour within each tier. Storage capacities remain native and differ
+between stave and steel: 250,000/750,000 L for small and 500,000/1,000,000 L
+for large.
 
 The four native rates and capacities are not a clean small-to-large linear
 family, so their purchase prices should still be checked against intended
-livestock demand and storage capacity. The candidate values use native cycles
-and the highest sustainable recipe's six-game-month gross output (144 active
-game-hours), with no input-cost deduction. No throughput multiplier is proposed:
-the native 4,000-5,000 cycles/hour drying and silage rates are already extremely
-high, and multiplying them would create an artificial processing-rate policy
-rather than a purchase-price policy.
+livestock demand and storage capacity. The candidate values use the original
+policy rates and the highest sustainable recipe's six-game-month gross output
+(144 active game-hours), with no input-cost deduction. The original price
+calculation did not multiply throughput. The later 4x change applies only to
+silage throughput; the purchase prices still derive from the pig-food gross
+case, which is unchanged.
 
 ## Catalog coverage check
 

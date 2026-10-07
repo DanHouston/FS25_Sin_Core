@@ -556,6 +556,64 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Payment confirmed: $25 credited", message)
         self.assertIn("DM could not be delivered; their SiN account was still credited", message)
 
+    async def test_admin_pay_requires_operator_and_does_not_debit_admin(self):
+        command = self.bot.tree.get_command("admin_pay")
+        self.assertEqual([option["name"] for option in command.to_dict(self.bot.tree)["options"]],
+                         ["player", "amount", "memo"])
+        interaction = MagicMock()
+        interaction.id = 9010
+        interaction.guild_id = 1
+        interaction.user.id = 42
+        interaction.user.roles = [SimpleNamespace(id=42)]
+        interaction.response.defer = AsyncMock()
+        interaction.followup.send = AsyncMock()
+        player = SimpleNamespace(id=77, bot=False, mention="<@77>", send=AsyncMock())
+        self.bot.bank.admin_pay_player = MagicMock(return_value={
+            "state": "completed", "new": True, "recipient_verified": True,
+            "payment_reference": "9010"})
+
+        await command.callback(interaction, player, 50, "Harvest bonus")
+
+        self.bot.bank.admin_pay_player.assert_called_once_with(
+            "9010", "42", "77", 50, "Harvest bonus")
+        message = interaction.followup.send.await_args.args[0]
+        self.assertIn("Admin payment confirmed: $50 credited", message)
+        self.assertIn("No personal SiN checking or FS25 farm balance was debited", message)
+        self.assertTrue(interaction.followup.send.await_args.kwargs["ephemeral"])
+        self.assertIn("SiN Administration credited $50", player.send.await_args.args[0])
+
+        player.send.reset_mock()
+        self.bot.bank.admin_pay_player.return_value["new"] = False
+        await command.callback(interaction, player, 50, "Harvest bonus")
+        player.send.assert_not_awaited()
+
+        interaction.user.roles = [SimpleNamespace(id=99)]
+        self.bot.bank.admin_pay_player.reset_mock()
+        with self.assertRaisesRegex(ValueError, "Network Admin role"):
+            await command.callback(interaction, player, 50, "Harvest bonus")
+        self.bot.bank.admin_pay_player.assert_not_called()
+
+    async def test_admin_pay_rejects_bot_and_unconfirmed_credit(self):
+        interaction = MagicMock()
+        interaction.id = 9011
+        interaction.guild_id = 1
+        interaction.user.id = 42
+        interaction.user.roles = [SimpleNamespace(id=42)]
+        interaction.response.defer = AsyncMock()
+        self.bot.bank.admin_pay_player = MagicMock()
+        with self.assertRaisesRegex(ValueError, "not a bot"):
+            await self.bot.tree.get_command("admin_pay").callback(
+                interaction, SimpleNamespace(id=77, bot=True), 50, "bonus")
+        self.bot.bank.admin_pay_player.assert_not_called()
+
+        player = SimpleNamespace(id=77, bot=False, mention="<@77>", send=AsyncMock())
+        self.bot.bank.admin_pay_player.return_value = {
+            "state": "completed", "new": True, "recipient_verified": False,
+            "payment_reference": "9011"}
+        with self.assertRaisesRegex(ValueError, "could not be confirmed"):
+            await self.bot.tree.get_command("admin_pay").callback(interaction, player, 50, "bonus")
+        player.send.assert_not_awaited()
+
     async def test_balance_shows_latest_definitive_bank_outcome_when_dm_unavailable(self):
         interaction = MagicMock()
         interaction.user.id = 42
@@ -576,6 +634,55 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Game balance: $1,000", message)
         self.assertIn("Last deposit: $100 — complete", message)
         self.assertIn("Last withdrawal: $50 — failed; funds returned", message)
+
+    async def test_balance_waits_for_matching_snapshot_before_reply(self):
+        pending = {"game_balance": None,
+                   "game_balance_reason": "updating after recent transfer",
+                   "last_verified_game_balance": 55374.44,
+                   "available_balance": 600006, "pending_deposits": 0, "pending_withdrawals": 0}
+        current = {**pending, "game_balance": 55374.44, "game_balance_reason": None}
+        self.bot.bank.account_summary = MagicMock(side_effect=[pending, current])
+        with patch("fs25_network_core.bot_frontend.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            result = await self.bot._balance_summary_for_display(
+                "42", {"server_id": "server", "save_id": "save"},
+                max_wait_seconds=26, poll_seconds=2)
+        self.assertEqual(result["game_balance"], 55374.44)
+        self.assertEqual(self.bot.bank.account_summary.call_count, 2)
+        sleep.assert_awaited_once()
+
+    async def test_balance_wait_is_bounded_when_snapshot_does_not_catch_up(self):
+        pending = {"game_balance": None,
+                   "game_balance_reason": "updating after recent transfer",
+                   "last_verified_game_balance": 55374.44}
+        self.bot.bank.account_summary = MagicMock(return_value=pending)
+        with patch("fs25_network_core.bot_frontend.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            result = await self.bot._balance_summary_for_display(
+                "42", {"server_id": "server", "save_id": "save"},
+                max_wait_seconds=0)
+        self.assertIs(result, pending)
+        self.bot.bank.account_summary.assert_called_once()
+        sleep.assert_not_awaited()
+
+    async def test_balance_timeout_does_not_show_known_stale_game_amount(self):
+        interaction = MagicMock()
+        interaction.user.id = 42
+        interaction.response.defer = AsyncMock()
+        interaction.followup.send = AsyncMock()
+        self.bot.resolve_identity_context = MagicMock(return_value={
+            "server_key": "server-a", "save_key": "save-a", "world_id": "world-a"})
+        self.bot._balance_summary_for_display = AsyncMock(return_value={
+            "game_balance": None, "game_balance_reason": "updating after recent transfer",
+            "last_verified_game_balance": 55374.44,
+            "available_balance": 600006, "pending_deposits": 0, "pending_withdrawals": 0})
+        self.bot.bank.recent_operation_status = MagicMock(return_value={})
+
+        await self.bot.tree.get_command("balance").callback(interaction)
+
+        message = interaction.followup.send.await_args.args[0]
+        self.assertIn("Game balance: updating after transfer", message)
+        self.assertIn("last verified $55,374", message)
+        self.assertNotIn("$355,374", message)
+        self.assertIn("SiN bank balance: $600,006", message)
 
     async def test_contract_identity_context_auto_selects_one_server_and_fails_closed_for_multiple(self):
         database = self.bot.bank.database.db

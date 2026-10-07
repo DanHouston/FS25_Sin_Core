@@ -9,6 +9,7 @@ to a Discord channel selected by name.
 import asyncio
 import hashlib
 import logging
+import time
 from datetime import datetime, timezone
 
 import discord
@@ -177,6 +178,7 @@ class ServerStatusPublisher:
         self.db = database.db
         self.interval = float(interval)
         self.task = None
+        self.last_cycle_at = None
         self._needs_recovery = True
 
     def start(self):
@@ -197,6 +199,7 @@ class ServerStatusPublisher:
         while True:
             try:
                 await self.publish_once()
+                self.last_cycle_at = time.time()
             except Exception:
                 LOG.exception("[SiN Status] dashboard refresh failed")
             await asyncio.sleep(self.interval)

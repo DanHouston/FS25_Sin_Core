@@ -287,6 +287,53 @@ class PairingAgent:
                     continue
                 if math.isfinite(price) and price >= 0:
                     farmland_prices[farmland_id] = price
+        def parse_vehicle_inventory():
+            vehicles = []
+            seen_vehicle_ids = set()
+            for node in root.findall("./vehicles/vehicle"):
+                unique_id = node.get("uniqueId", "")
+                filename = node.get("filename", "")
+                try:
+                    farm_id = int(node.get("farmId", "0"))
+                except (TypeError, ValueError):
+                    raise ValueError("invalid vehicle farm ID") from None
+                if (not unique_id or len(unique_id) > 160 or unique_id in seen_vehicle_ids
+                        or not filename or len(filename) > 1024 or not 1 <= farm_id <= 254
+                        or str(farm_id) not in farms):
+                    raise ValueError("invalid vehicle inventory row")
+                seen_vehicle_ids.add(unique_id)
+                row = {"unique_id": unique_id, "farm_id": farm_id,
+                       "filename": filename, "name": node.get("name", "")[:240],
+                       "mod_name": node.get("modName", "")[:160]}
+                raw_sell_value = node.get("sellValue")
+                if raw_sell_value is not None:
+                    try:
+                        sell_value = float(raw_sell_value)
+                    except (TypeError, ValueError):
+                        raise ValueError("invalid vehicle sell value") from None
+                    if not math.isfinite(sell_value) or sell_value < 0:
+                        raise ValueError("invalid vehicle sell value")
+                    row["sell_value"] = sell_value
+                vehicles.append(row)
+                if len(vehicles) > 5000:
+                    raise ValueError("vehicle inventory exceeds safe limit")
+            try:
+                expected_count = int(root.get("vehicleInventoryCount", "-1"))
+            except (TypeError, ValueError):
+                raise ValueError("invalid vehicle inventory count") from None
+            if expected_count != len(vehicles):
+                raise ValueError("incomplete vehicle inventory")
+            return vehicles
+
+        vehicle_inventory_ready = root.get("vehicleInventoryReady") == "true"
+        vehicles = []
+        if vehicle_inventory_ready:
+            try:
+                vehicles = parse_vehicle_inventory()
+            except ValueError:
+                # An inventory fault must not stall unrelated farm/balance
+                # observations behind a permanently bad snapshot XML file.
+                vehicle_inventory_ready = False
         payload = {"source": "game", "session": root.get("session", ""),
                 "runtime_generation": int(root.get("runtimeGeneration", "0")),
                 "sequence": int(root.get("sequence", "0")),
@@ -296,7 +343,9 @@ class PairingAgent:
                 "farm_asset_values": farm_asset_values,
                 "players": players, "farmlands": farmlands,
                 "farmland_prices": farmland_prices,
-                "farmland_price_source_ready": root.get("farmlandPriceSourceReady") == "true"}
+                "farmland_price_source_ready": root.get("farmlandPriceSourceReady") == "true",
+                "vehicle_inventory_ready": vehicle_inventory_ready,
+                "vehicles": vehicles}
         optional_numbers = (("currentMonth", "current_month", int),
                             ("currentDay", "current_day", int),
                             ("dayTimeMinutes", "day_time_minutes", int),
