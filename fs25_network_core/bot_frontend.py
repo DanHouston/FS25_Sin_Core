@@ -9,6 +9,7 @@ from collections.abc import Mapping
 
 import discord
 from discord import app_commands
+from pymongo.errors import PyMongoError
 
 from .banking_engine import BankingEngine
 from .database import Database
@@ -1160,6 +1161,12 @@ class NetworkBot(discord.Client):
             except ValueError as error:
                 await interaction.followup.send(str(error), ephemeral=True)
                 return
+            except PyMongoError:
+                logging.exception("Vehicle code registry unavailable")
+                await interaction.followup.send(
+                    "Vehicle inventory is temporarily unavailable; please try again later.",
+                    ephemeral=True)
+                return
             rows = inventory["vehicles"]
             page_size = 10
             total_pages = max(1, (len(rows) + page_size - 1) // page_size)
@@ -1176,11 +1183,12 @@ class NetworkBot(discord.Client):
                 label = discord.utils.escape_markdown(name[:70])
                 value = row.get("sell_value")
                 price = f"${value:,.0f}" if value is not None else "sell-back unavailable"
-                vehicle_id = discord.utils.escape_markdown(row["unique_id"][-36:])
-                lines.append(f"• {label} — {price} — ID suffix `{vehicle_id}`")
+                code = row["code"]
+                lines.append(f"• {label} — {price} — code `{code}`")
             if not rows:
                 lines.append("No owned vehicles are currently loaded for this farm.")
-            lines.append("Live inventory only; no garage deposit or transfer has occurred.")
+            lines.append("SiN codes are permanent and globally unique; the full FS25 ID remains authoritative. "
+                         "Live inventory only; no garage deposit or transfer has occurred.")
             await interaction.followup.send("\n".join(lines), ephemeral=True,
                                             allowed_mentions=discord.AllowedMentions.none())
 

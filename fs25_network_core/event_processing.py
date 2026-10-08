@@ -14,6 +14,8 @@ from .business_workflows import TransferService
 from .banking_engine import BankingEngine
 from .map_service import MapModel, MapStore, MapValidationError
 from .native_contracts import NativeContractService
+from .farm_finance_telemetry import FarmFinanceTelemetry, FarmFinanceValidationError
+from .farm_operational_telemetry import FarmOperationalTelemetry, FarmOperationalValidationError
 from pymongo.errors import DuplicateKeyError
 
 LOG = logging.getLogger(__name__)
@@ -22,7 +24,7 @@ MAP_EVENT_TYPE = "map_geometry"
 SUPPORTED_EVENTS = {"heartbeat", "player_connected", "player_disconnected", ACTIVITY_EVENT_TYPE,
                     CHAT_EVENT_TYPE, MAP_EVENT_TYPE, "native_contract_available",
                     "native_contract_accepted", "native_contract_completed", "native_contract_cancelled",
-                    "native_contract_expired"}
+                    "native_contract_expired", "farm_finance_batch", "farm_operations_batch"}
 
 
 def scoped_event_id(server_key, save_key, event_id, world_id=None):
@@ -60,6 +62,8 @@ class CentralEventProcessor:
         self.transfers = TransferService(database, self.authorization)
         self.banking = BankingEngine(database)
         self.native_contracts = NativeContractService(database)
+        self.farm_finance = FarmFinanceTelemetry(database)
+        self.farm_operations_telemetry = FarmOperationalTelemetry(database)
 
     def _map_event_is_ahead_of_active_runtime(self, server_key, payload):
         """Return true when geometry belongs to a runtime not active yet.
@@ -199,6 +203,23 @@ class CentralEventProcessor:
                                                        "lifecycle": lifecycle})
             result = {"status": "accepted", "native_contract_id": contract["_id"],
                       "lifecycle": lifecycle, "save_key": save_key}
+        elif event_type == "farm_finance_batch":
+            try:
+                changes = self.farm_finance.ingest_batch(record["server_key"], save_key,
+                                                         processed_world_id, event_id,
+                                                         event.get("payload"))
+            except FarmFinanceValidationError as error:
+                raise EventValidationError(str(error)) from None
+            result = {"status": "accepted", "finance_change_count": len(changes),
+                      "save_key": save_key}
+        elif event_type == "farm_operations_batch":
+            try:
+                changes = self.farm_operations_telemetry.ingest_batch(
+                    record["server_key"], save_key, processed_world_id, event.get("payload"))
+            except FarmOperationalValidationError as error:
+                raise EventValidationError(str(error)) from None
+            result = {"status": "accepted", "operation_count": len(changes),
+                      "save_key": save_key}
         elif event_type == "player_connected":
             raw_payload = event.get("payload") or {}
             if not isinstance(raw_payload, dict):

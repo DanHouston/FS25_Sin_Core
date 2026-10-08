@@ -276,6 +276,16 @@ function FS25SiNServer:loadMap()
     self.elapsed = 0
     self.sequence = 0
     self.eventSequence = 0
+    self.financeSequence = 0
+    self.financePending = {}
+    self.financeFlushElapsed = 0
+    self.financeBatchAttempt = 0
+    self.financeOverflowLogged = false
+    self.financeObserveDepth = 0
+    self.financeHookInstalled = false
+    self.financeHookTarget = nil
+    self.financeHookWrapper = nil
+    self.financeHookOriginal = nil
     self.failed = false
     self.nativeContractLifecycleListenerInstalled = false
     self.session = getDate("%Y%m%d%H%M%S")
@@ -344,6 +354,10 @@ function FS25SiNServer:loadMap()
     self.positionBoundaryLogged = {}
     self.positionRestoreTimeout = 60000
     self:installLifecycleHooks()
+    if g_currentMission ~= nil and g_currentMission:getIsServer() then
+        self:installFinanceObservationHook()
+        self:initializeFarmOperations()
+    end
     addConsoleCommand("sinPermissions", "Report local FS25 farm permission state", "consoleCommandPermissions", self)
     addConsoleCommand("sinSelfTest", "Report read-only SiN runtime integration checks", "consoleCommandSelfTest", self)
     addConsoleCommand("sinFarmland", "Report authoritative owner for a farmland ID", "consoleCommandFarmland", self)
@@ -355,6 +369,149 @@ function FS25SiNServer:loadMap()
     end
     self:installNativeContractLifecycleListener()
     Logging.info("[SiN (SimNet) Server] Loaded; telemetry directory: %s", self.directory)
+end
+
+-- Observe the native money path without changing its arguments, return values,
+-- or error behavior.  The hook only appends a small Lua record; mailbox I/O is
+-- performed later by update() so a purchase or sale never waits for telemetry.
+-- We record the *actual* farm balance delta, not the requested amount, because
+-- another mod may adjust or reject the transaction.  Direct Farm:changeBalance
+-- calls (including SiN bank delivery) are deliberately not called native
+-- finance entries; snapshot reconciliation will expose any uncategorized gap.
+function FS25SiNServer:installFinanceObservationHook()
+    local mission = g_currentMission
+    if mission == nil or type(mission.addMoney) ~= "function" then return false end
+    if self.financeHookInstalled == true and self.financeHookTarget == mission
+        and mission.addMoney == self.financeHookWrapper then return true end
+    local original = mission.addMoney
+    local unpackValues = table.unpack or unpack
+    self.financeCategoryByMoneyType = {}
+    if type(MoneyType) == "table" then
+        for key, value in pairs(MoneyType) do
+            if type(key) == "string" and (type(value) == "table" or type(value) == "number") then
+                self.financeCategoryByMoneyType[value] = key
+            end
+        end
+    end
+    local wrapper = function(target, amount, farmId, moneyType, ...)
+        local farm = nil
+        local before = nil
+        local observe = (FS25SiNServer.financeObserveDepth or 0) == 0
+        FS25SiNServer.financeObserveDepth = (FS25SiNServer.financeObserveDepth or 0) + 1
+        if observe then
+            pcall(function()
+                farm = g_farmManager ~= nil and g_farmManager:getFarmById(farmId) or nil
+                if farm ~= nil and type(farm.getBalance) == "function" then
+                    local ok, value = pcall(farm.getBalance, farm)
+                    if ok and type(value) == "number" then before = value end
+                end
+            end)
+        end
+        local function pack(...) return {n=select("#", ...), ...} end
+        local results = pack(original(target, amount, farmId, moneyType, ...))
+        FS25SiNServer.financeObserveDepth = FS25SiNServer.financeObserveDepth - 1
+        -- A telemetry failure must never fail an otherwise successful native
+        -- money transaction, including a nil farm, client call, or bad type.
+        pcall(function()
+            if observe and target == g_currentMission and target:getIsServer() and before ~= nil then
+                local after = farm:getBalance()
+                if type(after) == "number" and after ~= before then
+                    FS25SiNServer:queueFinanceObservation(farmId, moneyType, before, after)
+                end
+            end
+        end)
+        return unpackValues(results, 1, results.n)
+    end
+    mission.addMoney = wrapper
+    self.financeHookInstalled = true
+    self.financeHookTarget = mission
+    self.financeHookWrapper = wrapper
+    self.financeHookOriginal = original
+    Logging.info("[SiN Finance] native money observation installed")
+    return true
+end
+
+function FS25SiNServer:queueFinanceObservation(farmId, moneyType, before, after)
+    if type(self.financePending) ~= "table" or #self.financePending >= 2048 then
+        if self.financeOverflowLogged ~= true then
+            self.financeOverflowLogged = true
+            Logging.warning("[SiN Finance] telemetry buffer full; finance history may have a gap")
+        end
+        return false
+    end
+    local category = moneyType ~= nil and self.financeCategoryByMoneyType ~= nil
+        and self.financeCategoryByMoneyType[moneyType] or nil
+    if category == nil and type(moneyType) == "table" then
+        category = moneyType.statsName or moneyType.name or moneyType.id
+    end
+    if category == nil and (type(moneyType) == "string" or type(moneyType) == "number") then
+        category = moneyType
+    end
+    local environment = g_currentMission ~= nil and g_currentMission.environment or nil
+    self.financeSequence = self.financeSequence + 1
+    local eventId = string.format("%s-%s-finance-%d", tostring(self.serverKey or "unbound"),
+        tostring(self.runtimeNonce or "runtime"), self.financeSequence)
+    table.insert(self.financePending, {
+        eventId=eventId,
+        values={farm_id=farmId, source_sequence=self.financeSequence,
+            amount=after-before, balance_before=before,
+            balance_after=after, money_type=tostring(category or "unknown"),
+            game_period=environment ~= nil and environment.currentPeriod or "",
+            game_day=environment ~= nil and environment.currentDay or "",
+            game_year=environment ~= nil and environment.currentYear or "",
+            game_time_ms=environment ~= nil and type(environment.dayTime) == "number"
+                and math.floor(environment.dayTime) or ""}
+    })
+    return true
+end
+
+function FS25SiNServer:flushFinanceObservations()
+    if type(self.financePending) ~= "table" or #self.financePending == 0 then return end
+    local count = math.min(#self.financePending, 128)
+    local batchId = self.financePending[1].eventId .. "-through-"
+        .. tostring(self.financePending[count].eventId)
+        .. "-attempt-" .. tostring(self.financeBatchAttempt or 0)
+    local ok, written, reason = pcall(self.emitFinanceBatch, self, batchId, count)
+    if not ok or written ~= true then
+        if reason == "path-exists" then
+            self.financeBatchAttempt = (self.financeBatchAttempt or 0) + 1
+        end
+        return
+    end
+    for _ = 1, count do table.remove(self.financePending, 1) end
+    self.financeBatchAttempt = 0
+end
+
+-- A single bounded mailbox file carries up to 128 individual native changes.
+-- Each row keeps its own immutable ID so a retry after partial Central ingest
+-- remains idempotent without doing XML or network I/O in Mission:addMoney.
+function FS25SiNServer:emitFinanceBatch(batchId, count)
+    if self.serverKey == nil or self.serverCredential == nil or self.eventDirectory == nil
+        or self.runtimeIdentityReady ~= true or self.worldIdentityReady ~= true or self.worldId == nil then return false end
+    local path = self.eventDirectory .. batchId .. ".xml"
+    -- A pre-existing path after a failed save might be partial. Never treat
+    -- mere existence as a successful delivery and discard the buffered rows.
+    if fileExists(path) then return false, "path-exists" end
+    local xml = XMLFile.create("networkLocalFinanceBatch", path, "serverEvent")
+    if xml == nil then return false end
+    xml:setString("serverEvent#event_id", batchId)
+    xml:setString("serverEvent#event_type", "farm_finance_batch")
+    xml:setString("serverEvent#server_key", self.serverKey)
+    xml:setString("serverEvent#server_credential", self.serverCredential)
+    xml:setString("serverEvent#save_id", tostring(g_currentMission.missionInfo.savegameIndex or 0))
+    xml:setString("serverEvent#world_id", tostring(self.worldId))
+    for i = 1, count do
+        local record = self.financePending[i]
+        local key = string.format("serverEvent.changes.change(%d)", i - 1)
+        xml:setString(key .. "#event_id", record.eventId)
+        for field, value in pairs(record.values) do
+            local encoded = type(value) == "number" and string.format("%.17g", value) or tostring(value)
+            xml:setString(key .. "#" .. tostring(field), encoded)
+        end
+    end
+    local saved = xml:save()
+    xml:delete()
+    return saved == true
 end
 
 function FS25SiNServer:installNativeContractLifecycleListener()
@@ -1832,6 +1989,11 @@ function FS25SiNServer:update(dt)
     if self.failed or g_currentMission == nil or not g_currentMission:getIsServer() then
         return
     end
+    if self.financeHookInstalled ~= true or self.financeHookTarget ~= g_currentMission
+        or self.financeHookWrapper ~= g_currentMission.addMoney then
+        self:installFinanceObservationHook()
+    end
+    self:updateFarmOperations(dt)
     self:restorePendingPlayerPositions(dt)
     self.elapsed = self.elapsed + dt
     self.heartbeatElapsed = self.heartbeatElapsed + dt
@@ -1840,6 +2002,11 @@ function FS25SiNServer:update(dt)
     self.clockTargetAge = self.clockTargetAge + dt
     self.registrationClock = self.registrationClock + dt
     self.mapGeometryExportElapsed = self.mapGeometryExportElapsed + dt
+    self.financeFlushElapsed = self.financeFlushElapsed + dt
+    if self.financeFlushElapsed >= 1000 then
+        self.financeFlushElapsed = 0
+        self:flushFinanceObservations()
+    end
     self:processDeferredManagerSyncs()
     local clockInterval = 60000
     if self.clockMode == "fast_catchup" then
@@ -1923,7 +2090,9 @@ function FS25SiNServer:emitServerEvent(eventType, values, requestedEventId)
     xml:setString("serverEvent#save_id", tostring(g_currentMission.missionInfo.savegameIndex or 0))
     xml:setString("serverEvent#world_id", tostring(self.worldId))
     for key, value in pairs(values or {}) do xml:setString("serverEvent#" .. tostring(key), tostring(value)) end
-    xml:save(); xml:delete()
+    local saved = xml:save()
+    xml:delete()
+    if saved ~= true then return false end
     self.eventSeen[eventId] = true
     if eventType ~= "player_activity_minute" then
         Logging.info("[SiN Events] queued type=%s eventId=%s", tostring(eventType), tostring(eventId))
@@ -3452,6 +3621,18 @@ function FS25SiNServer:exportSnapshot()
 end
 
 function FS25SiNServer:deleteMap()
+    self:shutdownFarmOperations()
+    if type(self.financePending) == "table" then
+        for _ = 1, 16 do
+            if #self.financePending == 0 then break end
+            local before = #self.financePending
+            self:flushFinanceObservations()
+            if #self.financePending == before then break end
+        end
+    end
+    if self.financeHookTarget ~= nil and self.financeHookTarget.addMoney == self.financeHookWrapper then
+        self.financeHookTarget.addMoney = self.financeHookOriginal
+    end
     self.failed = true
     removeConsoleCommand("sinPermissions")
     removeConsoleCommand("sinSelfTest")

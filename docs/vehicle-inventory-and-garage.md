@@ -10,8 +10,14 @@ partial list may be treated as complete. The Agent sends the rows to Central,
 which validates them before writing the world-scoped Mongo snapshot.
 
 `/vehicles [server] [page]` shows a verified farm manager only that farm's live
-vehicles from a fresh, authoritative game snapshot. It is read-only and does
-not change the farm's equipment or its SiN bank account.
+vehicles from a fresh, authoritative game snapshot. It does not change the
+farm's equipment or its SiN bank account. The displayed five-character code is
+an SiN alias, durably registered in Mongo against the full native vehicle ID.
+A global unique index prevents two assets from receiving the same code; a rare
+collision lengthens the new asset's code while retaining the old one. Alias
+records are never deleted or reused after a vehicle leaves inventory. Future
+commands must resolve the exact code, then re-check the native ID and owner in
+the live game before changing anything. Back up `vehicle_codes` with Mongo.
 
 Farm IDs and names are not global identities. A member who manages farms on two
 servers has two distinct vehicle inventories, keyed by `server_key`,
@@ -19,6 +25,9 @@ servers has two distinct vehicle inventories, keyed by `server_key`,
 same player, farm name, or farm number appears on both servers. Future garage
 assets must keep a persistent source farm identity and require an explicitly
 selected destination farm with its own verified manager authority.
+An in-world farm-to-farm transfer within one world can keep the same code;
+cross-server transfer must explicitly carry and rebind that alias as part of
+its receipt-gated handoff.
 
 The garage is **not yet enabled**. A snapshot is not a durable vehicle archive,
 and an FS25 vehicle cannot safely be removed on the strength of a Mongo row.

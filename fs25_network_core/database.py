@@ -102,6 +102,10 @@ class Database:
             [("server_key", 1), ("save_key", 1)],
             [("server_key", 1), ("save_key", 1), ("world_id", 1)],
             name="snapshot_world_scope", unique=True)
+        self.db.vehicle_codes.create_index(
+            [("server_key", 1), ("save_key", 1), ("world_id", 1), ("native_unique_id", 1)],
+            name="vehicle_code_native_identity", unique=True)
+        self.db.vehicle_codes.create_index("code", name="vehicle_code_global", unique=True)
         self.db.community_applications.create_index([("state", 1), ("submitted_at", 1)])
         self.db.sin_servers.create_index("server_key", unique=True)
         self.db.sin_saves.create_index([("server_key", 1), ("fs25_save_id", 1)], unique=True)
@@ -112,6 +116,12 @@ class Database:
             [("server_key", 1), ("save_key", 1), ("world_id", 1)],
             name="map_world_scope", unique=True)
         self.db.processed_server_events.create_index("processed_at", expireAfterSeconds=604800)
+        self.db.farm_finance_changes.create_index(
+            [("server_key", 1), ("save_key", 1), ("world_id", 1),
+             ("farm_id", 1), ("observed_at", -1)])
+        self.db.farm_operational_events.create_index(
+            [("server_key", 1), ("save_key", 1), ("world_id", 1),
+             ("farm_id", 1), ("observed_at", -1)])
         self.db.activity_outbox.create_index([("status", 1), ("created_at", 1)])
         self.db.server_status_cards.create_index("server_key", unique=True)
         self._replace_legacy_unique_index(

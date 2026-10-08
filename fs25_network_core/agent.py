@@ -721,10 +721,16 @@ class PairingAgent:
                                         "player_activity_minute", "chat_message", "map_geometry",
                                         "native_contract_available", "native_contract_accepted",
                                         "native_contract_completed", "native_contract_cancelled",
-                                        "native_contract_expired"}:
+                                        "native_contract_expired", "farm_finance_batch",
+                                        "farm_operations_batch"}:
             raise ValueError("unsupported event type")
         if event["event_type"] == "map_geometry":
             event["payload"] = cls._parse_map_geometry(root)
+        elif event["event_type"] in {"farm_finance_batch", "farm_operations_batch"}:
+            changes = [dict(node.attrib) for node in root.findall("./changes/change")]
+            if not 1 <= len(changes) <= 128:
+                raise ValueError("telemetry batch must contain 1-128 changes")
+            event["payload"] = {"world_id": root.get("world_id"), "changes": changes}
         return event
 
     def _cached_event(self, path):

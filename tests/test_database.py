@@ -105,6 +105,14 @@ class DatabaseConfigurationTests(unittest.TestCase):
             and options.get("unique") is True
             for keys, options in personal_farm_indexes
         ))
+        self.assertEqual(fake_database.vehicle_codes.create_calls, [
+            ([('server_key', 1), ('save_key', 1), ('world_id', 1), ('native_unique_id', 1)],
+             {'name': 'vehicle_code_native_identity', 'unique': True}),
+            ('code', {'name': 'vehicle_code_global', 'unique': True}),
+            ([('server_key', 1), ('save_key', 1), ('world_id', 1), ('native_unique_id', 1)],
+             {'name': 'vehicle_code_native_identity', 'unique': True}),
+            ('code', {'name': 'vehicle_code_global', 'unique': True}),
+        ])
         for collection in fake_database.collections.values():
             for keys, _options in collection.create_calls:
                 self.assertNotEqual(keys, "_id")
