@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8" standalone="no"?>
 <modDesc descVersion="92">
     <author>SiN (SimNet)</author>
-    <version>0.2.3.2</version>
+    <version>0.2.3.3</version>
     <iconFilename>icon_policy.dds</iconFilename>
     <title><en>SiN FS25 Policy</en></title>
     <description><en>Server-authoritative SiN production, pricing, sell coverage, and shared buying-station policies.</en></description>

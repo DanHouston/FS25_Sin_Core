@@ -16,7 +16,7 @@ if str(ROOT) not in sys.path:
 
 from fs25_network_core.integration_campaign import authoritative_manifest, run_campaign
 from fs25_network_core.lua_validation import validate_fs25_lua_source
-from fs25_network_core.release_validation import validate_release_directory
+from fs25_network_core.release_validation import PRESERVED_DIST_ASSETS, validate_release_directory
 AGENT_FILES = ("fs25_network_core/__init__.py", "fs25_network_core/agent.py")
 MOD_ASSET = "FS25_SiN_Server.zip"
 CROP_MOD_ASSET = "SiN_FS25_Crop_Settings.zip"
@@ -37,6 +37,23 @@ def sha256(path):
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def clean_canonical_dist(output, canonical_dist):
+    """Remove generated dist files while retaining explicitly managed map ZIPs."""
+    output = Path(output).resolve()
+    canonical_dist = Path(canonical_dist).resolve()
+    if output != canonical_dist:
+        raise ValueError("only the canonical dist directory may be cleaned")
+    if not output.exists():
+        return
+    for child in output.iterdir():
+        if child.is_file() and child.name in PRESERVED_DIST_ASSETS:
+            continue
+        if child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
 
 
 def zip_files(destination, files):
@@ -246,13 +263,7 @@ def build(version, output):
     if output != canonical_dist and canonical_dist in output.parents:
         raise ValueError("release output must be the canonical dist directory, not a nested dist subdirectory")
     if output == canonical_dist and output.exists():
-        # dist is generated state. Clean only this exact repository directory;
-        # caller-supplied output directories remain reusable and untouched.
-        for child in output.iterdir():
-            if child.is_dir():
-                shutil.rmtree(child)
-            else:
-                child.unlink()
+        clean_canonical_dist(output, canonical_dist)
     output.mkdir(parents=True, exist_ok=True)
     legacy_mod = output / "FS25_SiN_NetworkLocal.zip"
     if legacy_mod.exists():

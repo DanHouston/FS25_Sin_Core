@@ -18,6 +18,7 @@ is unavailable at native load.
 | Fertilizer Production DS | Fertilizer | $230,000 | $460,800 | $230,400 |
 | Liquid Fertilizer Factory | Liquid fertilizer | $175,000 | $345,600 | $172,800 |
 | Seed Production Factory (normal recipes) | Seeds | $300,000 | $583,686 | $291,843 |
+| Diesel Production (any one crop recipe) | Diesel | $324,000 | $648,000 | $324,000 |
 | Cereal Factory | Cereal chocolate | $995,000 | $1,987,978 | $993,989 |
 | Grain Mill / US Grain Mill | Oat flour | $745,000 | $1,491,642 | $745,821 |
 | Small Grain Mill | Oat flour | $75,000 | $149,164 | $74,582 |

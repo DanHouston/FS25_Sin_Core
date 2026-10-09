@@ -46,6 +46,7 @@ CHECKSUM_ASSETS = frozenset({
     "integration-campaign.json",
     "live-validation-manifest.json",
 })
+PRESERVED_DIST_ASSETS = frozenset({"SiN_MAP_FS25_HobosHollow.zip"})
 REQUIRED_SCENARIOS = [
     "registration",
     "control_plane_backlog",
@@ -221,8 +222,10 @@ def validate_release_directory(root: str | Path, *, expected_version: str | None
     if not root.is_dir():
         raise ReleaseValidationError(f"release directory does not exist: {root}")
     actual = {path.name for path in root.iterdir()}
-    if actual != RELEASE_ASSETS:
-        raise ReleaseValidationError(f"release assets differ: expected {sorted(RELEASE_ASSETS)}, got {sorted(actual)}")
+    optional_preserved = actual & PRESERVED_DIST_ASSETS
+    if actual != RELEASE_ASSETS | optional_preserved:
+        raise ReleaseValidationError(
+            f"release assets differ: expected {sorted(RELEASE_ASSETS | optional_preserved)}, got {sorted(actual)}")
 
     manifest = _json(root / "build-manifest.json")
     if manifest.get("release_format_version") != 1 or not _COMMIT.fullmatch(str(manifest.get("git_commit", ""))):

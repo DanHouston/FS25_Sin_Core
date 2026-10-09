@@ -78,6 +78,12 @@ The explicit farm-supply and silo recipe policy includes:
 - `FS25_SeedProductionFactory:seedProductionFactory.xml`: purchase price
   `$300,000` and removal of the four explicitly named `*_rush` recipes. Normal
   seed recipes are unchanged;
+- `FS25_DieselProduktion:DieselProduction.xml`: purchase price `$324,000`;
+  soybean, sunflower, and canola diesel recipes each remain at their native
+  `2` cycles/hour. This is farm-support fuel production, so it does not receive
+  the crop-converter `10x` multiplier. The price target is six game months of
+  one recipe's gross diesel output, without summing the recipe lines or
+  deducting their crop, water, or operating inputs;
 - the four `FS25_AmericanSilosProductionPack` entries: small-tier purchase
   price `$302,500` with hay at `4,000`, each silage recipe at `16,000`, pig
   food at `1.5`, and forage at `2.5` cycles/hour; large-tier purchase price

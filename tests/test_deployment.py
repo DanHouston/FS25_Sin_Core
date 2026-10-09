@@ -9,12 +9,34 @@ from pathlib import Path
 from zipfile import ZipFile, ZIP_DEFLATED
 
 from fs25_network_core.lua_validation import LuaValidationError, validate_fs25_lua_source
-from fs25_network_core.release_validation import validate_release_directory
-from scripts.build_release import build
+from fs25_network_core.release_validation import PRESERVED_DIST_ASSETS, validate_release_directory
+from scripts.build_release import build, clean_canonical_dist
 
 
 class DeploymentPackagingTests(unittest.TestCase):
     root = Path(__file__).parents[1]
+
+    def test_release_validation_allows_the_separately_managed_map_archive(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder)
+            build("v0.1.8-map", output)
+            map_path = output / "SiN_MAP_FS25_HobosHollow.zip"
+            with ZipFile(map_path, "w", ZIP_DEFLATED) as archive:
+                archive.writestr("map-marker.txt", "fixed stone layer")
+            validate_release_directory(output, expected_version="v0.1.8-map")
+            self.assertEqual(PRESERVED_DIST_ASSETS, {map_path.name})
+
+    def test_canonical_dist_cleanup_preserves_the_map_archive(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder)
+            map_path = output / "SiN_MAP_FS25_HobosHollow.zip"
+            map_path.write_bytes(b"separately managed map")
+            (output / "old-release.txt").write_text("generated old artifact", encoding="utf-8")
+            clean_canonical_dist(output, output)
+            self.assertEqual(map_path.read_bytes(), b"separately managed map")
+            self.assertFalse((output / "old-release.txt").exists())
+            with self.assertRaisesRegex(ValueError, "only the canonical dist"):
+                clean_canonical_dist(output, output / "elsewhere")
 
     def test_release_builder_rejects_nested_dist_output(self):
         with self.assertRaisesRegex(ValueError, "canonical dist directory"):

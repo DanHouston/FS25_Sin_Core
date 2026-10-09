@@ -57,6 +57,12 @@ class ProductionPolicyTests(unittest.TestCase):
                          [("LIME", "3000")])
         liquid = entries["FS25_RH_LiquidFertillizerProduction:liquidFertilizerFactory.xml"].find("recipe")
         self.assertEqual((liquid.get("id"), liquid.get("cyclesPerHour")), ("LiquidFertilizerFactory", "1"))
+        diesel = entries["FS25_DieselProduktion:DieselProduction.xml"]
+        self.assertEqual(diesel.get("purchasePrice"), "324000")
+        self.assertIsNone(diesel.get("cyclesScale"))
+        self.assertEqual({node.get("id"): node.get("cyclesPerHour") for node in diesel.findall("recipe")}, {
+            "DIESELSoybean": "2", "DIESELSunflower": "2", "DIESELCanola": "2",
+        })
         seed = entries["FS25_SeedProductionFactory:seedProductionFactory.xml"]
         self.assertEqual({node.get("id") for node in seed.findall("recipe")}, {
             "wheat_seeds_rush", "barley_seeds_rush", "oat_seeds_rush", "maize_seeds_rush"})
@@ -66,6 +72,7 @@ class ProductionPolicyTests(unittest.TestCase):
         root = ElementTree.parse(MOD / "config/production-policy.xml").getroot()
         entries = {node.get("id"): node for node in root.findall("production")}
         expected = {
+            "FS25_DieselProduktion:DieselProduction.xml": "324000",
             "FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/cerealFactory/cerealFactory.xml": "995000",
             "FS25_BaseGame:data/placeables/mapUS/oilPlantUS/oilPlantUS.xml": "515000",
             "FS25_BaseGame:data/placeables/mapEU/preservedFoodFactory/preservedFoodFactoryPlaceable.xml": "1770000",
@@ -175,6 +182,7 @@ class ProductionPolicyTests(unittest.TestCase):
     def test_mod_descriptor_and_icon_are_present(self):
         descriptor = (MOD / "modDesc.xml").read_text(encoding="utf-8")
         self.assertIn("SiN FS25 Policy", descriptor)
+        self.assertIn("<version>0.2.3.3</version>", descriptor)
         self.assertIn('filename="scripts/SiNProductionPolicy.lua"', descriptor)
         self.assertIn('filename="scripts/SiNVehiclePricingPolicy.lua"', descriptor)
         self.assertIn('filename="scripts/SiNSellCoveragePolicy.lua"', descriptor)

@@ -71,11 +71,14 @@ no deduction for farm-produced inputs (`highest annual gross x 6/12`).
 | Fertilizer Production DS | Native 1 cycle/hour | $461k | **$230k** | $230k | Configured |
 | Liquid Fertilizer Factory | 1 cycle/hour | $346k | **$175k** | $175k | Configured |
 | Seed Production Factory | Normal recipe only, 15 cycles/hour | $584k | **$300k** | $180k | Review price; rush recipes disabled |
+| Diesel Production | 2 cycles/hour per crop recipe; 750 L diesel/cycle | $648k per recipe | **$324k** | $324k | Configured; farm-support fuel |
 
 These are gross output values. They intentionally do not deduct manure, stone,
 crop, fertilizer, water, lime, or seed-treatment inputs, per the farm-produced
 input rule. They are still supply assets rather than an instruction to sell
-those outputs for cash.
+those outputs for cash. Diesel Production's three alternatives each yield the
+same output value; the estimate uses one recipe and does not assume that
+multiple lines run concurrently.
 
 ## C. Greenhouses - hold native by decision
 
@@ -180,13 +183,13 @@ case, which is unchanged.
 | Group | Assets |
 |---|---:|
 | Direct crop converters | 21 |
-| Farm supply | 4 |
+| Farm supply | 5 |
 | Greenhouses | 10 |
 | Energy | 6 |
 | Downstream food / animal | 10 |
 | Forestry / construction materials | 14 |
 | American Silos Production Pack | 4 |
-| **Total catalog assets** | **69** |
+| **Total catalog assets** | **70** |
 
 ## Before broad application
 

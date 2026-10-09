@@ -24,6 +24,11 @@
         <recipe id="oat_seeds_rush" enabled="false"/>
         <recipe id="maize_seeds_rush" enabled="false"/>
     </production>
+    <production id="FS25_DieselProduktion:DieselProduction.xml" purchasePrice="324000">
+        <recipe id="DIESELSoybean" cyclesPerHour="2"/>
+        <recipe id="DIESELSunflower" cyclesPerHour="2"/>
+        <recipe id="DIESELCanola" cyclesPerHour="2"/>
+    </production>
 
     <!-- Direct crop converters: ten times native cycles, preserving each recipe's input/output ratio. -->
     <production id="FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/cerealFactory/cerealFactory.xml" purchasePrice="995000" cyclesScale="10"/>
