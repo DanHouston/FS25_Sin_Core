@@ -2,13 +2,13 @@
 param(
     [string]$MetadataPath = "C:\SiN\deployment.json",
     [string]$AgentRoot = "",
-    [string]$ApiUrl = "",
+    [string]$ApiUrl = "https://sin-central.duckdns.org",
     [string]$MailboxDir = "",
-    [double]$PollInterval = 0
+    [double]$PollInterval = 0,
+    [string]$AgentTaskName = "SiN FS25 Agent"
 )
 
 $ErrorActionPreference = "Stop"
-$logRoot = "C:\SiN\Logs"
 
 if (Test-Path -LiteralPath $MetadataPath -PathType Leaf) {
     $metadata = Get-Content -LiteralPath $MetadataPath -Raw | ConvertFrom-Json
@@ -18,49 +18,73 @@ if (Test-Path -LiteralPath $MetadataPath -PathType Leaf) {
     if ($PollInterval -le 0 -and $metadata.poll_interval) { $PollInterval = [double]$metadata.poll_interval }
 }
 if (-not $AgentRoot) { $AgentRoot = "C:\SiN\Agent" }
-if (-not $ApiUrl) { throw "Agent backend URL is missing. Pass -ApiUrl or provide deployment metadata." }
 if (-not $MailboxDir) { throw "Agent mailbox directory is missing. Pass -MailboxDir or provide deployment metadata." }
 if ($PollInterval -le 0) { $PollInterval = 2 }
 
 $leaf = Split-Path -Leaf ($MailboxDir.TrimEnd([char]92, [char]47))
 if ($leaf -ne "FS25_SiN_Server") { throw "MailboxDir must be the canonical FS25_SiN_Server mailbox root." }
 
+function Get-AgentTask {
+    $task = Get-ScheduledTask -TaskName $AgentTaskName -ErrorAction SilentlyContinue
+    if ($null -eq $task) { throw "Required Agent scheduled task '$AgentTaskName' is not registered." }
+    return $task
+}
+
 function Get-AgentProcess {
-    @(Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" |
+    @(Get-CimInstance Win32_Process |
         Where-Object { $_.CommandLine -and $_.CommandLine -match "fs25_network_core\.agent" -and $_.CommandLine -match "--watch" })
 }
 
-foreach ($process in @(Get-AgentProcess)) {
-    Stop-Process -Id ([int]$process.ProcessId) -ErrorAction SilentlyContinue
-}
-$deadline = (Get-Date).AddSeconds(20)
-do {
-    Start-Sleep -Milliseconds 500
-    $remaining = @(Get-AgentProcess)
-} while ($remaining.Count -gt 0 -and (Get-Date) -lt $deadline)
-if ($remaining.Count -gt 0) {
-    foreach ($process in $remaining) { Stop-Process -Id ([int]$process.ProcessId) -Force }
-    Start-Sleep -Seconds 1
+function Get-AgentPythonPath {
+    $task = Get-AgentTask
+    $actions = @($task.Actions)
+    if ($actions.Count -ne 1 -or -not $actions[0].Execute) {
+        throw "Agent task '$AgentTaskName' must have exactly one executable action."
+    }
+    $python = [Environment]::ExpandEnvironmentVariables([string]$actions[0].Execute)
+    if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
+        throw "Agent task Python executable is unavailable: $python"
+    }
+    return $python
 }
 
-New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
-New-Item -ItemType Directory -Force -Path $MailboxDir | Out-Null
-$oldBackend = $env:SIN_BACKEND_URL
-$oldMailbox = $env:SIN_MAILBOX_DIR
-$oldPoll = $env:SIN_POLL_INTERVAL
-try {
-    $env:SIN_BACKEND_URL = $ApiUrl
-    $env:SIN_MAILBOX_DIR = $MailboxDir
-    $env:SIN_POLL_INTERVAL = [string]$PollInterval
-    Start-Process -FilePath "python.exe" -ArgumentList @("-m", "fs25_network_core.agent", "--watch") `
-        -WorkingDirectory $AgentRoot -RedirectStandardOutput (Join-Path $logRoot "agent.log") `
-        -RedirectStandardError (Join-Path $logRoot "agent-error.log") -WindowStyle Hidden | Out-Null
-} finally {
-    $env:SIN_BACKEND_URL = $oldBackend
-    $env:SIN_MAILBOX_DIR = $oldMailbox
-    $env:SIN_POLL_INTERVAL = $oldPoll
+function Stop-AgentTask {
+    $task = Get-AgentTask
+    if ($task.State -eq "Running") { Stop-ScheduledTask -TaskName $AgentTaskName -ErrorAction Stop }
+    $deadline = (Get-Date).AddSeconds(20)
+    do {
+        $task = Get-ScheduledTask -TaskName $AgentTaskName -ErrorAction Stop
+        $remaining = @(Get-AgentProcess)
+        if ($task.State -ne "Running" -and $remaining.Count -eq 0) { return }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+    foreach ($process in $remaining) { Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Seconds 1
+    $task = Get-ScheduledTask -TaskName $AgentTaskName -ErrorAction SilentlyContinue
+    if ($null -eq $task -or $task.State -eq "Running" -or @(Get-AgentProcess).Count -gt 0) {
+        throw "Agent scheduled task '$AgentTaskName' did not stop."
+    }
 }
-Start-Sleep -Seconds 3
-$running = @(Get-AgentProcess)
-if ($running.Count -ne 1) { throw "Expected one Agent watcher after restart; inspect C:\SiN\Logs\agent-error.log" }
-Write-Host "SiN Agent watcher restarted with durable mailbox recovery configuration."
+
+function Start-AgentTask {
+    if ($ApiUrl.Contains('"') -or $MailboxDir.Contains('"')) {
+        throw "Agent URL and mailbox path cannot contain quote characters."
+    }
+    $python = Get-AgentPythonPath
+    $arguments = '-m fs25_network_core.agent --watch --backend-url "{0}" --mailbox-dir "{1}" --interval {2}' -f `
+        $ApiUrl, $MailboxDir, $PollInterval
+    $action = New-ScheduledTaskAction -Execute $python -Argument $arguments -WorkingDirectory $AgentRoot
+    Set-ScheduledTask -TaskName $AgentTaskName -Action $action -ErrorAction Stop | Out-Null
+    Start-ScheduledTask -TaskName $AgentTaskName -ErrorAction Stop
+    Start-Sleep -Seconds 3
+    $task = Get-ScheduledTask -TaskName $AgentTaskName -ErrorAction Stop
+    if ($task.State -ne "Running") {
+        $info = Get-ScheduledTaskInfo -TaskName $AgentTaskName
+        throw "Agent scheduled task did not stay running (state=$($task.State), lastTaskResult=$($info.LastTaskResult))."
+    }
+}
+
+New-Item -ItemType Directory -Force -Path $MailboxDir | Out-Null
+Stop-AgentTask
+Start-AgentTask
+Write-Host "SiN Agent scheduled task '$AgentTaskName' restarted with backend $ApiUrl and canonical mailbox."

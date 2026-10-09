@@ -7,6 +7,7 @@ from http.client import HTTPConnection
 from unittest.mock import MagicMock
 
 from fs25_network_core.farm_lifecycle import FarmLifecycle
+from fs25_network_core.event_processing import EventRetryableError
 from fs25_network_core.integration_campaign import _MemoryDatabase
 from fs25_network_core.server_registry import ServerRegistry
 from fs25_network_core.server_api import make_server
@@ -213,6 +214,45 @@ class ServerApiTests(unittest.TestCase):
         forwarded = self.server.RequestHandlerClass.event_processor.process.call_args.args[0]
         self.assertEqual(forwarded["server_credential"], "secret")
         connection.close()
+
+    def test_event_batch_returns_independent_durable_acknowledgements(self):
+        handler = self.server.RequestHandlerClass
+        handler.event_processor.process.side_effect = [
+            {"status": "accepted", "duplicate": False},
+            EventRetryableError("prior activity pending"),
+        ]
+        events = [
+            {"event_id": "op-1", "event_type": "farm_operations_batch", "server_key": "server",
+             "save_id": "3", "world_id": "world", "changes": []},
+            {"event_id": "op-2", "event_type": "farm_operations_batch", "server_key": "server",
+             "save_id": "3", "world_id": "world", "changes": []},
+        ]
+        connection = HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
+        connection.request("POST", "/api/server/events/batch", json.dumps({"events": events}), {
+            "Content-Type": "application/json", "X-SiN-Server-Key": "server",
+            "Authorization": "Bearer secret"})
+        response = connection.getresponse()
+        body = json.loads(response.read())
+        connection.close()
+        self.assertEqual(response.status, 200)
+        self.assertEqual([result["http_status"] for result in body["results"]], [200, 409])
+        self.assertEqual([result["event_id"] for result in body["results"]], ["op-1", "op-2"])
+        self.assertEqual(handler.event_processor.process.call_count, 2)
+        self.assertEqual(handler.event_processor.process.call_args_list[0].args[0]["server_credential"], "secret")
+
+    def test_event_batch_rejects_invalid_envelope_without_processing_it(self):
+        event = {"event_id": "not-operation", "event_type": "heartbeat", "server_key": "server",
+                 "save_id": "3"}
+        connection = HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
+        connection.request("POST", "/api/server/events/batch", json.dumps({"events": [event]}), {
+            "Content-Type": "application/json", "X-SiN-Server-Key": "server",
+            "Authorization": "Bearer secret"})
+        response = connection.getresponse()
+        body = json.loads(response.read())
+        connection.close()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(body["results"][0]["http_status"], 400)
+        self.server.RequestHandlerClass.event_processor.process.assert_not_called()
 
     def test_clock_endpoint_authenticates_and_returns_policy(self):
         self.server.RequestHandlerClass.event_processor.registry.authenticate.return_value = {"server_key": "sin-fs25-01"}

@@ -28,9 +28,12 @@ before and after archive creation. A GIANTS runtime load test remains required,
 but a source that cannot be parsed by the FS25 Lua dialect gate cannot enter a
 release artifact.
 
-The standard Central API port is **8787**. Central listens on the configured
-`SIN_API_PORT` (default `8787`), and every Agent `SIN_BACKEND_URL`/updater
-`-ApiUrl` must use the same port unless an explicit reverse proxy is in use.
+Central listens internally on `SIN_API_PORT` (default **8787**). The production
+Agent and updater use `https://sin-central.duckdns.org`, which terminates HTTPS
+on the Google Cloud endpoint and proxies requests to Central. The Windows
+`SiN FS25 Agent` scheduled task on the FS25 host is the sole Agent launcher;
+deployment updates its existing action while preserving its run-as identity and
+triggers.
 
 ## Creating a release
 
@@ -46,53 +49,59 @@ The tag workflow reruns tests, compile validation, patch validation, and
 release packaging, then publishes the deployment assets. Ordinary pushes and pull
 requests only run CI/package proof; they do not publish a release.
 
-## One-time VM bootstrap
+## Bootstrap a newer updater safely
 
-If the VM has an older updater whose default points at the legacy mailbox root,
-bootstrap the corrected updater from the next published release directly over HTTPS:
+If the installed updater predates the scheduled-task launcher, do not run it to
+fetch the update: it would restart the Agent using its old launch method. After
+the corrected release is published, download its updater directly to the
+staging filename and execute that staged file:
 
 ```powershell
 New-Item -ItemType Directory -Force C:\SiN\Deploy | Out-Null
 Invoke-WebRequest `
   -Uri "https://github.com/DanHouston/FS25_SiN_Core/releases/download/<next-version>/Update-SiN.ps1" `
-  -OutFile "C:\SiN\Deploy\Update-SiN.ps1"
+  -OutFile "C:\SiN\Deploy\Update-SiN.next.ps1"
+
+$env:SIN_FS25_MODS_DIR = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\mods"
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File "C:\SiN\Deploy\Update-SiN.next.ps1" `
+  -Version <next-version>
 ```
 
-This does not copy or inspect `serverBinding.xml`. Set the FS25 mods directory
-either as `SIN_FS25_MODS_DIR` or pass `-ModsPath`; the updater intentionally does
-not guess an installation path.
+This does not copy or inspect `serverBinding.xml`. The Agent updater does not
+need an FS25 mods directory; server-mod updates are performed separately.
 
-## Normal VM deployment
+## Normal Agent deployment
 
-Stop the FS25 dedicated server first. The updater stops only the SiN Agent;
-it never stops or restarts FS25, so mailbox migration and ZIP replacement must
-not run while the mod is writing state. On `SiN-FS25-01`, with the required
-FS25 mods directory configured:
+This updater changes only the SiN Agent, its scheduled-task action, and its
+deployment metadata. It does not download, inspect, back up, replace, or delete
+anything in the FS25 mods directory, and does not require an FS25 restart.
+Mailbox migration is a separate concern: if legacy mailbox roots still need
+consolidation, stop FS25 for that migration; an already-complete canonical
+mailbox can be left live. On `SiN-FS25-01`:
 
 ```powershell
-$env:SIN_FS25_MODS_DIR = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\mods"
 powershell.exe -ExecutionPolicy Bypass -File "C:\SiN\Deploy\Update-SiN.ps1"
 ```
 
 Specific release:
 
 ```powershell
-$env:SIN_FS25_MODS_DIR = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\mods"
 powershell.exe -ExecutionPolicy Bypass -File "C:\SiN\Deploy\Update-SiN.ps1" -Version <next-version>
 ```
 
-The updater resolves public GitHub Releases over HTTPS, downloads all assets to
-`C:\SiN\Downloads\<version>`, verifies checksum and manifest hashes, then
-backs up the live Agent, mod ZIP, and deployment metadata under
-`C:\SiN\Backups\<timestamp>-<version>`. It stops only Python processes whose
-command line contains both `fs25_network_core.agent` and `--watch`, installs the
-Agent under `C:\SiN\Agent\fs25_network_core`, starts one watcher with the
-configured `SIN_BACKEND_URL`, `SIN_MAILBOX_DIR`, and `SIN_POLL_INTERVAL`, and
-writes `C:\SiN\deployment.json`.
+The updater resolves public GitHub Releases over HTTPS, downloads the Agent
+and updater assets to `C:\SiN\Downloads\<version>`, verifies their checksums,
+and backs up the live Agent and deployment metadata under
+`C:\SiN\Backups\<timestamp>-<version>`. It stops the existing `SiN FS25 Agent`
+task, installs the Agent under `C:\SiN\Agent\fs25_network_core`, then updates
+and starts that task using its configured Python executable. It preserves the
+task's principal and triggers and never starts a standalone Python process.
+Existing server-mod path/hash metadata is preserved without checking the file.
 
-Agent updates take effect after the updater restarts the Agent. A changed
-FS25_SiN_Server ZIP prints `FS25 RESTART REQUIRED`; the updater never restarts the
-FS25 dedicated server. Identical mod hashes do not require a restart.
+Agent updates take effect after the updater restarts the Agent. Server-mod ZIP
+updates remain a separate manual operation and should use the established mod
+update/modpack workflow when you choose to deploy them.
 
 For an Agent-only interruption or recovery, use the packaged explicit restart
 script. It reads the backend URL, canonical mailbox, Agent root, and poll
@@ -110,8 +119,11 @@ rejected so repeated validation builds do not accumulate directories. Deployment
 downloads authoritative GitHub Release assets and does not consume local
 `dist/` contents.
 
-The newest updater is downloaded as `C:\SiN\Deploy\Update-SiN.next.ps1` so the
-currently running script is not replaced mid-execution.
+During a normal deployment the newest updater is staged as
+`C:\SiN\Deploy\Update-SiN.next.ps1` so the currently running script is not
+replaced mid-execution. For the first deployment of the scheduled-task-aware
+updater, execute that staged file directly as shown above; do not first run an
+older updater to stage it.
 
 ### Canonical FS25_SiN_Server mailbox migration
 
@@ -138,8 +150,8 @@ newest valid XML copy wins. After validation, the stage is moved into
 leaves the sources/stage intact so a later run can resume without re-pairing.
 Completed canonical migrations are not rediscovered from the archive.
 
-If the VM still has an older updater, bootstrap the next updater over HTTPS
-before running the normal deployment:
+If the VM still has an older updater, bootstrap and execute the next updater
+over HTTPS (do not invoke the old updater first):
 
 ```powershell
 New-Item -ItemType Directory -Force C:\SiN\Deploy | Out-Null
@@ -157,7 +169,7 @@ The running Agent is stopped before migration and restarted with the
 canonical mailbox path. The updater does not restart FS25; a changed mod ZIP
 still requires an FS25 server/client restart.
 
-Rollback uses the most recent backup:
+Agent rollback uses the most recent Agent backup and does not touch FS25 mods:
 
 ```powershell
 $env:SIN_FS25_MODS_DIR = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\mods"

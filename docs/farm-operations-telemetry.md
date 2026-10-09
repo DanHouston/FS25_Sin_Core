@@ -5,18 +5,41 @@
 The dedicated server observes native `Storage:setFillLevel` changes,
 `SellingStation:sellFillType`, AI job lifecycle messages, and vehicle operating
 time/position. Lua coalesces storage changes by storage object, farm, fill type,
-direction, and game calendar hour during the existing one-second mailbox
-window. Each movement carries its total liters and original tick count. A game
-hour change always starts a new record. The normal one-second mailbox write
-and retry queue remain the restart boundary; storage is never held in a new
-multi-minute in-memory buffer.
+direction, and game calendar hour. Routine storage and station-sale
+observations now coalesce for up to 60 seconds before a mailbox event is
+emitted. Aggregation keys still include farm, fill type, direction, source
+storage/station, and game calendar hour, so a flush window crossing an in-game
+hour creates separate records. Each movement row carries total liters and its
+original tick count. AI lifecycle rows remain individual source records, but
+use the same bounded delivery window.
+
+The server checkpoints pending and unflushed rows once per second into two
+alternating XML slots under the existing mailbox root (outside `events/`). The
+slots are scoped to server, save, and world; startup restores the newest valid
+generation and retries it. The older slot remains available if a checkpoint
+write is interrupted. If the game stops between checkpoints, at most the
+changes since the last successful one-second checkpoint are not recoverable.
+Mailbox events are written before their rows are removed from the checkpoint;
+a crash in that interval can replay a row, which Central deduplicates by its
+stable source event ID. Failed mailbox writes keep rows pending for retry.
 
 The server writes `farm_operations_batch` XML into its existing durable
-mailbox. The Agent parses and forwards each batch without re-bucketing it.
-Central validates the whole batch, then accounts for each row in Mongo before
-writing the batch-level `processed_server_events` marker. Each routine storage
-row is atomically added to `farm_storage_hourly`, keyed by server, save, world,
-farm, game year/period/day/hour, fill type, and direction. Source positions
+mailbox. The Agent bundles up to 50 compatible operation envelopes into one
+authenticated Central request and only removes each mailbox file after its
+individual acknowledgement says it was accepted. Retries keep the original
+event and source-row IDs. Agent catch-up now handles up to 200 mailbox events
+per pass by default (configurable with `SIN_EVENT_BATCH_SIZE`). The Central
+batch endpoint processes each envelope independently; partial failures do
+not cause already-accepted rows to be lost or counted twice. For steady
+routine activity this changes the game-side event cadence from at most one
+operations file per second to one per minute (up to roughly 60x fewer files).
+The existing backlog can be drained with up to 50 operation envelopes per
+HTTP request, without changing or deleting the queued XML.
+Central validates each envelope and row, then accounts for each row in Mongo.
+Operation rows use row-level idempotency, so they do not create one extra
+`processed_server_events` document per envelope. Each routine storage row is
+atomically added to `farm_storage_hourly`, keyed by server, save, world, farm,
+game year/period/day/hour, fill type, and direction. Source positions
 and runtime node IDs are retained as source evidence but do not split an hour
 bucket. Missing position is recorded as `source_key="unknown"`.
 
@@ -25,10 +48,11 @@ first/last game times, first/last Central receipt times, source-sequence
 bounds, runtime keys, and observed runtime nodes. No source event string array
 is retained. A compact per-runtime sequence bitmap inside each hourly document
 is updated atomically with the liters and count. A repeated delivery therefore
-cannot increment a second time, even if Central wrote the aggregate but crashed
-before its batch marker. A partial batch retry replays already-accounted rows
-as duplicates and finishes the remaining rows. Out-of-order arrivals use the
-source row's game date and hour to select the bucket.
+cannot increment a second time, including when Central commits an aggregate but
+the request fails before the Agent receives its acknowledgement. A partial
+batch retry replays already-accounted rows as duplicates and finishes the
+remaining rows. Out-of-order arrivals use the source row's game date and hour
+to select the bucket.
 
 `game_time_ms` must be in `[0, 86400000)`, and year, period, and day must be
 valid (year >= 1, period 1-12, day 1-31). Invalid or missing calendar values
@@ -92,7 +116,9 @@ Production validation after deployment:
 5. Check Atlas collection and index sizes after the 14- and 35-day TTL windows;
    TTL expiry is asynchronous, so counts need not drop at the exact boundary.
 
-Deploy Central before the server mod. The Agent wire format is unchanged and
-the current Agent already forwards `farm_operations_batch`. The schema
-migration adds a new collection and TTL/query indexes. No new service or
-infrastructure is required.
+Deploy Central, Agent, and the server mod. The batch endpoint is backward
+compatible with the existing single-event route; an Agent that encounters an
+unsupported batch route falls back to individual requests. The mod cadence
+and checkpoint behavior require a server restart. Existing mailbox files are
+not migrated, deleted, or rewritten; the Agent continues draining them. No
+new service or infrastructure is required.

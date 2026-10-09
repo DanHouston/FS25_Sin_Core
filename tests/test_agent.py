@@ -796,6 +796,42 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(len(agent.process_events_once(max_events=50)), 50)
             self.assertEqual(len(list(events.glob("*.xml"))), 9_900)
 
+    def test_operation_event_transport_batches_and_honors_per_event_ack(self):
+        class BatchResponse(Response):
+            def read(self):
+                return json.dumps({"results": [
+                    {"index": 0, "event_id": "op-1", "http_status": 200},
+                    {"index": 1, "event_id": "op-2", "http_status": 409,
+                     "error": "event_waiting_for_prior_activity"},
+                    {"index": 2, "event_id": "op-3", "http_status": 200},
+                ]}).encode()
+
+        opener = MagicMock(return_value=BatchResponse())
+        with tempfile.TemporaryDirectory() as folder:
+            events = Path(folder) / "events"
+            events.mkdir()
+            for number in range(1, 4):
+                (events / f"operation-{number}.xml").write_text(
+                    f'<serverEvent event_id="op-{number}" event_type="farm_operations_batch" '
+                    'server_key="server" server_credential="secret" save_id="3" world_id="world">'
+                    f'<changes><change event_id="row-{number}"/></changes></serverEvent>',
+                    encoding="utf-8")
+            agent = PairingAgent(folder, "https://central", opener)
+            self.assertEqual(agent.process_events_once(max_events=3), [
+                "operation-1.xml", "operation-3.xml"])
+            self.assertEqual(opener.call_count, 1)
+            request = opener.call_args.args[0]
+            self.assertTrue(request.full_url.endswith("/api/server/events/batch"))
+            sent = json.loads(request.data)
+            self.assertEqual([event["event_id"] for event in sent["events"]],
+                             ["op-1", "op-2", "op-3"])
+            self.assertTrue(all("server_credential" not in event for event in sent["events"]))
+            self.assertTrue((events / "operation-2.xml").exists())
+            self.assertFalse((events / "operation-1.xml").exists())
+
+    def test_agent_default_event_budget_supports_backlog_catchup(self):
+        self.assertGreaterEqual(PairingAgent.DEFAULT_EVENT_BATCH_SIZE, 200)
+
     def test_map_geometry_event_preserves_nested_field_points(self):
         with tempfile.TemporaryDirectory() as folder:
             events = Path(folder) / "events"

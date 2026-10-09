@@ -200,6 +200,9 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
         if self.path == "/api/server/events":
             self.do_events()
             return
+        if self.path == "/api/server/events/batch":
+            self.do_event_batch()
+            return
         if self.path == REGISTRATION_PATH:
             self.do_registration()
             return
@@ -460,6 +463,80 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
             _json_response(self, 500, {"error": "internal_error"})
             return
         _json_response(self, 200, result)
+
+    def do_event_batch(self):
+        """Process independent operation envelopes with one authenticated request.
+
+        Each envelope receives its own result so the Agent only removes mailbox
+        files that Central durably accepted. Operation rows retain their source
+        IDs and are independently idempotent, making a retry after a partial
+        database failure safe.
+        """
+        try:
+            length = int(self.headers.get("Content-Length", "-1"))
+            if length < 0 or length > 1_000_000:
+                raise ValueError("invalid request size")
+            body = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+            _json_response(self, 400, {"error": "malformed_event_batch"})
+            return
+        events = body.get("events") if isinstance(body, dict) else None
+        if not isinstance(events, list) or not 1 <= len(events) <= 100:
+            _json_response(self, 400, {"error": "invalid_event_batch"})
+            return
+
+        server_key = self.headers.get("X-SiN-Server-Key")
+        authorization = self.headers.get("Authorization", "")
+        credential = authorization[7:] if authorization.startswith("Bearer ") else ""
+        if not server_key or not credential:
+            _json_response(self, 401, {"error": "invalid_server_authentication"})
+            return
+
+        results = []
+        for index, source in enumerate(events):
+            event_id = source.get("event_id") if isinstance(source, dict) else None
+            if (not isinstance(source, dict) or source.get("server_key") != server_key
+                    or not source.get("event_id") or not source.get("save_id")
+                    or source.get("event_type") != "farm_operations_batch"):
+                results.append({"index": index, "event_id": event_id,
+                                "http_status": (401 if isinstance(source, dict)
+                                                and source.get("server_key") != server_key else 400),
+                                "error": ("invalid_server_authentication" if isinstance(source, dict)
+                                          and source.get("server_key") != server_key else "invalid_event")})
+                continue
+            event = dict(source)
+            event["server_credential"] = credential
+            try:
+                result = self.event_processor.process(event)
+                results.append({"index": index, "event_id": event_id,
+                                "http_status": 200, "result": result})
+            except EventAuthenticationError:
+                results.append({"index": index, "event_id": event_id,
+                                "http_status": 401,
+                                "error": "invalid_server_authentication"})
+            except EventScopeError as error:
+                reason = str(error)[:240]
+                LOG.warning("event rejected scope server=%s reason=%s", server_key, reason)
+                results.append({"index": index, "event_id": event_id,
+                                "http_status": 404,
+                                "error": "unknown_or_unconfigured_save", "reason": reason})
+            except EventRetryableError as error:
+                reason = str(error)[:240]
+                LOG.info("event deferred for retry server=%s reason=%s", server_key, reason)
+                results.append({"index": index, "event_id": event_id,
+                                "http_status": 409,
+                                "error": "event_waiting_for_prior_activity", "reason": reason})
+            except EventValidationError as error:
+                reason = str(error)[:240]
+                LOG.warning("event rejected validation server=%s reason=%s", server_key, reason)
+                results.append({"index": index, "event_id": event_id,
+                                "http_status": 400,
+                                "error": "invalid_event", "reason": reason})
+            except Exception as error:
+                LOG.exception("central API event processing failure")
+                results.append({"index": index, "event_id": event_id,
+                                "http_status": 500, "error": "internal_error"})
+        _json_response(self, 200, {"results": results})
 
 
 def make_server(database, host="127.0.0.1", port=8787):

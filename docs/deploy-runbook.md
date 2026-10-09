@@ -15,7 +15,7 @@ are different on that machine:
 ```powershell
 $Version = "v0.1.41"
 $Repo = "C:\repos\FS25_SiN_Core"
-$CentralUrl = "http://192.168.1.185:8787"
+$CentralUrl = "https://sin-central.duckdns.org"
 $ServerKey = "sin-fs25-01"
 $ServerName = "SiN Test Server 01"
 $ServerMods = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\mods"
@@ -24,8 +24,12 @@ $ClientMods = "C:\Users\Dan\OneDrive\Documents\My Games\SiN"
 $PublicationRoot = "G:\My Drive\SiN Mods\sin-fs25-01"
 ```
 
-The standard Central API port is `8787`. The Agent URL, updater `-ApiUrl`, and
-Central `SIN_API_PORT` must agree.
+Central is served publicly at `https://sin-central.duckdns.org` through the
+Google Cloud HTTPS endpoint; the Central process listens internally on port
+`8787`. The updater updates the existing Windows scheduled task named
+`SiN FS25 Agent` to use the release's Python module, canonical mailbox, and
+public HTTPS URL. It preserves the task's principal and triggers; it does not
+launch a second standalone Agent process.
 
 ## 1. Validate a clean release candidate
 
@@ -130,37 +134,38 @@ python -m fs25_network_core.money_bridge_config --server sin-fs25-01 --enable
 
 Do not disable it as part of ordinary mod or Agent deployment.
 
-## 4. Deploy the dedicated-server Agent and mod
+## 4. Deploy the dedicated-server Agent
 
-Stop the FS25 dedicated server through its normal server control before replacing
-the ZIP or migrating mailbox files. The updater stops/restarts only the SiN
-Agent; it never stops FS25.
+The Agent updater never reads or writes the FS25 mods directory. It does not
+replace `FS25_SiN_Server.zip` or require an FS25 restart. Stop FS25 only if a
+legacy mailbox migration is actually required; the already-migrated canonical
+mailbox does not require a server stop.
 
-If the VM has no current updater, bootstrap it from the published release:
+If the VM has an older updater that starts Python directly, do not run it to
+stage the new release. Download the release updater to `Update-SiN.next.ps1`
+and execute that staged script directly:
 
 ```powershell
 New-Item -ItemType Directory -Force C:\SiN\Deploy | Out-Null
 Invoke-WebRequest `
   -Uri "https://github.com/DanHouston/FS25_Sin_Core/releases/download/$Version/Update-SiN.ps1" `
-  -OutFile "C:\SiN\Deploy\Update-SiN.ps1"
+  -OutFile "C:\SiN\Deploy\Update-SiN.next.ps1"
 ```
 
-Run the normal server deployment on `sin-fs25-01`:
+Run the staged updater on `sin-fs25-01`:
 
 ```powershell
-$env:SIN_FS25_MODS_DIR = $ServerMods
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File "C:\SiN\Deploy\Update-SiN.ps1" `
+  -File "C:\SiN\Deploy\Update-SiN.next.ps1" `
   -Version $Version `
   -ApiUrl $CentralUrl `
-  -MailboxDir $Mailbox `
-  -ModsPath $ServerMods
+  -MailboxDir $Mailbox
 ```
 
-The updater backs up the prior Agent/mod/metadata, validates release hashes,
-uses the canonical mailbox, restarts the Agent, and writes
-`C:\SiN\deployment.json`. Start/reload the FS25 dedicated server manually when
-the updater reports `FS25 RESTART REQUIRED`.
+The updater backs up the prior Agent and deployment metadata, validates the
+Agent/restart scripts, uses the canonical mailbox, restarts the scheduled Agent,
+and writes `C:\SiN\deployment.json`. It preserves prior server-mod hash/path
+metadata without inspecting or changing the mod ZIP.
 
 For an Agent-only restart, without changing the FS25 ZIP:
 
@@ -172,17 +177,16 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 If that script is missing, run the full updater first; it is included in every
 release and copied into `C:\SiN\Deploy`.
 
-Verify the installed server artifact:
+Verify the Agent deployment metadata:
 
 ```powershell
 $Deployment = Get-Content "C:\SiN\deployment.json" -Raw | ConvertFrom-Json
-$ServerZip = [string]$Deployment.server_path
-$ActualServerHash = (Get-FileHash -LiteralPath $ServerZip -Algorithm SHA256).Hash.ToLowerInvariant()
-
-$Deployment | Select-Object version,git_commit,server_path,server_sha256
-"Actual SHA256:   $ActualServerHash"
-"Hash matches:    $($ActualServerHash -eq $Deployment.server_sha256.ToLowerInvariant())"
+$Deployment | Select-Object version,git_commit,agent_root,agent_task_name,backend_url,mailbox_dir,agent_sha256
+Get-ScheduledTask -TaskName $Deployment.agent_task_name | Select-Object TaskName,State
 ```
+
+Update and publish server/client mod ZIPs separately using the manual mod
+workflow below, only when you intend to deploy a game-mod change.
 
 The canonical FS25 mailbox must be:
 
@@ -286,20 +290,19 @@ python -c "from fs25_network_core.database import Database; d=Database().db; pri
 
 ## 8. Rollback
 
-Stop FS25 before restoring the prior server Agent/mod release:
+Restore the prior Agent only; this rollback leaves all FS25 mod files untouched:
 
 ```powershell
-$env:SIN_FS25_MODS_DIR = $ServerMods
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File "C:\SiN\Deploy\Update-SiN.ps1" `
   -Rollback `
   -ApiUrl $CentralUrl `
-  -MailboxDir $Mailbox `
-  -ModsPath $ServerMods
+  -MailboxDir $Mailbox
 ```
 
-Rollback restores the latest backup and restarts only the Agent. It does not
-rewrite server bindings, MongoDB state, world history, or FS25 save data.
+Rollback restores the latest Agent backup and restarts only the scheduled Agent.
+It does not touch the server mod, server bindings, MongoDB state, world history,
+or FS25 save data.
 ## Crop settings mod
 
 Releases also contain `SiN_FS25_Crop_Settings.zip`. It is an independent

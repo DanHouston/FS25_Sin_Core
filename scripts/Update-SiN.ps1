@@ -7,9 +7,12 @@ param(
     [string]$BackupRoot = "C:\SiN\Backups",
     [string]$DownloadRoot = "C:\SiN\Downloads",
     [string]$MailboxDir = "C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\modSettings\FS25_SiN_Server",
-    [string]$ApiUrl = "http://192.168.1.185:8787",
+    [string]$ApiUrl = "https://sin-central.duckdns.org",
     [double]$PollInterval = 2,
-    [string]$ModsPath = $env:SIN_FS25_MODS_DIR,
+    [string]$AgentTaskName = "SiN FS25 Agent",
+    # Retained for command-line compatibility; this Agent updater never reads
+    # from or writes to an FS25 mods directory.
+    [string]$ModsPath = "",
     [int]$KeepBackups = 5,
     [switch]$Rollback,
     [switch]$MigrateLegacyMailbox,
@@ -17,13 +20,42 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$assets = @("sin-agent.zip", "FS25_SiN_Server.zip", "build-manifest.json", "SHA256SUMS.txt", "Update-SiN.ps1", "Restart-SiN-Agent.ps1", "Publish-SiN-Modpack.ps1")
-$checksumAssets = @("sin-agent.zip", "FS25_SiN_Server.zip", "Update-SiN.ps1", "Restart-SiN-Agent.ps1", "Publish-SiN-Modpack.ps1")
-$logRoot = "C:\SiN\Logs"
+$assets = @("sin-agent.zip", "build-manifest.json", "SHA256SUMS.txt", "Update-SiN.ps1", "Restart-SiN-Agent.ps1", "Publish-SiN-Modpack.ps1")
+$checksumAssets = @("sin-agent.zip", "Update-SiN.ps1", "Restart-SiN-Agent.ps1", "Publish-SiN-Modpack.ps1")
 
 function Get-AgentProcess {
-    @(Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" |
+    @(Get-CimInstance Win32_Process |
         Where-Object { $_.CommandLine -and $_.CommandLine -match "fs25_network_core\.agent" -and $_.CommandLine -match "--watch" })
+}
+
+function Get-AgentTask {
+    $task = Get-ScheduledTask -TaskName $AgentTaskName -ErrorAction SilentlyContinue
+    if ($null -eq $task) { throw "Required Agent scheduled task '$AgentTaskName' is not registered." }
+    return $task
+}
+
+function Get-AgentPythonPath {
+    $task = Get-AgentTask
+    $actions = @($task.Actions)
+    if ($actions.Count -ne 1 -or -not $actions[0].Execute) {
+        throw "Agent task '$AgentTaskName' must have exactly one executable action."
+    }
+    $python = [Environment]::ExpandEnvironmentVariables([string]$actions[0].Execute)
+    if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
+        throw "Agent task Python executable is unavailable: $python"
+    }
+    return $python
+}
+
+function Set-AgentTaskAction {
+    $python = Get-AgentPythonPath
+    if ($ApiUrl.Contains('"') -or $MailboxDir.Contains('"')) {
+        throw "Agent URL and mailbox path cannot contain quote characters."
+    }
+    $arguments = '-m fs25_network_core.agent --watch --backend-url "{0}" --mailbox-dir "{1}" --interval {2}' -f `
+        $ApiUrl, $MailboxDir, $PollInterval
+    $action = New-ScheduledTaskAction -Execute $python -Argument $arguments -WorkingDirectory $AgentRoot
+    Set-ScheduledTask -TaskName $AgentTaskName -Action $action -ErrorAction Stop | Out-Null
 }
 
 function Assert-CanonicalMailbox {
@@ -354,18 +386,25 @@ function Invoke-LegacyMailboxMigration {
 }
 
 function Stop-Agent {
-    $processes = Get-AgentProcess
-    foreach ($process in $processes) {
-        Stop-Process -Id ([int]$process.ProcessId) -ErrorAction SilentlyContinue
+    $task = Get-AgentTask
+    if ($task.State -eq "Running") {
+        Stop-ScheduledTask -TaskName $AgentTaskName -ErrorAction Stop
     }
     $deadline = (Get-Date).AddSeconds(20)
     do {
-        Start-Sleep -Milliseconds 500
+        $task = Get-ScheduledTask -TaskName $AgentTaskName -ErrorAction Stop
         $remaining = @(Get-AgentProcess)
-    } while ($remaining.Count -gt 0 -and (Get-Date) -lt $deadline)
+        if ($task.State -ne "Running" -and $remaining.Count -eq 0) { break }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
     if ($remaining.Count -gt 0) {
         foreach ($process in $remaining) { Stop-Process -Id ([int]$process.ProcessId) -Force }
         Start-Sleep -Seconds 1
+    }
+    $task = Get-ScheduledTask -TaskName $AgentTaskName -ErrorAction SilentlyContinue
+    $remaining = @(Get-AgentProcess)
+    if ($null -eq $task -or $task.State -eq "Running" -or $remaining.Count -gt 0) {
+        throw "Agent scheduled task '$AgentTaskName' did not stop."
     }
 }
 
@@ -420,27 +459,15 @@ function Test-AgentPackage($directory) {
 }
 
 function Start-Agent {
-    New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
     New-Item -ItemType Directory -Force -Path $MailboxDir | Out-Null
-    $oldBackend = $env:SIN_BACKEND_URL
-    $oldMailbox = $env:SIN_MAILBOX_DIR
-    $oldPoll = $env:SIN_POLL_INTERVAL
-    try {
-        $env:SIN_BACKEND_URL = $ApiUrl
-        $env:SIN_MAILBOX_DIR = $MailboxDir
-        $env:SIN_POLL_INTERVAL = [string]$PollInterval
-        Start-Process -FilePath "python.exe" -ArgumentList @("-m", "fs25_network_core.agent", "--watch") `
-            -WorkingDirectory $AgentRoot -RedirectStandardOutput (Join-Path $logRoot "agent.log") `
-            -RedirectStandardError (Join-Path $logRoot "agent-error.log") -WindowStyle Hidden | Out-Null
-    } finally {
-        $env:SIN_BACKEND_URL = $oldBackend
-        $env:SIN_MAILBOX_DIR = $oldMailbox
-        $env:SIN_POLL_INTERVAL = $oldPoll
-    }
+    Set-AgentTaskAction
+    Start-ScheduledTask -TaskName $AgentTaskName -ErrorAction Stop
     Start-Sleep -Seconds 3
-    $running = @(Get-AgentProcess)
-    if ($running.Count -eq 0) { throw "Agent watcher did not start; inspect C:\SiN\Logs\agent-error.log" }
-    if ($running.Count -gt 1) { throw "More than one Agent watcher is running" }
+    $task = Get-ScheduledTask -TaskName $AgentTaskName -ErrorAction Stop
+    if ($task.State -ne "Running") {
+        $info = Get-ScheduledTaskInfo -TaskName $AgentTaskName
+        throw "Agent scheduled task did not stay running (state=$($task.State), lastTaskResult=$($info.LastTaskResult))."
+    }
 }
 
 function Test-ApiReachable {
@@ -453,59 +480,45 @@ function Test-ApiReachable {
     } catch { return $false } finally { $client.Dispose() }
 }
 
-function Resolve-ModsPath {
-    if ($ModsPath) { return }
-    $metadata = "C:\SiN\deployment.json"
-    if (Test-Path $metadata) {
-        $old = Get-Content $metadata -Raw | ConvertFrom-Json
-        if ($old.server_path) { $script:ModsPath = Split-Path -Parent $old.server_path }
-        # Read the old deployment metadata key only to locate a pre-rename
-        # installation; new records use server_path above.
-        elseif ($old.networklocal_path) { $script:ModsPath = Split-Path -Parent $old.networklocal_path }
-    }
-    if (-not $ModsPath) { throw "FS25 mods path is required. Pass -ModsPath or set SIN_FS25_MODS_DIR; it is not guessed." }
-}
-
-function Write-Deployment($release, $manifest, $agentHash, $modHash, $modChanged, $backupPath) {
+function Write-Deployment($release, $manifest, $agentHash, $backupPath) {
+    $metadataPath = "C:\SiN\deployment.json"
+    $previous = if (Test-Path -LiteralPath $metadataPath) {
+        Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
+    } else { $null }
     $record = [ordered]@{
         version = [string]$release.tag_name
         deployed_at_utc = (Get-Date).ToUniversalTime().ToString("o")
         git_commit = [string]$manifest.git_commit
         agent_sha256 = $agentHash
-        server_sha256 = $modHash
-        server_path = (Join-Path $ModsPath "FS25_SiN_Server.zip")
         agent_root = $AgentRoot
+        agent_task_name = $AgentTaskName
         backend_url = $ApiUrl
         mailbox_dir = $MailboxDir
         poll_interval = $PollInterval
-        fs25_restart_required = [bool]$modChanged
         backup_path = $backupPath
     }
-    $record | ConvertTo-Json | Set-Content -LiteralPath "C:\SiN\deployment.json" -Encoding UTF8
+    # Preserve the last separately managed server-mod record. This deployment
+    # does not inspect or change the game mods directory.
+    if ($previous) {
+        foreach ($name in @("server_sha256", "server_path", "fs25_restart_required")) {
+            if ($previous.PSObject.Properties.Name -contains $name) { $record[$name] = $previous.$name }
+        }
+    }
+    $record | ConvertTo-Json | Set-Content -LiteralPath $metadataPath -Encoding UTF8
 }
 
 function Invoke-Rollback {
-    Resolve-ModsPath
     $backup = Get-ChildItem -LiteralPath $BackupRoot -Directory | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if (-not $backup) { throw "No rollback backup exists" }
     $savedCore = Join-Path $backup.FullName "fs25_network_core"
-    $savedMod = Join-Path $backup.FullName "FS25_SiN_Server.zip"
-    if (-not (Test-Path $savedMod)) { $savedMod = Join-Path $backup.FullName "FS25_SiN_NetworkLocal.zip" }
-    if (-not (Test-Path $savedCore) -or -not (Test-Path $savedMod)) { throw "Latest backup is incomplete" }
+    if (-not (Test-Path $savedCore)) { throw "Latest backup does not contain an Agent backup" }
     Stop-Agent
     $liveCore = Join-Path $AgentRoot "fs25_network_core"
     if (Test-Path $liveCore) { Remove-Item -LiteralPath $liveCore -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $AgentRoot | Out-Null
     Copy-Item -LiteralPath $savedCore -Destination $liveCore -Recurse
-    New-Item -ItemType Directory -Force -Path $ModsPath | Out-Null
-    $targetMod = Join-Path $ModsPath "FS25_SiN_Server.zip"
-    $legacyMod = Join-Path $ModsPath "FS25_SiN_NetworkLocal.zip"
-    if (Test-Path -LiteralPath $legacyMod) { Remove-Item -LiteralPath $legacyMod -Force }
-    $changed = -not (Test-Path $targetMod) -or ((Get-FileHash $targetMod).Hash -ne (Get-FileHash $savedMod).Hash)
-    Copy-Item -LiteralPath $savedMod -Destination $targetMod -Force
     Start-Agent
-    Write-Host "Rollback restored $($backup.Name)"
-    if ($changed) { Write-Host "FS25 RESTART REQUIRED" }
+    Write-Host "Agent rollback restored $($backup.Name); FS25 mod files were not touched."
 }
 
 try {
@@ -514,7 +527,6 @@ try {
         Invoke-LegacyMailboxMigration -Destination $MailboxDir
         exit 0
     }
-    Resolve-ModsPath
     if ($Rollback) { Invoke-Rollback; exit 0 }
     $release = Get-Release $Version
     $resolvedVersion = [string]$release.tag_name
@@ -526,7 +538,6 @@ try {
     $manifest = Get-Content -LiteralPath (Join-Path $downloadDirectory "build-manifest.json") -Raw | ConvertFrom-Json
     if ([int]$manifest.release_format_version -ne 1) { throw "Unsupported release format" }
     if ($manifest.agent_sha256.ToLowerInvariant() -ne (Get-FileHash (Join-Path $downloadDirectory "sin-agent.zip")).Hash.ToLowerInvariant()) { throw "Agent manifest hash mismatch" }
-    if ($manifest.server_sha256.ToLowerInvariant() -ne (Get-FileHash (Join-Path $downloadDirectory "FS25_SiN_Server.zip")).Hash.ToLowerInvariant()) { throw "FS25_SiN_Server manifest hash mismatch" }
     if ($manifest.updater_sha256.ToLowerInvariant() -ne (Get-FileHash (Join-Path $downloadDirectory "Update-SiN.ps1")).Hash.ToLowerInvariant()) { throw "Updater manifest hash mismatch" }
     Test-AgentPackage $downloadDirectory
     New-Item -ItemType Directory -Force -Path $DeployRoot | Out-Null
@@ -539,10 +550,6 @@ try {
     New-Item -ItemType Directory -Force -Path $backup | Out-Null
     $liveCore = Join-Path $AgentRoot "fs25_network_core"
     if (Test-Path $liveCore) { Copy-Item -LiteralPath $liveCore -Destination (Join-Path $backup "fs25_network_core") -Recurse }
-    $targetMod = Join-Path $ModsPath "FS25_SiN_Server.zip"
-    $legacyMod = Join-Path $ModsPath "FS25_SiN_NetworkLocal.zip"
-    if (Test-Path $targetMod) { Copy-Item -LiteralPath $targetMod -Destination (Join-Path $backup "FS25_SiN_Server.zip") }
-    if (Test-Path $legacyMod) { Copy-Item -LiteralPath $legacyMod -Destination (Join-Path $backup "FS25_SiN_NetworkLocal.zip") }
     if (Test-Path "C:\SiN\deployment.json") { Copy-Item "C:\SiN\deployment.json" (Join-Path $backup "previous-deployment.json") }
 
     Stop-Agent
@@ -554,13 +561,7 @@ try {
     New-Item -ItemType Directory -Force -Path $AgentRoot | Out-Null
     $agentExtract = Join-Path $downloadDirectory "agent-validate\fs25_network_core"
     Copy-Item -LiteralPath $agentExtract -Destination $liveCore -Recurse
-    New-Item -ItemType Directory -Force -Path $ModsPath | Out-Null
-    $oldModHash = if (Test-Path $targetMod) { (Get-FileHash $targetMod).Hash } else { "" }
-    if (Test-Path $legacyMod) { Remove-Item -LiteralPath $legacyMod -Force }
-    Copy-Item -LiteralPath (Join-Path $downloadDirectory "FS25_SiN_Server.zip") -Destination $targetMod -Force
-    $newModHash = (Get-FileHash $targetMod).Hash
-    $modChanged = $oldModHash.ToLowerInvariant() -ne $newModHash.ToLowerInvariant()
-    Write-Deployment $release $manifest $manifest.agent_sha256 $newModHash $modChanged $backup
+    Write-Deployment $release $manifest $manifest.agent_sha256 $backup
     Start-Agent
     $apiReachable = Test-ApiReachable
     Get-ChildItem -LiteralPath $BackupRoot -Directory | Sort-Object LastWriteTime -Descending | Select-Object -Skip $KeepBackups |
@@ -570,8 +571,7 @@ try {
     Write-Host "Commit             $($manifest.git_commit)"
     Write-Host "Agent              UPDATED"
     Write-Host "Agent running      YES"
-    Write-Host "FS25_SiN_Server     UPDATED"
-    if ($modChanged) { Write-Host "FS25 restart       REQUIRED" } else { Write-Host "FS25 restart       NOT REQUIRED" }
+    Write-Host "FS25 mods          UNCHANGED (managed separately)"
     Write-Host "API reachable      $(if ($apiReachable) { 'YES' } else { 'NO' })"
     Write-Host "Rollback backup    $backup"
     Write-Host "Result             $(if ($apiReachable) { 'SUCCESS' } else { 'SUCCESS (API UNREACHABLE)' })"

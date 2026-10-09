@@ -31,6 +31,19 @@ local function nativeJobId(job)
     return job.jobId ~= nil and tostring(job.jobId) or nil
 end
 
+local OPERATION_CHECKPOINT_FIELDS = {
+    "kind", "farm_id", "source_sequence", "runtime_ms", "game_period", "game_day",
+    "game_year", "game_time_ms", "fill_type", "fill_type_index", "liters",
+    "event_count", "stock_after_liters", "runtime_node", "position_x", "position_z",
+    "station_price", "station_name", "placeable_id", "job_id", "job_type",
+    "vehicle_id", "duration_ms", "stop_reason", "operating_ms", "operating_after_ms",
+    "distance_estimated_m",
+}
+
+local function safeCheckpointPart(value)
+    return string.gsub(tostring(value or "unknown"), "[^%w_-]", "_")
+end
+
 function FS25SiNServer:initializeFarmOperations()
     self.operationSequence = 0
     self.operationPending = {}
@@ -38,12 +51,26 @@ function FS25SiNServer:initializeFarmOperations()
     self.operationAggregates = {}
     self.operationBatchAttempt = 0
     self.operationFlushElapsed = 0
+    self.operationCheckpointElapsed = 0
+    self.operationCheckpointGeneration = 0
+    self.operationCheckpointDirty = false
     self.operationOverflowLogged = false
     self.vehicleSampleElapsed = 0
     self.vehiclePublishElapsed = 0
     self.vehicleUsage = {}
     self.storageIdentityCache = setmetatable({}, {__mode="k"})
     self.activeAIJobs = setmetatable({}, {__mode="k"})
+    local mission = g_currentMission
+    local saveId = mission ~= nil and mission.missionInfo ~= nil
+        and mission.missionInfo.savegameIndex or 0
+    self.operationCheckpointScope = {
+        serverKey=tostring(self.serverKey or ""), saveId=tostring(saveId),
+        worldId=tostring(self.worldId or ""),
+    }
+    self.operationCheckpointBase = self.directory ~= nil and (self.directory .. "farm-operations-"
+        .. safeCheckpointPart(self.operationCheckpointScope.serverKey) .. "-"
+        .. safeCheckpointPart(saveId) .. "-" .. safeCheckpointPart(self.operationCheckpointScope.worldId)) or nil
+    self:loadFarmOperationsCheckpoint()
     self:installFarmOperationHooks()
     Logging.info("[SiN Farm Telemetry] hooks sales=%s storage=%s ai=%s",
         tostring(SellingStation ~= nil and SellingStation.sellFillType == self.saleHookWrapper),
@@ -74,7 +101,129 @@ function FS25SiNServer:newFarmOperation(kind, farmId, values)
     local record = {eventId=string.format("%s-%s-operation-%d", tostring(self.serverKey or "unbound"),
         tostring(self.runtimeNonce or "runtime"), self.operationSequence), values=values}
     table.insert(self.operationWindow, record)
+    self.operationCheckpointDirty = true
     return record
+end
+
+function FS25SiNServer:loadFarmOperationsCheckpoint()
+    if self.operationCheckpointBase == nil or XMLFile == nil or XMLFile.load == nil
+        or fileExists == nil then return end
+    local best = nil
+    for slot = 0, 1 do
+        local path = self.operationCheckpointBase .. "-" .. tostring(slot) .. ".xml"
+        if fileExists(path) then
+            local ok, xml = pcall(XMLFile.load, "sinFarmOperationsCheckpoint", path)
+            if ok and xml ~= nil then
+                local root = "farmOperationsCheckpoint"
+                local matches = xml:getString(root .. "#serverKey") == self.operationCheckpointScope.serverKey
+                    and xml:getString(root .. "#saveId") == self.operationCheckpointScope.saveId
+                    and xml:getString(root .. "#worldId") == self.operationCheckpointScope.worldId
+                local generation = tonumber(xml:getString(root .. "#generation")) or 0
+                local sequence = tonumber(xml:getString(root .. "#sequence"))
+                local pendingCount = tonumber(xml:getString(root .. ".pending#count"))
+                local windowCount = tonumber(xml:getString(root .. ".window#count"))
+                local valid = matches and generation > 0 and sequence ~= nil
+                    and pendingCount ~= nil and windowCount ~= nil
+                    and pendingCount >= 0 and windowCount >= 0
+                    and pendingCount == math.floor(pendingCount)
+                    and windowCount == math.floor(windowCount)
+                    and pendingCount + windowCount <= 2048
+                if valid then
+                    for _, group in ipairs({"pending", "window"}) do
+                        local count = group == "pending" and pendingCount or windowCount
+                        for index = 0, count - 1 do
+                            local key = root .. "." .. group .. ".record(" .. tostring(index) .. ")"
+                            if xml:getString(key .. "#eventId") == nil
+                                or xml:getString(key .. ".value(0)#value") == nil
+                                or xml:getString(key .. ".value(1)#value") == nil
+                                or xml:getString(key .. ".value(2)#value") == nil then
+                                valid = false
+                                break
+                            end
+                        end
+                        if not valid then break end
+                    end
+                end
+                if valid and (best == nil or generation > best.generation) then
+                    if best ~= nil then best.xml:delete() end
+                    best = {xml=xml, generation=generation, slot=slot}
+                else
+                    xml:delete()
+                end
+            end
+        end
+    end
+    if best == nil then return end
+    local xml, root = best.xml, "farmOperationsCheckpoint"
+    self.operationCheckpointGeneration = best.generation
+    self.operationSequence = tonumber(xml:getString(root .. "#sequence")) or 0
+    for _, group in ipairs({"pending", "window"}) do
+        local count = tonumber(xml:getString(root .. "." .. group .. "#count")) or 0
+        local target = group == "pending" and self.operationPending or self.operationWindow
+        for index = 0, math.min(count, 2048) - 1 do
+            local key = root .. "." .. group .. ".record(" .. tostring(index) .. ")"
+            local eventId = xml:getString(key .. "#eventId")
+            if eventId ~= nil and eventId ~= "" then
+                local values = {}
+                for fieldIndex, field in ipairs(OPERATION_CHECKPOINT_FIELDS) do
+                    local valueKey = key .. ".value(" .. tostring(fieldIndex - 1) .. ")"
+                    local value = xml:getString(valueKey .. "#value")
+                    if value ~= nil then
+                        values[field] = xml:getString(valueKey .. "#numeric") == "true"
+                            and tonumber(value) or value
+                    end
+                end
+                table.insert(target, {eventId=eventId, values=values})
+            end
+        end
+    end
+    xml:delete()
+    self.operationCheckpointDirty = (#self.operationPending + #self.operationWindow) > 0
+    Logging.info("[SiN Farm Telemetry] recovered checkpoint pending=%s window=%s generation=%s",
+        tostring(#self.operationPending), tostring(#self.operationWindow), tostring(best.generation))
+end
+
+function FS25SiNServer:checkpointFarmOperations()
+    if self.operationCheckpointDirty ~= true or self.operationCheckpointBase == nil
+        or XMLFile == nil or XMLFile.create == nil then return false end
+    local generation = self.operationCheckpointGeneration + 1
+    local slot = generation % 2
+    local path = self.operationCheckpointBase .. "-" .. tostring(slot) .. ".xml"
+    local ok, xml = pcall(XMLFile.create, "sinFarmOperationsCheckpoint", path, "farmOperationsCheckpoint")
+    if not ok or xml == nil then return false end
+    local root = "farmOperationsCheckpoint"
+    xml:setString(root .. "#serverKey", self.operationCheckpointScope.serverKey)
+    xml:setString(root .. "#saveId", self.operationCheckpointScope.saveId)
+    xml:setString(root .. "#worldId", self.operationCheckpointScope.worldId)
+    xml:setString(root .. "#generation", tostring(generation))
+    xml:setString(root .. "#sequence", tostring(self.operationSequence))
+    for _, group in ipairs({"pending", "window"}) do
+        local records = group == "pending" and self.operationPending or self.operationWindow
+        xml:setString(root .. "." .. group .. "#count", tostring(#records))
+        for index, record in ipairs(records) do
+            local key = root .. "." .. group .. ".record(" .. tostring(index - 1) .. ")"
+            xml:setString(key .. "#eventId", record.eventId)
+            for fieldIndex, field in ipairs(OPERATION_CHECKPOINT_FIELDS) do
+                local value = record.values[field]
+                if value ~= nil then
+                    local valueKey = key .. ".value(" .. tostring(fieldIndex - 1) .. ")"
+                    xml:setString(valueKey .. "#name", field)
+                    xml:setString(valueKey .. "#numeric", tostring(type(value) == "number"))
+                    xml:setString(valueKey .. "#value", type(value) == "number"
+                        and string.format("%.17g", value) or tostring(value))
+                end
+            end
+        end
+    end
+    local saved = xml:save()
+    xml:delete()
+    if saved == true then
+        self.operationCheckpointGeneration = generation
+        self.operationCheckpointDirty = false
+        return true
+    end
+    Logging.warning("[SiN Farm Telemetry] checkpoint save failed; retaining in-memory operations")
+    return false
 end
 
 function FS25SiNServer:storageIdentity(storage)
@@ -125,6 +274,7 @@ function FS25SiNServer:observeStorageChange(storage, fillType, before, after)
     record.values.liters = record.values.liters + math.abs(after - before)
     record.values.event_count = record.values.event_count + 1
     record.values.stock_after_liters = after
+    self.operationCheckpointDirty = true
 end
 
 function FS25SiNServer:observeStationSale(station, farmId, liters, fillType, price)
@@ -138,7 +288,13 @@ function FS25SiNServer:observeStationSale(station, farmId, liters, fillType, pri
         perStation = {}
         self.operationAggregates[station] = perStation
     end
-    local key = "sale:" .. tostring(farmId) .. ":" .. tostring(fillType)
+    local env = g_currentMission.environment
+    local gameHour = env ~= nil and type(env.dayTime) == "number"
+        and math.floor(env.dayTime / 3600000) or "unknown"
+    local key = table.concat({"sale", tostring(farmId), tostring(fillType),
+        tostring(env ~= nil and env.currentYear or "unknown"),
+        tostring(env ~= nil and env.currentPeriod or "unknown"),
+        tostring(env ~= nil and env.currentDay or "unknown"), tostring(gameHour)}, ":")
     local record = perStation[key]
     if record == nil then
         local placeable = station.owningPlaceable
@@ -162,6 +318,7 @@ function FS25SiNServer:observeStationSale(station, farmId, liters, fillType, pri
     end
     record.values.liters = record.values.liters + liters
     record.values.station_price = record.values.station_price + price
+    self.operationCheckpointDirty = true
 end
 
 function FS25SiNServer:onFarmAIJobStarted(job, farmId)
@@ -243,7 +400,10 @@ function FS25SiNServer:installFarmOperationHooks()
 end
 
 function FS25SiNServer:flushFarmOperations()
-    for _, record in ipairs(self.operationWindow) do table.insert(self.operationPending, record) end
+    if #self.operationWindow > 0 then
+        for _, record in ipairs(self.operationWindow) do table.insert(self.operationPending, record) end
+        self.operationCheckpointDirty = true
+    end
     self.operationWindow = {}
     self.operationAggregates = {}
     if #self.operationPending == 0 then return end
@@ -257,6 +417,7 @@ function FS25SiNServer:flushFarmOperations()
     end
     for _ = 1, count do table.remove(self.operationPending, 1) end
     self.operationBatchAttempt = 0
+    self.operationCheckpointDirty = true
 end
 
 function FS25SiNServer:emitFarmOperationsBatch(batchId, count)
@@ -370,8 +531,14 @@ function FS25SiNServer:updateFarmOperations(dt)
         self.vehiclePublishElapsed = 0
         self:publishFarmVehicleUsage()
     end
+    self.operationCheckpointElapsed = self.operationCheckpointElapsed + dt
+    if self.operationCheckpointElapsed >= 1000 then
+        self.operationCheckpointElapsed = self.operationCheckpointElapsed % 1000
+        self:checkpointFarmOperations()
+    end
     self.operationFlushElapsed = self.operationFlushElapsed + dt
-    if self.operationFlushElapsed >= 1000 then
+    if self.operationFlushElapsed >= 60000
+        or (#self.operationPending > 0 and self.operationFlushElapsed >= 1000) then
         self.operationFlushElapsed = 0
         self:flushFarmOperations()
     end
@@ -387,6 +554,7 @@ function FS25SiNServer:shutdownFarmOperations()
         self:flushFarmOperations()
         if #self.operationPending + #self.operationWindow == before then break end
     end
+    self:checkpointFarmOperations()
     if SellingStation ~= nil and SellingStation.sellFillType == self.saleHookWrapper then
         SellingStation.sellFillType = self.saleHookOriginal
     end

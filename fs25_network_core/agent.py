@@ -2,6 +2,7 @@
 import argparse
 import errno
 import hashlib
+import heapq
 import json
 import logging
 import math
@@ -14,7 +15,7 @@ from urllib.parse import quote
 from xml.etree import ElementTree
 
 LOG = logging.getLogger(__name__)
-DEFAULT_EVENT_BATCH_SIZE = 50
+DEFAULT_EVENT_BATCH_SIZE = 200
 
 
 class MailboxWriteError(OSError):
@@ -130,6 +131,59 @@ class PairingAgent:
                 error.sin_detail = self._safe_http_error_detail(raw_body)
                 raise error
             return json.loads(response.read().decode("utf-8"))
+
+    def _post_event_batch(self, events):
+        """Post independent operation envelopes together, preserving per-item acks."""
+        if not events:
+            return []
+        first = events[0]
+        server_key = first.get("server_key")
+        credential = first.get("server_credential")
+        transport_events = []
+        for source in events:
+            event = dict(source)
+            if (event.get("server_key") != server_key
+                    or event.get("server_credential") != credential
+                    or event.get("event_type") != "farm_operations_batch"):
+                raise ValueError("event batch contains incompatible envelopes")
+            event.pop("server_credential", None)
+            transport_events.append(event)
+        body = json.dumps({"events": transport_events}).encode("utf-8")
+        request = Request(
+            self.backend_root + "/api/server/events/batch", data=body,
+            headers={"Content-Type": "application/json",
+                     "X-SiN-Server-Key": str(server_key),
+                     "Authorization": "Bearer " + str(credential)}, method="POST")
+        with self.opener(request, timeout=30) as response:
+            if response.status != 200:
+                try:
+                    raw_body = response.read(4096)
+                except (AttributeError, OSError, TypeError):
+                    raw_body = b""
+                error = HTTPError(request.full_url, response.status,
+                                  "event batch API rejected request", response.headers, None)
+                error.sin_detail = self._safe_http_error_detail(raw_body)
+                raise error
+            payload = json.loads(response.read().decode("utf-8"))
+        results = payload.get("results") if isinstance(payload, dict) else None
+        if not isinstance(results, list) or len(results) != len(events):
+            raise RuntimeError("event batch API returned an incomplete acknowledgement")
+        by_index = {}
+        for result in results:
+            if not isinstance(result, dict) or not isinstance(result.get("index"), int):
+                raise RuntimeError("event batch API returned an invalid acknowledgement")
+            index = result["index"]
+            if index < 0 or index >= len(events) or index in by_index:
+                raise RuntimeError("event batch API returned duplicate or unknown acknowledgement")
+            if result.get("event_id") != events[index].get("event_id"):
+                raise RuntimeError("event batch API acknowledgement ID mismatch")
+            status = result.get("http_status")
+            if not isinstance(status, int) or status < 100 or status > 599:
+                raise RuntimeError("event batch API returned an invalid item status")
+            by_index[index] = result
+        if len(by_index) != len(events):
+            raise RuntimeError("event batch API omitted an acknowledgement")
+        return [by_index[index] for index in range(len(events))]
 
     def _post_registration(self, server_key, credential, request):
         body = json.dumps(request).encode("utf-8")
@@ -806,9 +860,12 @@ class PairingAgent:
         events = self.directory / "events"
         events.mkdir(parents=True, exist_ok=True)
         processed = []
-        paths = sorted(events.glob("*.xml"))
+        queue_removed = 0
         bounded = max_events is not None
-        limit = len(paths) if max_events is None else max(0, int(max_events))
+        limit = 0 if max_events is None else max(0, int(max_events))
+        path_limit = None if not bounded else limit + self.MAX_EVENT_LOOKAHEAD
+        paths = (sorted(events.glob("*.xml")) if path_limit is None
+                 else heapq.nsmallest(path_limit, events.glob("*.xml")))
         # Parse only the work budget initially.  If that window contains a
         # watermarked disconnect, discover just enough of the mailbox to find
         # its session minutes. Cached headers keep retries from becoming a
@@ -820,7 +877,7 @@ class PairingAgent:
             try:
                 pending.append((path, self._cached_event(path)))
             except (ElementTree.ParseError, ValueError, OSError):
-                self._quarantine(path)
+                queue_removed += int(self._quarantine(path))
                 LOG.warning("malformed event quarantined")
 
         disconnects = [event for _, event in pending
@@ -842,7 +899,7 @@ class PairingAgent:
                 try:
                     event = self._cached_event(path)
                 except (ElementTree.ParseError, ValueError, OSError):
-                    self._quarantine(path)
+                    queue_removed += int(self._quarantine(path))
                     continue
                 payload = event.get("payload") or {}
                 candidate_key = (str(event.get("server_key", "")), str(event.get("save_id", "")),
@@ -862,19 +919,40 @@ class PairingAgent:
         effective_max = len(pending) if max_events is None else max(0, int(max_events))
         selected = pending
         blocked_sessions = set()
-        for path, event in selected:
-            if attempted >= effective_max:
-                break
+        selected_index = 0
+
+        def ordering_key_for(event):
             payload = event.get("payload") or {}
-            ordering_key = (str(event.get("server_key", "")), str(event.get("save_id", "")),
-                            str(payload.get("unique_user_id", "")), str(payload.get("session_id", "")))
-            if ordering_key in blocked_sessions:
-                continue
-            attempted += 1
+            return (str(event.get("server_key", "")), str(event.get("save_id", "")),
+                    str(payload.get("unique_user_id", "")), str(payload.get("session_id", "")))
+
+        def remove_or_quarantine(path, event, status, detail=None):
+            nonlocal queue_removed
+            if status == 200:
+                try:
+                    path.unlink()
+                    processed.append(path.name)
+                    queue_removed += 1
+                except OSError as error:
+                    LOG.warning("accepted event could not be removed type=%s id=%s reason=%s",
+                                event.get("event_type"), self._short_event_id(event.get("event_id")), error)
+                return False
+            if status in {400, 401, 403, 404, 422}:
+                queue_removed += int(self._quarantine(path))
+                LOG.warning("event permanently rejected status=%s detail=%s and quarantined type=%s id=%s",
+                            status, detail or {"body": ""}, event.get("event_type"),
+                            self._short_event_id(event.get("event_id")))
+                return False
+            LOG.warning("event API unavailable status=%s detail=%s; event retained for retry type=%s id=%s",
+                        status, detail or {"body": ""}, event.get("event_type"),
+                        self._short_event_id(event.get("event_id")))
+            return True
+
+        def post_individually(path, event, ordering_key):
             try:
                 self._post_event(event)
-                path.unlink()
-                processed.append(path.name)
+                remove_or_quarantine(path, event, 200)
+                return False
             except (HTTPError, URLError, TimeoutError, RuntimeError, json.JSONDecodeError, OSError) as error:
                 status = getattr(error, "code", None)
                 detail = getattr(error, "sin_detail", None)
@@ -884,24 +962,82 @@ class PairingAgent:
                     except (AttributeError, OSError, TypeError):
                         raw_body = b""
                     detail = self._safe_http_error_detail(raw_body)
-                if status in {400, 401, 403, 404, 422}:
-                    self._quarantine(path)
-                    LOG.warning("event permanently rejected status=%s detail=%s and quarantined type=%s id=%s",
-                                status, detail or {"body": ""}, event.get("event_type"),
-                                self._short_event_id(event.get("event_id")))
-                else:
-                    LOG.warning("event API unavailable status=%s detail=%s; event retained for retry type=%s id=%s",
-                                status, detail or {"body": ""}, event.get("event_type"),
-                                self._short_event_id(event.get("event_id")))
-                    # Preserve per-session ordering without starving other
-                    # sessions whose events are eligible in this pass.
+                if remove_or_quarantine(path, event, status, detail):
                     blocked_sessions.add(ordering_key)
-                    continue
-        remaining = len(list(events.glob("*.xml")))
+                    return True
+                return False
+
+        while selected_index < len(selected) and attempted < effective_max:
+            path, event = selected[selected_index]
+            ordering_key = ordering_key_for(event)
+            if ordering_key in blocked_sessions:
+                selected_index += 1
+                continue
+
+            # Routine operation batches have row-level source IDs and are
+            # independently retry-safe. Bundle adjacent, same-scope envelopes
+            # into one HTTPS request; never merge their rows or cross scopes.
+            group = [(path, event)]
+            next_index = selected_index + 1
+            if event.get("event_type") == "farm_operations_batch":
+                while (next_index < len(selected)
+                       and attempted + len(group) < effective_max
+                       and len(group) < 50):
+                    candidate_path, candidate = selected[next_index]
+                    if (candidate.get("event_type") != "farm_operations_batch"
+                            or candidate.get("server_key") != event.get("server_key")
+                            or candidate.get("save_id") != event.get("save_id")
+                            or candidate.get("world_id") != event.get("world_id")
+                            or candidate.get("server_credential") != event.get("server_credential")):
+                        break
+                    candidate_group = group + [(candidate_path, candidate)]
+                    candidate_events = [item for _, item in candidate_group]
+                    if len(json.dumps({"events": candidate_events}, separators=(",", ":")).encode("utf-8")) > 512_000:
+                        break
+                    group.append((candidate_path, candidate))
+                    next_index += 1
+
+            if len(group) > 1:
+                attempted += len(group)
+                try:
+                    acknowledgements = self._post_event_batch([item for _, item in group])
+                    for (group_path, group_event), acknowledgement in zip(group, acknowledgements):
+                        status = acknowledgement["http_status"]
+                        detail = {key: acknowledgement.get(key) for key in ("error", "reason")
+                                  if acknowledgement.get(key) is not None}
+                        if remove_or_quarantine(group_path, group_event, status, detail):
+                            blocked_sessions.add(ordering_key_for(group_event))
+                except HTTPError as error:
+                    status = getattr(error, "code", None)
+                    # A rolling deployment or request-boundary rejection is
+                    # handled by the compatible single-event endpoint. This
+                    # keeps the mailbox moving without discarding source rows.
+                    if status in {400, 404, 413, 422}:
+                        for group_path, group_event in group:
+                            post_individually(group_path, group_event, ordering_key_for(group_event))
+                    else:
+                        detail = getattr(error, "sin_detail", None)
+                        LOG.warning("event batch API unavailable status=%s detail=%s; %s source events retained",
+                                    status, detail or {"body": ""}, len(group))
+                except (URLError, TimeoutError, RuntimeError, json.JSONDecodeError, OSError) as error:
+                    LOG.warning("event batch API unavailable; %s source events retained: %s",
+                                len(group), error)
+                selected_index += len(group)
+                continue
+
+            attempted += 1
+            post_individually(path, event, ordering_key)
+            selected_index += 1
+        # Avoid a second full directory walk on every catch-up pass. With a
+        # bounded scan, report a lower bound when the lookahead window filled.
+        remaining_count = max(0, len(paths) - queue_removed)
+        remaining = (f">={remaining_count}" if bounded and len(paths) >= path_limit
+                     else str(remaining_count))
         if attempted:
             types = sorted({event.get("event_type", "unknown") for _, event in pending})
-            LOG.info("event batch complete count=%s removed=%s remaining=%s catch_up=%s types=%s",
-                     attempted, len(processed), remaining, remaining > 0, ",".join(types))
+            LOG.info("event batch complete count=%s removed=%s remaining_lower_bound=%s catch_up=%s types=%s",
+                     attempted, len(processed), remaining, len(paths) >= path_limit if bounded else False,
+                     ",".join(types))
         return processed
 
     def process_registration_once(self):
