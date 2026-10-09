@@ -2,8 +2,12 @@
 
 import hashlib
 import math
+import re
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+
+from bson.decimal128 import Decimal128
+from pymongo.errors import DuplicateKeyError
 
 
 class FarmOperationalValidationError(ValueError):
@@ -20,6 +24,20 @@ def _integer(row, key, low, high, required=True):
         raise FarmOperationalValidationError(f"{key} must be an integer") from None
     if str(parsed) != str(value) or not low <= parsed <= high:
         raise FarmOperationalValidationError(f"{key} is invalid")
+    return parsed
+
+
+def _calendar_integer(row, key, low, high):
+    """Unusable game-clock fields remain raw instead of blocking the batch."""
+    value = row.get(key)
+    if value in (None, ""):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    if str(parsed) != str(value) or not low <= parsed <= high:
+        return None
     return parsed
 
 
@@ -58,10 +76,10 @@ def validate_farm_operation(row):
         "farm_id": _integer(row, "farm_id", 1, 254),
         "source_sequence": _integer(row, "source_sequence", 1, 2147483647),
         "runtime_ms": _integer(row, "runtime_ms", 0, 9007199254740991, required=False),
-        "game_period": _integer(row, "game_period", 0, 12, required=False),
-        "game_day": _integer(row, "game_day", 0, 31, required=False),
-        "game_year": _integer(row, "game_year", 0, 10000, required=False),
-        "game_time_ms": _integer(row, "game_time_ms", 0, 86400000, required=False),
+        "game_period": _calendar_integer(row, "game_period", 1, 12),
+        "game_day": _calendar_integer(row, "game_day", 1, 31),
+        "game_year": _calendar_integer(row, "game_year", 1, 10000),
+        "game_time_ms": _calendar_integer(row, "game_time_ms", 0, 86400000),
     }
     if kind in {"sale", "storage_in", "storage_out"}:
         value.update({
@@ -81,6 +99,11 @@ def validate_farm_operation(row):
             "runtime_node": _label(row, "runtime_node", 64, required=False),
             "position_x": _number(row, "position_x", required=False),
             "position_z": _number(row, "position_z", required=False),
+            "event_count": _integer(row, "event_count", 1, 2147483647,
+                                    required=False) or 1,
+            # The existing float remains for legacy raw-event consumers; the
+            # Decimal128 hourly total uses the original 17-digit Lua value.
+            "liters_raw": str(Decimal(str(row["liters"]))),
         })
     elif kind in {"ai_started", "ai_stopped"}:
         value.update({
@@ -124,6 +147,12 @@ class FarmOperationalTelemetry:
         inserted = []
         for event_id, data in zip(ids, values):
             scope = "|".join((str(server_key), str(save_key), str(world_id), event_id))
+            if (data["kind"] in {"storage_in", "storage_out"}
+                    and self._has_game_hour(data)
+                    and self._storage_source_marker(event_id, data) is not None):
+                inserted.append(self._ingest_storage_hour(server_key, save_key, world_id,
+                                                          event_id, data))
+                continue
             document = {
                 "_id": hashlib.sha256(scope.encode("utf-8")).hexdigest(),
                 "server_key": str(server_key), "save_key": str(save_key),
@@ -134,3 +163,93 @@ class FarmOperationalTelemetry:
                 {"_id": document["_id"]}, {"$setOnInsert": document}, upsert=True)
             inserted.append(document)
         return inserted
+
+    @staticmethod
+    def _has_game_hour(data):
+        return (data["game_year"] is not None and data["game_year"] >= 1
+                and data["game_period"] is not None and 1 <= data["game_period"] <= 12
+                and data["game_day"] is not None and 1 <= data["game_day"] <= 31
+                and data["game_time_ms"] is not None
+                and 0 <= data["game_time_ms"] < 86400000)
+
+    @staticmethod
+    def _storage_source_marker(event_id, data):
+        """Compact replay protection: one bit per source sequence per retained bucket."""
+        match = re.match(r"^(.*)-operation-(\d+)$", event_id)
+        if match is None:
+            return None
+        sequence = int(match.group(2))
+        if sequence != data["source_sequence"]:
+            return None
+        runtime_key = hashlib.sha256(match.group(1).encode("utf-8")).hexdigest()[:16]
+        zero_based = sequence - 1
+        chunk, bit = divmod(zero_based, 31)
+        field = f"seen.{runtime_key}.{chunk}"
+        mask = 1 << bit
+        return field, mask
+
+    def _ingest_storage_hour(self, server_key, save_key, world_id, event_id, data):
+        hour = data["game_time_ms"] // 3600000
+        # Source position is evidence, not a bucket dimension: all sites for
+        # this farm/fill/direction/game-hour roll into one durable record.
+        # Keep the old source-specific key below only to recognize deliveries
+        # already applied before this wider aggregation key was deployed.
+        if data["position_x"] is not None and data["position_z"] is not None:
+            source_key = f"{data['position_x']:.3f}:{data['position_z']:.3f}"
+        else:
+            source_key = "unknown"
+        dimensions = (str(server_key), str(save_key), str(world_id),
+                      str(data["farm_id"]), str(data["game_year"]),
+                      str(data["game_period"]), str(data["game_day"]),
+                      str(hour), data["fill_type"], data["kind"])
+        bucket_id = hashlib.sha256("|".join(dimensions).encode("utf-8")).hexdigest()
+        legacy_dimensions = dimensions + (source_key,)
+        legacy_bucket_id = hashlib.sha256("|".join(legacy_dimensions).encode("utf-8")).hexdigest()
+        source_field, source_mask = self._storage_source_marker(event_id, data)
+        runtime_key = source_field.split(".")[1]
+        received_at = datetime.now(timezone.utc)
+        collection = self.db.farm_storage_hourly
+        # During deployment, retries may refer to source-specific hourly rows
+        # created by the previous key format. Recognize their dedupe bit so a
+        # replay is not counted again in the new consolidated bucket.
+        if collection.find_one({"_id": legacy_bucket_id,
+                                source_field: {"$bitsAllSet": source_mask}}, {"_id": 1}) is not None:
+            return {"_id": legacy_bucket_id, "bucket": "game_hour", "duplicate": True, **data}
+        update = {
+            "$setOnInsert": {"server_key": str(server_key), "save_key": str(save_key),
+                             "world_id": str(world_id), "farm_id": data["farm_id"],
+                             "game_year": data["game_year"],
+                             "game_period": data["game_period"],
+                             "game_day": data["game_day"], "game_hour": hour,
+                             "fill_type": data["fill_type"], "kind": data["kind"]},
+            "$inc": {"liters": Decimal128(Decimal(data["liters_raw"])),
+                     "event_count": data["event_count"], "delivery_count": 1},
+            "$min": {"first_event_time_ms": data["game_time_ms"],
+                     "source_sequence_min": data["source_sequence"],
+                     "first_received_at": received_at},
+            "$max": {"last_event_time_ms": data["game_time_ms"],
+                     "source_sequence_max": data["source_sequence"],
+                     "last_received_at": received_at},
+            "$bit": {source_field: {"or": source_mask}},
+            "$addToSet": {"source_keys": source_key, "runtime_keys": runtime_key,
+                          "runtime_nodes": data["runtime_node"] or "unknown"},
+        }
+        # One Mongo document is the transaction boundary: source ID insertion
+        # and numeric increment are atomic, even if Central crashes before its
+        # batch marker is written. An upsert race is resolved by checking the
+        # already-accounted-for source ID, not by applying a second increment.
+        for _ in range(4):
+            try:
+                collection.update_one(
+                    {"_id": bucket_id, "$or": [
+                        {source_field: {"$exists": False}},
+                        {source_field: {"$bitsAllClear": source_mask}},
+                    ]},
+                    update, upsert=True)
+                return {"_id": bucket_id, "bucket": "game_hour", **data}
+            except DuplicateKeyError:
+                if collection.find_one({"_id": bucket_id,
+                                        source_field: {"$bitsAllSet": source_mask}},
+                                       {"_id": 1}) is not None:
+                    return {"_id": bucket_id, "bucket": "game_hour", **data}
+        raise RuntimeError("storage bucket contention; retry the batch")

@@ -852,6 +852,29 @@ class AgentTests(unittest.TestCase):
             authority = (root / "manager-authority.xml").read_text(encoding="utf-8")
             self.assertIn('canonicalName="Repton | Repton Does"', authority)
 
+    def test_failed_manager_authority_refresh_preserves_last_known_projection(self):
+        response = MagicMock()
+        response.status = 503
+        response.read.return_value = b'{"error":"authority_projection_unavailable"}'
+        response.__enter__.return_value = response
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "serverBinding.xml").write_text(
+                '<serverBinding serverKey="server" credential="secret"/>', encoding="utf-8")
+            (root / "snapshot.xml").write_text(
+                '<networkLocal savegameIndex="1" worldId="test-world"/>', encoding="utf-8")
+            existing = ('<?xml version="1.0"?><managerAuthority schemaVersion="1" worldId="test-world">'
+                        '<manager gamePlayerId="stable-player" farmId="2"/></managerAuthority>')
+            authority_path = root / "manager-authority.xml"
+            authority_path.write_text(existing, encoding="utf-8")
+            agent = PairingAgent(root, "https://central", MagicMock(return_value=response))
+
+            with self.assertLogs("fs25_network_core.agent", level="WARNING") as logs:
+                self.assertFalse(agent.process_manager_authority_once())
+
+            self.assertEqual(authority_path.read_text(encoding="utf-8"), existing)
+            self.assertIn("retaining last known projection", "\n".join(logs.output))
+
     def test_manager_authority_projection_log_is_change_based(self):
         response = MagicMock()
         response.status = 200

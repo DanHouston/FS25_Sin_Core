@@ -549,7 +549,15 @@ class PairingAgent:
             ElementTree.ElementTree(root).write(temporary, encoding="utf-8", xml_declaration=True)
             _atomic_replace(temporary, destination)
             return True
-        except (ElementTree.ParseError, ValueError, OSError, HTTPError, URLError, TimeoutError, RuntimeError, json.JSONDecodeError):
+        except (ElementTree.ParseError, ValueError, OSError, HTTPError, URLError, TimeoutError, RuntimeError, json.JSONDecodeError) as error:
+            detail = getattr(error, "sin_detail", None)
+            if detail is None and isinstance(error, HTTPError):
+                try:
+                    detail = self._safe_http_error_detail(error.read(4096))
+                except (AttributeError, OSError, TypeError):
+                    detail = None
+            LOG.warning("manager authority refresh unavailable; retaining last known projection reason=%s",
+                        str(detail if detail is not None else error)[:200])
             return False
 
     def process_snapshot_once(self):

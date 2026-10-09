@@ -1,6 +1,7 @@
 """Read-only, world-scoped first farm operations and finance report."""
 
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 from .admin_manager import AdminManager
 from .world_generation import WorldGenerationRegistry
@@ -16,6 +17,12 @@ def _top(rows, key, count=5):
 
 def _label(value):
     return str(value).replace("\n", " ").replace("\r", " ")[:40]
+
+
+def _numeric_float(value):
+    if hasattr(value, "to_decimal"):
+        value = value.to_decimal()
+    return float(value or Decimal(0))
 
 
 class FarmReportService:
@@ -54,11 +61,22 @@ class FarmReportService:
         operations = list(self.db.farm_operational_events.aggregate([
             {"$match": match},
             {"$group": {"_id": {"kind": "$kind", "fill_type": "$fill_type"},
-                        "count": {"$sum": 1}, "liters": {"$sum": "$liters"},
+                        "count": {"$sum": {"$ifNull": ["$event_count", 1]}},
+                        "liters": {"$sum": "$liters"},
                         "duration_ms": {"$sum": "$duration_ms"},
                         "operating_ms": {"$sum": "$operating_ms"},
                         "distance_estimated_m": {"$sum": "$distance_estimated_m"}}},
         ]))
+        storage_match = {"server_key": str(server_key), "save_key": str(save_key),
+                         "world_id": active_world, "farm_id": farm_id,
+                         "last_received_at": {"$gte": start, "$lte": end}}
+        storage = list(self.db.farm_storage_hourly.aggregate([
+            {"$match": storage_match},
+            {"$group": {"_id": {"kind": "$kind", "fill_type": "$fill_type"},
+                        "count": {"$sum": "$event_count"},
+                        "liters": {"$sum": "$liters"}}},
+        ]))
+        operations.extend(storage)
         finance_rows = [{"name": str(row.get("_id") or "UNKNOWN"),
                          "income": float(row.get("income") or 0),
                          "expense": float(row.get("expense") or 0),
@@ -66,7 +84,7 @@ class FarmReportService:
         operation_rows = [{"kind": (row.get("_id") or {}).get("kind"),
                            "name": str((row.get("_id") or {}).get("fill_type") or ""),
                            "count": int(row.get("count") or 0),
-                           "liters": float(row.get("liters") or 0),
+                         "liters": _numeric_float(row.get("liters")),
                            "duration_ms": float(row.get("duration_ms") or 0),
                            "operating_ms": float(row.get("operating_ms") or 0),
                            "distance_estimated_m": float(row.get("distance_estimated_m") or 0)}

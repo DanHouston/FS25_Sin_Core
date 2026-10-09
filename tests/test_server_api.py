@@ -279,6 +279,7 @@ class ServerApiTests(unittest.TestCase):
         handler.farm_lifecycle = MagicMock()
         handler.event_processor.registry.authenticate.return_value = {"server_key": "sin-fs25-01"}
         handler.event_processor.registry.resolve_save.return_value = "sin-fs25-main"
+        handler.event_processor.authorization.db.server_snapshots.update_one.return_value.matched_count = 1
         # Use a single-pass cursor, matching PyMongo, so the endpoint must
         # materialize the shared relationship projection before splitting it.
         handler.event_processor.authorization.db.memberships.find.return_value = iter([{
@@ -306,3 +307,41 @@ class ServerApiTests(unittest.TestCase):
         query = handler.event_processor.authorization.db.memberships.find.call_args.args[0]
         self.assertEqual(query["state"], {"$in": ["pending", "active"]})
         self.assertEqual(query["desired_role"], {"$in": ["farm_manager", "contractor"]})
+
+    def test_manager_authority_endpoint_returns_unavailable_when_durable_repair_fails(self):
+        handler = self.server.RequestHandlerClass
+        handler.event_processor.registry.authenticate.return_value = {"server_key": "sin-fs25-01"}
+        handler.event_processor.registry.resolve_save.return_value = "sin-fs25-main"
+        handler.event_processor.authorization.db.server_snapshots.update_one.return_value.matched_count = 1
+        handler.farm_lifecycle = MagicMock()
+        handler.farm_lifecycle._repair_contractor_authorizations.side_effect = RuntimeError(
+            "MongoDB write unavailable")
+        connection = HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
+        with self.assertLogs("fs25_network_core.server_api", level="WARNING") as logs:
+            connection.request("GET", "/api/server/manager-authority?fs25_save_id=1&world_id=test-world", headers={
+                "X-SiN-Server-Key": "sin-fs25-01", "Authorization": "Bearer secret"})
+            response = connection.getresponse()
+            body = json.loads(response.read())
+        connection.close()
+
+        self.assertEqual((response.status, body), (503, {"error": "authority_projection_unavailable"}))
+        self.assertIn("manager authority projection unavailable", "\n".join(logs.output))
+
+    def test_manager_authority_endpoint_does_not_publish_when_mongo_is_not_writable(self):
+        handler = self.server.RequestHandlerClass
+        handler.event_processor.registry.authenticate.return_value = {"server_key": "sin-fs25-01"}
+        handler.event_processor.registry.resolve_save.return_value = "sin-fs25-main"
+        handler.farm_lifecycle = MagicMock()
+        handler.event_processor.authorization.db.server_snapshots.update_one.side_effect = RuntimeError(
+            "MongoDB is full")
+        connection = HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
+        with self.assertLogs("fs25_network_core.server_api", level="WARNING"):
+            connection.request("GET", "/api/server/manager-authority?fs25_save_id=1&world_id=test-world", headers={
+                "X-SiN-Server-Key": "sin-fs25-01", "Authorization": "Bearer secret"})
+            response = connection.getresponse()
+            body = json.loads(response.read())
+        connection.close()
+
+        self.assertEqual((response.status, body), (503, {"error": "authority_projection_unavailable"}))
+        handler.farm_lifecycle._repair_contractor_authorizations.assert_not_called()
+        handler.event_processor.authorization.db.memberships.find.assert_not_called()

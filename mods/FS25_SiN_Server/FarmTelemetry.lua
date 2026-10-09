@@ -104,18 +104,26 @@ function FS25SiNServer:observeStorageChange(storage, fillType, before, after)
         perStorage = {}
         self.operationAggregates[storage] = perStorage
     end
-    local key = direction .. ":" .. tostring(fillType)
+    -- Even a one-second source window can cross a game hour at high speed.
+    local env = g_currentMission.environment
+    local gameHour = env ~= nil and type(env.dayTime) == "number"
+        and math.floor(env.dayTime / 3600000) or "unknown"
+    local key = table.concat({direction, tostring(farmId), tostring(fillType),
+        tostring(env ~= nil and env.currentYear or "unknown"),
+        tostring(env ~= nil and env.currentPeriod or "unknown"),
+        tostring(env ~= nil and env.currentDay or "unknown"), tostring(gameHour)}, ":")
     local record = perStorage[key]
     if record == nil then
         local identity = self:storageIdentity(storage)
         record = self:newFarmOperation(direction, farmId, {
-            fill_type=name, fill_type_index=fillType, liters=0,
+            fill_type=name, fill_type_index=fillType, liters=0, event_count=0,
             stock_after_liters=after, runtime_node=identity.runtime_node,
             position_x=identity.position_x or "", position_z=identity.position_z or ""})
         if record == nil then return end
         perStorage[key] = record
     end
     record.values.liters = record.values.liters + math.abs(after - before)
+    record.values.event_count = record.values.event_count + 1
     record.values.stock_after_liters = after
 end
 

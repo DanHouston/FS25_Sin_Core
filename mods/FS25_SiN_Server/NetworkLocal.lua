@@ -668,7 +668,13 @@ function FS25SiNServer:enforceFarmChange(player)
     if user == nil then return end
     local farm = g_farmManager:getFarmByUserId(user:getId())
     if farm == nil then return end
-    local managerAuthority, contractorAuthority = self:loadManagerAuthority()
+    local managerAuthority, contractorAuthority, authorityAvailable = self:loadManagerAuthority()
+    if not authorityAvailable then
+        Logging.warning("[SiN Authorization] authority unavailable; preserving native farm permissions userId=%s farmId=%s",
+            tostring(user:getId()), tostring(farm.farmId))
+        self:scheduleDeferredManagerSync(user, farm)
+        return
+    end
     local authorityFarmId = managerAuthority[tostring(user:getUniqueUserId())]
     local authorized = authorityFarmId ~= nil and tonumber(authorityFarmId) == tonumber(farm.farmId)
     self:enforceAuthorizedManagerState(user, farm, authorized, "immediate")
@@ -723,26 +729,31 @@ function FS25SiNServer:processDeferredManagerSyncs()
                     Logging.info("[SiN Authorization] stale deferred sync discarded userId=%s reason=dedicated_server_user",
                         tostring(user:getId()))
                 else
-                    local managerAuthority, contractorAuthority = self:loadManagerAuthority()
-                    local authorityFarmId = managerAuthority[uniqueId]
-                    local authorized = authorityFarmId ~= nil
-                        and tonumber(authorityFarmId) == tonumber(farm.farmId)
-                    local ok, errorMessage = pcall(self.enforceAuthorizedManagerState, self,
-                        user, farm, authorized, "deferred")
-                    if not ok then
-                        Logging.error("[SiN Authorization] deferred permission sync failed userId=%s farmId=%s error=%s",
-                            tostring(user:getId()), tostring(farm.farmId), tostring(errorMessage))
-                    end
-                    local contractor = contractorAuthority[uniqueId]
-                    if contractor ~= nil and tonumber(contractor.sourceFarmId) == tonumber(farm.farmId) then
-                        local sourceFarm = g_farmManager:getFarmById(tonumber(contractor.sourceFarmId))
-                        local contractorFarm = g_farmManager:getFarmById(tonumber(contractor.targetFarmId))
-                        if sourceFarm ~= nil and contractorFarm ~= nil then
-                            local contractorOk, contractorError = pcall(self.enforceAuthorizedContractorState,
-                                self, user, sourceFarm, contractorFarm, "deferred-contractor")
-                            if not contractorOk then
-                                Logging.error("[SiN Authorization] deferred contractor sync failed userId=%s farmId=%s error=%s",
-                                    tostring(user:getId()), tostring(contractorFarm.farmId), tostring(contractorError))
+                    local managerAuthority, contractorAuthority, authorityAvailable = self:loadManagerAuthority()
+                    if not authorityAvailable then
+                        Logging.warning("[SiN Authorization] deferred authority unavailable; preserving native farm permissions userId=%s farmId=%s",
+                            tostring(user:getId()), tostring(farm.farmId))
+                    else
+                        local authorityFarmId = managerAuthority[uniqueId]
+                        local authorized = authorityFarmId ~= nil
+                            and tonumber(authorityFarmId) == tonumber(farm.farmId)
+                        local ok, errorMessage = pcall(self.enforceAuthorizedManagerState, self,
+                            user, farm, authorized, "deferred")
+                        if not ok then
+                            Logging.error("[SiN Authorization] deferred permission sync failed userId=%s farmId=%s error=%s",
+                                tostring(user:getId()), tostring(farm.farmId), tostring(errorMessage))
+                        end
+                        local contractor = contractorAuthority[uniqueId]
+                        if contractor ~= nil and tonumber(contractor.sourceFarmId) == tonumber(farm.farmId) then
+                            local sourceFarm = g_farmManager:getFarmById(tonumber(contractor.sourceFarmId))
+                            local contractorFarm = g_farmManager:getFarmById(tonumber(contractor.targetFarmId))
+                            if sourceFarm ~= nil and contractorFarm ~= nil then
+                                local contractorOk, contractorError = pcall(self.enforceAuthorizedContractorState,
+                                    self, user, sourceFarm, contractorFarm, "deferred-contractor")
+                                if not contractorOk then
+                                    Logging.error("[SiN Authorization] deferred contractor sync failed userId=%s farmId=%s error=%s",
+                                        tostring(user:getId()), tostring(contractorFarm.farmId), tostring(contractorError))
+                                end
                             end
                         end
                     end
@@ -762,12 +773,12 @@ function FS25SiNServer:loadManagerAuthority()
     local authority = fileExists(path) and XMLFile.load("networkLocalAuthority", path) or nil
     local authorized, contractors = {}, {}
     self.authorityCanonicalNames = {}
-    if authority == nil then return authorized, contractors end
+    if authority == nil then return authorized, contractors, false end
     if self.worldIdentityReady ~= true or self.worldId == nil
         or tostring(authority:getString("managerAuthority#worldId") or "") ~= tostring(self.worldId) then
         Logging.warning("[SiN Authorization] ignoring authority XML for a different or unavailable FS25 world")
         authority:delete()
-        return authorized, contractors
+        return authorized, contractors, false
     end
     local index = 0
     while true do
@@ -803,7 +814,7 @@ function FS25SiNServer:loadManagerAuthority()
         index = index + 1
     end
     authority:delete()
-    return authorized, contractors
+    return authorized, contractors, true
 end
 
 function FS25SiNServer:readFarmManagerState(farm, userId)
@@ -3287,7 +3298,11 @@ end
 function FS25SiNServer:reconcileManagerAuthorityDrift()
     -- This is only a self-healing guardrail. Farm changes use the immediate
     -- plus deferred path above; the XML remains the sole SiN authority source.
-    local authorized, contractors = self:loadManagerAuthority()
+    local authorized, contractors, authorityAvailable = self:loadManagerAuthority()
+    if not authorityAvailable then
+        Logging.warning("[SiN Authorization] startup authority unavailable; preserving native farm permissions")
+        return
+    end
     for uniqueId, canonicalName in pairs(self.authorityCanonicalNames or {}) do
         self:alignConnectedPlayerName(uniqueId, canonicalName, "authority")
     end

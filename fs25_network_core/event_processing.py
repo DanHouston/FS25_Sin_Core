@@ -133,7 +133,12 @@ class CentralEventProcessor:
                 raise EventScopeError(str(error)) from None
         processed_world_id = active_world_id or raw_world_id
         processed_id = scoped_event_id(record["server_key"], save_key, event_id, processed_world_id)
-        processed_marker = self.db.processed_server_events.find_one({"_id": processed_id})
+        # Every operation row has its own durable idempotency key (raw-event
+        # _id or hourly source-sequence bit). Avoid one extra marker document
+        # for each high-volume batch; every row is safe to replay independently.
+        uses_row_level_idempotency = event_type == "farm_operations_batch"
+        processed_marker = (None if uses_row_level_idempotency else
+                            self.db.processed_server_events.find_one({"_id": processed_id}))
         if processed_marker and event_type != "player_disconnected":
             LOG.info("[SiN Events] duplicate event ignored eventId=%s type=%s", event_id, event_type)
             return {"status": "accepted", "duplicate": True, "save_key": save_key}
@@ -288,13 +293,19 @@ class CentralEventProcessor:
                 ActivityOutbox(self.database).enqueue(
                     event_id, record["server_key"], event_type, message, save_key=save_key,
                     world_id=processed_world_id)
-        try:
-            self.db.processed_server_events.insert_one(
-                {"_id": processed_id, "event_id": event_id, "server_key": record["server_key"],
-                  "save_key": save_key, **({"world_id": processed_world_id} if processed_world_id else {}),
-                  "processed_at": now})
-        except DuplicateKeyError:
-            pass
+        if not uses_row_level_idempotency:
+            try:
+                marker = {"_id": processed_id, "server_key": record["server_key"],
+                          "save_key": save_key,
+                          **({"world_id": processed_world_id} if processed_world_id else {}),
+                          "processed_at": now}
+                # Heartbeats dominate this seven-day TTL collection. Their
+                # opaque event ID is already folded into _id.
+                if event_type != "heartbeat":
+                    marker["event_id"] = event_id
+                self.db.processed_server_events.insert_one(marker)
+            except DuplicateKeyError:
+                pass
         LOG.info("[SiN Events] processed type=%s serverKey=%s", event_type, record["server_key"])
         result.setdefault("status", "accepted")
         result.setdefault("save_key", save_key)

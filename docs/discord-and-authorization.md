@@ -44,9 +44,13 @@ Farm membership and manager authority are separate. FS25's normal farm-selection
 flow removes the player from the old farm, sets the player's `farmId`, and adds
 the user to the selected farm with default permissions. SiN does not force an
 approved member into SiN Harvest and does not prevent a registered member from
-switching farms. The FS25_SiN_Server authority loop only demotes a manager when no
-matching persisted SiN manager authorization exists; joining a farm never grants
-manager status.
+switching farms. The FS25_SiN_Server authority loop only reconciles manager
+status from a complete, current-world authority projection. If that projection
+is missing, belongs to another world, or Central cannot prove MongoDB is
+writable, it preserves native FS25 farm permissions rather than interpreting
+the outage as a revocation. The Agent retains its last successfully received
+projection across refresh failures. A valid projection that omits a manager is
+still an authoritative revocation; joining a farm never grants manager status.
 
 Every linked identity whose community application is currently approved and
 whose current FS25 observation shows a real source farm (`farm_id > 0`) receives

@@ -72,6 +72,7 @@ class FarmOperationalLuaTests(unittest.TestCase):
         self.assertEqual(lua.eval("c"), 3)
         self.assertEqual(lua.eval("#FS25SiNServer.operationWindow"), 2)
         self.assertEqual(lua.eval("FS25SiNServer.operationWindow[1].values.liters"), 160)
+        self.assertEqual(lua.eval("FS25SiNServer.operationWindow[1].values.event_count"), 2)
         self.assertEqual(lua.eval("FS25SiNServer.operationWindow[2].values.liters"), 40)
         self.assertEqual(lua.eval("FS25SiNServer.operationWindow[2].values.stock_after_liters"), 120)
 
@@ -136,6 +137,30 @@ class FarmOperationalLuaTests(unittest.TestCase):
         ''')
         self.assertEqual(lua.eval("#FS25SiNServer.operationWindow"), 1)
         self.assertEqual(lua.eval("FS25SiNServer.operationWindow[1].values.liters"), 100)
+
+    def test_storage_does_not_coalesce_across_game_hours_or_farms(self):
+        lua = runtime()
+        lua.execute(r'''
+            Storage.setFillLevel(storage, 10, 19)
+            g_currentMission.environment.dayTime = 7200000
+            Storage.setFillLevel(storage, 20, 19)
+            storage.getOwnerFarmId = function() return 3 end
+            Storage.setFillLevel(storage, 30, 19)
+        ''')
+        self.assertEqual(lua.eval("#FS25SiNServer.operationWindow"), 3)
+        self.assertEqual(lua.eval("FS25SiNServer.operationWindow[1].values.game_time_ms"), 3600000)
+        self.assertEqual(lua.eval("FS25SiNServer.operationWindow[2].values.game_time_ms"), 7200000)
+        self.assertEqual(lua.eval("FS25SiNServer.operationWindow[3].values.farm_id"), 3)
+
+    def test_half_million_production_ticks_become_one_exact_source_record(self):
+        lua = runtime()
+        lua.execute(r'''
+            for i=1,500000 do Storage.setFillLevel(storage, i, 19) end
+        ''')
+        self.assertEqual(lua.eval("#FS25SiNServer.operationWindow"), 1)
+        self.assertEqual(lua.eval("FS25SiNServer.operationWindow[1].values.liters"), 500000)
+        self.assertEqual(lua.eval("FS25SiNServer.operationWindow[1].values.event_count"), 500000)
+        self.assertEqual(lua.eval("FS25SiNServer.operationWindow[1].values.stock_after_liters"), 500000)
 
     def test_failed_batch_retries_same_individual_events(self):
         lua = runtime()

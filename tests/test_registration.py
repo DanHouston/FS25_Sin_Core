@@ -508,6 +508,15 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("permission drift repaired", source)
         self.assertIn("pcall(self.reconcileManagerAuthorityDrift, self)", source)
 
+    def test_unavailable_authority_preserves_native_farm_permissions(self):
+        source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
+            encoding="utf-8")
+        self.assertIn("local managerAuthority, contractorAuthority, authorityAvailable = self:loadManagerAuthority()", source)
+        self.assertIn("if not authorityAvailable then", source)
+        self.assertIn("authority unavailable; preserving native farm permissions", source)
+        self.assertIn("deferred authority unavailable; preserving native farm permissions", source)
+        self.assertIn("startup authority unavailable; preserving native farm permissions", source)
+
     def test_server_runtime_periodic_contractor_reconciliation_suppresses_unchanged_success_logs(self):
         source = (Path(__file__).parents[1] / "mods" / "FS25_SiN_Server" / "NetworkLocal.lua").read_text(
             encoding="utf-8")

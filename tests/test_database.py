@@ -8,7 +8,9 @@ from fs25_network_core.database import Database
 
 
 class _FakeCollection:
-    def __init__(self):
+    def __init__(self, database=None, name="collection"):
+        self.database = database
+        self.name = name
         self.create_calls = []
         self.drop_calls = []
         self.indexes = {}
@@ -18,7 +20,10 @@ class _FakeCollection:
 
     def create_index(self, keys, **options):
         self.create_calls.append((keys, options))
-        return options.get("name", "index")
+        name = options.get("name", "index")
+        self.indexes[name] = {"key": [(keys, 1)] if isinstance(keys, str) else list(keys),
+                              **options}
+        return name
 
     def drop_index(self, index_name):
         self.drop_calls.append(index_name)
@@ -29,11 +34,19 @@ class _FakeDatabase:
 
     def __init__(self):
         self.collections = {}
+        self.commands = []
 
     def __getattr__(self, name):
         if name.startswith("_"):
             raise AttributeError(name)
-        return self.collections.setdefault(name, _FakeCollection())
+        return self.collections.setdefault(name, _FakeCollection(self, name))
+
+    def command(self, command):
+        self.commands.append(command)
+        name = command["index"]["name"]
+        self.collections[command["collMod"]].indexes[name]["expireAfterSeconds"] = \
+            command["index"]["expireAfterSeconds"]
+        return {"ok": 1}
 
 
 class _FakeAdmin:
@@ -105,6 +118,22 @@ class DatabaseConfigurationTests(unittest.TestCase):
             and options.get("unique") is True
             for keys, options in personal_farm_indexes
         ))
+        hourly_indexes = fake_database.farm_storage_hourly.create_calls
+        self.assertTrue(any(keys == [("server_key", 1), ("save_key", 1),
+                                     ("world_id", 1), ("farm_id", 1),
+                                     ("last_received_at", -1)]
+                            for keys, _ in hourly_indexes))
+        self.assertIn(("observed_at", {"expireAfterSeconds": 35 * 86400,
+                                       "name": "farm_operations_35_day_retention"}),
+                      fake_database.farm_operational_events.create_calls)
+        self.assertIn(("observed_at", {
+            "expireAfterSeconds": 14 * 86400,
+            "partialFilterExpression": {"kind": {"$in": ["storage_in", "storage_out"]}},
+            "name": "farm_storage_raw_14_day_retention",
+        }), fake_database.farm_operational_events.create_calls)
+        self.assertIn(("last_received_at", {"expireAfterSeconds": 14 * 86400,
+                                             "name": "farm_storage_hourly_retention"}),
+                      hourly_indexes)
         self.assertEqual(fake_database.vehicle_codes.create_calls, [
             ([('server_key', 1), ('save_key', 1), ('world_id', 1), ('native_unique_id', 1)],
              {'name': 'vehicle_code_native_identity', 'unique': True}),
@@ -117,6 +146,25 @@ class DatabaseConfigurationTests(unittest.TestCase):
             for keys, _options in collection.create_calls:
                 self.assertNotEqual(keys, "_id")
                 self.assertNotEqual(keys, [("_id", 1)])
+
+    def test_initialize_shortens_existing_hourly_retention_index_in_place(self):
+        fake_database = _FakeDatabase()
+        fake_database.farm_storage_hourly.indexes["farm_storage_hourly_90_day_retention"] = {
+            "key": [("last_received_at", 1)], "expireAfterSeconds": 90 * 86400,
+        }
+        database = Database.__new__(Database)
+        database.client = _FakeClient()
+        database.db = fake_database
+        database.name = fake_database.name
+
+        database.initialize()
+
+        self.assertIn({"collMod": "farm_storage_hourly", "index": {
+            "name": "farm_storage_hourly_90_day_retention", "expireAfterSeconds": 14 * 86400}},
+            fake_database.commands)
+        self.assertFalse(any(name == "farm_storage_hourly_retention"
+                             for _keys, options in fake_database.farm_storage_hourly.create_calls
+                             for name in [options.get("name")]))
 
     def test_initialize_player_activity_sessions_succeeds_without_custom_id_index(self):
         fake_database = _FakeDatabase()

@@ -85,6 +85,28 @@ class OperationalIngestTests(unittest.TestCase):
                 "changes": [row(), row("storage_in", event_id="two", liters="-5")]})
         self.database.db.farm_operational_events.update_one.assert_not_called()
 
+    def test_partial_batch_failure_replay_preserves_exact_totals(self):
+        persisted = {}
+        attempts = 0
+
+        def upsert(query, update, *, upsert):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 38:
+                raise RuntimeError("simulated database interruption")
+            persisted.setdefault(query["_id"], update["$setOnInsert"])
+
+        self.database.db.farm_operational_events.update_one.side_effect = upsert
+        changes = [row("storage_in", event_id=f"tick-{i}", source_sequence=str(i),
+                       liters="0.25", game_time_ms="") for i in range(1, 129)]
+        with self.assertRaises(RuntimeError):
+            self.telemetry.ingest_batch("server", "save", "world", {"changes": changes})
+        self.assertEqual(len(persisted), 37)
+        self.telemetry.ingest_batch("server", "save", "world", {"changes": changes})
+        self.telemetry.ingest_batch("server", "save", "world", {"changes": changes})
+        self.assertEqual(len(persisted), 128)
+        self.assertEqual(sum(item["liters"] for item in persisted.values()), 32)
+
     def test_agent_parses_nested_operations(self):
         with TemporaryDirectory() as folder:
             path = Path(folder) / "operations.xml"
@@ -115,7 +137,7 @@ class OperationalIngestTests(unittest.TestCase):
             processor.process(event)
         self.database.db.farm_operational_events.update_one.assert_not_called()
 
-    def test_central_accepts_valid_batch_and_records_marker(self):
+    def test_central_accepts_valid_batch_and_uses_row_idempotency(self):
         processor = CentralEventProcessor(self.database)
         processor.registry = MagicMock()
         processor.registry.authenticate.return_value = {"server_key": "server"}
@@ -129,7 +151,24 @@ class OperationalIngestTests(unittest.TestCase):
         result = processor.process(event)
         self.assertEqual(result["operation_count"], 1)
         self.database.db.farm_operational_events.update_one.assert_called_once()
-        self.database.db.processed_server_events.insert_one.assert_called_once()
+        self.database.db.processed_server_events.find_one.assert_not_called()
+        self.database.db.processed_server_events.insert_one.assert_not_called()
+
+    def test_central_operation_batch_uses_row_dedupe_without_batch_marker(self):
+        processor = CentralEventProcessor(self.database)
+        processor.registry = MagicMock()
+        processor.registry.authenticate.return_value = {"server_key": "server"}
+        processor.registry.resolve_save.return_value = "save"
+        processor.farm_lifecycle = MagicMock()
+        processor.farm_lifecycle.current_world_id.return_value = "world"
+        operation = row("storage_in", event_id="server-runtime-operation-1")
+        event = {"event_id": "batch", "event_type": "farm_operations_batch",
+                 "server_key": "server", "server_credential": "credential",
+                 "save_id": "1", "world_id": "world", "payload": {"changes": [operation]}}
+        result = processor.process(event)
+        self.assertEqual(result["operation_count"], 1)
+        self.database.db.processed_server_events.find_one.assert_not_called()
+        self.database.db.processed_server_events.insert_one.assert_not_called()
 
 
 if __name__ == "__main__":

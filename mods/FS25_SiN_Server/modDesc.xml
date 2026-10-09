@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8" standalone="no"?>
 <modDesc descVersion="92">
     <author>SiN (SimNet)</author>
-    <version>0.2.2.5</version>
+    <version>0.2.2.7</version>
     <title><en>SiN (SimNet) Server</en></title>
     <description><en>SiN server-side runtime for authenticated mailbox transport, identity, activity, and farm integration.</en></description>
     <iconFilename>icon_network.dds</iconFilename>

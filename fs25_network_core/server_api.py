@@ -104,16 +104,33 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/server/manager-authority":
                 self.farm_lifecycle.require_current_world(record["server_key"], save_key, world_id)
-                # Authority projection is also a repair boundary. Do not
-                # depend on the preceding operations poll having succeeded:
-                # an authority fetch must be able to establish current-world
-                # SiN Harvest contractor jobs before building FS25 XML.
+                # Reads may still work when Atlas has rejected writes (for
+                # example, when an M0 cluster is full). Prove the current
+                # world snapshot is writable before publishing a projection;
+                # this updates one existing document and creates no history.
                 try:
+                    scope = {"server_key": record["server_key"], "save_key": save_key,
+                             "world_id": str(world_id)}
+                    probe = self.event_processor.authorization.db.server_snapshots.update_one(
+                        scope, {"$set": {"manager_authority_probe_at": datetime.now(timezone.utc)}})
+                    if getattr(probe, "matched_count", 0) != 1:
+                        raise RuntimeError("current-world snapshot write probe did not match")
+                    # Authority projection is also a repair boundary. Do not
+                    # depend on the preceding operations poll having succeeded:
+                    # an authority fetch must establish current-world SiN
+                    # Harvest contractor jobs before building FS25 XML.
                     self.farm_lifecycle._repair_contractor_authorizations(
                         record["server_key"], save_key)
                 except Exception as error:  # pragma: no cover - defensive HTTP boundary
-                    LOG.warning("contractor authority reconciliation deferred server=%s save=%s reason=%s",
+                    # The Agent atomically replaces manager-authority.xml
+                    # only after a successful response. Never publish a
+                    # potentially incomplete projection when its durable
+                    # Mongo repair step failed; a 503 preserves the last
+                    # known-good projection on the game server.
+                    LOG.warning("manager authority projection unavailable server=%s save=%s reason=%s",
                                 record["server_key"], save_key, str(error)[:240])
+                    _json_response(self, 503, {"error": "authority_projection_unavailable"})
+                    return
                 # Mongo cursors are single-pass iterators.  Materialize the
                 # current-world projection once because managers and
                 # contractors are derived from the same result set.

@@ -30,6 +30,21 @@ class Database:
                 collection.drop_index(index_name)
         collection.create_index(desired_keys, name=name, **options)
 
+    def _ensure_ttl_index(self, collection, field, seconds, name, legacy_names=()):
+        """Create a TTL index or adjust a known predecessor in place."""
+        indexes = collection.index_information()
+        existing_name = next((candidate for candidate in (name, *legacy_names)
+                              if candidate in indexes), None) if isinstance(indexes, dict) else None
+        if existing_name is None:
+            collection.create_index(field, expireAfterSeconds=seconds, name=name)
+            return
+        existing = indexes[existing_name]
+        if list(existing.get("key", [])) != [(field, 1)]:
+            raise RuntimeError(f"Refusing to modify unexpected TTL index {existing_name}")
+        if existing.get("expireAfterSeconds") != seconds:
+            self.db.command({"collMod": collection.name,
+                             "index": {"name": existing_name, "expireAfterSeconds": seconds}})
+
     def initialize(self):
         hello = self.client.admin.command("hello")
         if not hello.get("setName") and hello.get("msg") != "isdbgrid":
@@ -122,6 +137,27 @@ class Database:
         self.db.farm_operational_events.create_index(
             [("server_key", 1), ("save_key", 1), ("world_id", 1),
              ("farm_id", 1), ("observed_at", -1)])
+        # Raw storage movement rows are only reconciliation evidence; routine
+        # movements have already been atomically folded into hourly totals.
+        # Expire those raw rows after 14 days while retaining sales, AI, and
+        # vehicle events in the existing 35-day operational/report window.
+        self.db.farm_operational_events.create_index(
+            "observed_at", expireAfterSeconds=35 * 86400,
+            name="farm_operations_35_day_retention")
+        self.db.farm_operational_events.create_index(
+            "observed_at", expireAfterSeconds=14 * 86400,
+            partialFilterExpression={"kind": {"$in": ["storage_in", "storage_out"]}},
+            name="farm_storage_raw_14_day_retention")
+        self.db.farm_storage_hourly.create_index(
+            [("server_key", 1), ("save_key", 1), ("world_id", 1),
+             ("farm_id", 1), ("last_received_at", -1)],
+            name="farm_storage_hourly_report")
+        # Existing installations used the 90-day index name. collMod shortens
+        # its TTL in place so no second index is built and no aggregate rows
+        # are manually removed.
+        self._ensure_ttl_index(self.db.farm_storage_hourly, "last_received_at",
+                                14 * 86400, "farm_storage_hourly_retention",
+                                legacy_names=("farm_storage_hourly_90_day_retention",))
         self.db.activity_outbox.create_index([("status", 1), ("created_at", 1)])
         self.db.server_status_cards.create_index("server_key", unique=True)
         self._replace_legacy_unique_index(
