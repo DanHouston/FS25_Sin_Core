@@ -34,7 +34,9 @@ not cause already-accepted rows to be lost or counted twice. For steady
 routine activity this changes the game-side event cadence from at most one
 operations file per second to one per minute (up to roughly 60x fewer files).
 The existing backlog can be drained with up to 50 operation envelopes per
-HTTP request, without changing or deleting the queued XML.
+HTTP request, without changing or deleting the queued XML. The Agent allows
+up to 55 seconds for the batch response so Central can finish durable writes
+before the client gives up; a lost response is safe to retry by source ID.
 Central validates each envelope and row, then accounts for each row in Mongo.
 Operation rows use row-level idempotency, so they do not create one extra
 `processed_server_events` document per envelope. Each routine storage row is

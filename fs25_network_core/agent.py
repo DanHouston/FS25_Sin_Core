@@ -16,6 +16,7 @@ from xml.etree import ElementTree
 
 LOG = logging.getLogger(__name__)
 DEFAULT_EVENT_BATCH_SIZE = 200
+EVENT_BATCH_REQUEST_TIMEOUT_SECONDS = 55
 
 
 class MailboxWriteError(OSError):
@@ -59,6 +60,7 @@ def _atomic_replace(temporary, destination, attempts=8, initial_backoff=0.05, ma
 
 class PairingAgent:
     DEFAULT_EVENT_BATCH_SIZE = DEFAULT_EVENT_BATCH_SIZE
+    EVENT_BATCH_REQUEST_TIMEOUT_SECONDS = EVENT_BATCH_REQUEST_TIMEOUT_SECONDS
     MAX_EVENT_BATCH_SIZE = 500
     MAX_EVENT_LOOKAHEAD = 1000
     PERMANENT_RECEIPT_REJECTION_STATUSES = frozenset({400, 404, 422})
@@ -154,7 +156,7 @@ class PairingAgent:
             headers={"Content-Type": "application/json",
                      "X-SiN-Server-Key": str(server_key),
                      "Authorization": "Bearer " + str(credential)}, method="POST")
-        with self.opener(request, timeout=30) as response:
+        with self.opener(request, timeout=self.EVENT_BATCH_REQUEST_TIMEOUT_SECONDS) as response:
             if response.status != 200:
                 try:
                     raw_body = response.read(4096)

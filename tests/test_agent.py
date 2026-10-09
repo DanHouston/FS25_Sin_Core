@@ -822,6 +822,8 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(opener.call_count, 1)
             request = opener.call_args.args[0]
             self.assertTrue(request.full_url.endswith("/api/server/events/batch"))
+            self.assertEqual(opener.call_args.kwargs["timeout"],
+                             PairingAgent.EVENT_BATCH_REQUEST_TIMEOUT_SECONDS)
             sent = json.loads(request.data)
             self.assertEqual([event["event_id"] for event in sent["events"]],
                              ["op-1", "op-2", "op-3"])
