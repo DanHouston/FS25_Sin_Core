@@ -1,6 +1,8 @@
 # SiN Production Price Plan - Review Draft
 
-Status: **not yet applied as a broad runtime purchase-price policy**.
+Status: **approved purchase prices and planned factory recipe rates are configured
+in `SiN_FS25_Policy`**. Live game verification is still required for each map
+and placed production; a missing native recipe fails closed.
 
 This is the current catalog from `sinProductionPolicyExport`, plus the four
 American Silos Production Pack assets parsed directly from their source XMLs,

@@ -56,15 +56,18 @@ supply a policy-selected price.
 ### Runtime recipe seam
 
 `ProductionPoint.load` is wrapped with `Utils.overwrittenFunction`. For an
-explicitly matched rate-only recipe policy, the mod temporarily stages the
-configured `cyclesPerHour` values in the in-memory XMLFile before native load,
-then restores the XMLFile immediately afterward. Native FS25 builds its own
-simulation and UI state from those values on both server and clients; neither
-the source ZIP nor savegame is edited. The entire rate override fails closed
-if any configured native recipe or XML API is unavailable. Policies that also
-change amounts or disable recipes retain the separate post-load path.
+explicitly matched recipe rate or input/output amount policy, the mod temporarily
+stages those values in the in-memory XMLFile before native load, then restores
+the XMLFile immediately afterward. Native FS25 builds its own simulation and
+UI state from those values on both server and clients; neither the source ZIP
+nor savegame is edited. The entire override fails closed if any configured
+native recipe, fill type, or XML API is unavailable. Recipe-disable policies
+retain a separate post-load path that removes the matched recipe from FS25's
+indexed `productions` list and `productionsIdToObj` lookup before savegame
+state and multiplayer streams are read. It updates the remaining indexes and
+fails closed if the expected recipes are absent or already active.
 
-The current recipe policy is intentionally limited to:
+The explicit farm-supply and silo recipe policy includes:
 
 - `FS25_LimeProduction:LimeProduction.xml`: purchase price `$100,000`; recipe
   `Lime`: `300` stone to `3,000` lime at one cycle per hour;
@@ -83,10 +86,19 @@ The current recipe policy is intentionally limited to:
   native 1 L input to 1 L output ratios. Storage capacities remain native
   because no safe authoritative capacity seam is implemented.
 
-The remaining approved purchase prices are data-only entries in
-`config/production-policy.xml`; they do not change native input/output ratios
-or recipe concurrency. This keeps the price rollout separate from any future
-throughput or yield decision. The source production ZIPs remain untouched.
+The approved direct-crop and downstream factory entries also apply the planned
+`cyclesScale="10"` to every native recipe while retaining each recipe's native
+input/output ratio. The four spinnery entries instead apply `cyclesScale="10"`
+only to `fabric_cotton`; wool stays at its native rate. Rates are calculated
+from the XML supplied to native `ProductionPoint.load`, not from a hard-coded
+list of recipe rates. A missing or invalid native recipe fails closed and is
+logged. No recipe-concurrency behavior is changed. Source production ZIPs
+remain untouched.
+
+The six-month pricing target for these factories is **gross output value** at
+the resulting rate, assuming inputs are farm-produced. It does not deduct the
+value of inputs, operating costs, transport, or selling-point adjustments.
+The target is not net-profit payback; realized market revenue can vary.
 
 An unmatched runtime structure or input/output name fails closed for that
 recipe and is logged. A map/save reload is required for a recipe policy to
@@ -148,7 +160,7 @@ every game update.
 
 1. Keep every third-party production ZIP byte-for-byte unchanged; record the
    hashes of any assets being tested.
-2. Install `SiN_FS25_ProductionPolicy.zip` beside them and enable both on a new
+2. Install `SiN_FS25_Policy.zip` beside them and enable both on a new
    test save (identical policy ZIP on a dedicated server and all clients).
 3. Open Construction > Productions and spot-check Lime (`$100,000`), cereal
    (`$995,000`), an approved downstream line, and both silo tiers (`$302,500`

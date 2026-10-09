@@ -79,6 +79,22 @@ class ProductionPolicyTests(unittest.TestCase):
         for canonical_id, price in expected.items():
             self.assertEqual(entries[canonical_id].get("purchasePrice"), price)
 
+    def test_gross_payback_factories_have_the_planned_tenfold_rate(self):
+        root = ElementTree.parse(MOD / "config/production-policy.xml").getroot()
+        entries = [entry for entry in root.findall("production")
+                   if entry.get("id", "").startswith("FS25_BaseGame:")]
+        self.assertEqual(len(entries), 31)
+        for entry in entries:
+            with self.subTest(production=entry.get("id")):
+                if "/spinnery/" in entry.get("id", "") or "/spinneryUS/" in entry.get("id", ""):
+                    self.assertIsNone(entry.get("cyclesScale"))
+                    recipes = entry.findall("recipe")
+                    self.assertEqual([(recipe.get("id"), recipe.get("cyclesScale")) for recipe in recipes],
+                                     [("fabric_cotton", "10")])
+                else:
+                    self.assertEqual(entry.get("cyclesScale"), "10")
+                    self.assertEqual(entry.findall("recipe"), [])
+
     def test_silo_tier_recipe_policy_is_identical_and_native_ids_are_safe(self):
         root = ElementTree.parse(MOD / "config/production-policy.xml").getroot()
         entries = {node.get("id"): node for node in root.findall("production")}
@@ -110,11 +126,11 @@ class ProductionPolicyTests(unittest.TestCase):
         source = (MOD / "scripts/SiNProductionPolicy.lua").read_text(encoding="utf-8")
         self.assertIn("ProductionPoint.load = Utils.overwrittenFunction", source)
         self.assertIn("applyRuntimeRecipePolicy", source)
-        self.assertIn("productionPoint.productions[recipeId] = nil", source)
-        self.assertIn("table.remove(productionPoint.sortedProductions, index)", source)
-        self.assertIn("production.cyclesPerHour = recipe.cyclesPerHour", source)
-        self.assertIn("entry.amount = overrides[name]", source)
-        self.assertIn("unmatched-input-or-output", source)
+        self.assertIn("productionPoint.productionsIdToObj[production.id] = nil", source)
+        self.assertIn("table.remove(productionPoint.productions, index)", source)
+        self.assertIn("production.index = index", source)
+        self.assertIn("addChange(amountKey .. \"#amount\", effective)", source)
+        self.assertIn("unmatched-native-recipe-or-fill-type", source)
 
     def test_runtime_is_standalone_narrow_and_server_purchase_oriented(self):
         source = (MOD / "scripts/SiNProductionPolicy.lua").read_text(encoding="utf-8")

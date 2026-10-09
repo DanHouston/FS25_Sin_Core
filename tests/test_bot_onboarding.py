@@ -1,6 +1,7 @@
 import json
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 import unittest
 from types import SimpleNamespace
@@ -488,6 +489,32 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Owned structures (sell-back): $400", message)
         self.assertIn("Total listed value before loans: $1,500", message)
         self.assertIn("1 item(s) valued at 50% of paid price", message)
+        self.assertTrue(interaction.followup.send.await_args.kwargs["ephemeral"])
+
+    async def test_farm_report_is_ephemeral_and_uses_verified_caller_context(self):
+        command = self.bot.tree.get_command("farm_report")
+        interaction = MagicMock()
+        interaction.user.id = 42
+        interaction.response.defer = AsyncMock()
+        interaction.followup.send = AsyncMock()
+        self.bot.resolve_identity_context = MagicMock(return_value={
+            "server_key": "server", "save_key": "save", "world_id": "world"})
+        self.bot.farm_reports.for_manager = MagicMock(return_value={
+            "farm_name": "Test Farm", "days": 7, "end": datetime.now(timezone.utc),
+            "finance": [], "operations": []})
+
+        await command.callback(interaction, 7)
+
+        self.bot.farm_reports.for_manager.assert_called_once_with(
+            "42", "server", "save", "world", 7)
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        self.assertIn("Farm report — Test Farm", interaction.followup.send.await_args.args[0])
+        self.assertTrue(interaction.followup.send.await_args.kwargs["ephemeral"])
+
+        self.bot.farm_reports.for_manager.side_effect = ValueError("not a verified manager")
+        interaction.followup.send.reset_mock()
+        await command.callback(interaction, 7)
+        self.assertIn("not a verified manager", interaction.followup.send.await_args.args[0])
         self.assertTrue(interaction.followup.send.await_args.kwargs["ephemeral"])
 
     async def test_pay_uses_linked_player_wallets_and_reports_final_balance(self):

@@ -28,6 +28,8 @@ from .business_workflows import (ChatService, ContractService, InvoiceService,
                                   CommunityEventService, TransferService)
 from .farm_lifecycle import FarmLifecycle, SYSTEM_FARM_NAME, FIRST_FIELD_MAX_PRICE
 from .vehicle_inventory import VehicleInventoryService
+from .farm_report import FarmReportService, format_farm_report
+from .market_finance import DailyMarketFinancePublisher
 from .map_service import MapService, MapStore, MapUnavailable, MapValidationError
 from .mod_suggestions import (ModSuggestionModal, build_suggestion_post,
                               ensure_review_tag, prepare_suggestion, update_vote_title)
@@ -433,12 +435,14 @@ class NetworkBot(discord.Client):
         self.server_registry = ServerRegistry(bank.database)
         self.farm_lifecycle = FarmLifecycle(bank.database, self.authorization)
         self.vehicle_inventory = VehicleInventoryService(bank.database)
+        self.farm_reports = FarmReportService(bank.database)
         self.activity_publisher = ActivityPublisher(self, bank.database)
         self.bank_notification_publisher = BankNotificationPublisher(self, bank)
         # This is a durable one-card-per-server projection, not an activity
         # feed.  Its message IDs are stored in Mongo so gateway reconnects and
         # process restarts edit the same cards.
         self.server_status_publisher = ServerStatusPublisher(self, bank.database)
+        self.market_finance_publisher = DailyMarketFinancePublisher(self, bank.database)
         self.health_reporter = BotHealthReporter(self, os.environ.get("FS25_JIN_HEALTH_FILE"))
         self.telemetry = ActivityTelemetryProcessor(bank.database)
         self.chat = ChatService(bank.database)
@@ -1146,6 +1150,36 @@ class NetworkBot(discord.Client):
                          "Loans, crops, inventory, and pending bank transfers are not included.")
             await interaction.followup.send("\n".join(lines), ephemeral=True,
                                             allowed_mentions=discord.AllowedMentions.none())
+
+        @self.tree.command(name="farm_report", description="View your verified farm's finance and activity history")
+        @app_commands.check(channel_check)
+        async def farm_report(interaction: discord.Interaction,
+                              days: app_commands.Range[int, 1, 30] = 7,
+                              server: str | None = None):
+            await interaction.response.defer(ephemeral=True)
+            try:
+                context = await asyncio.to_thread(
+                    self.resolve_identity_context, str(interaction.user.id), server, "reconcile")
+                report = await asyncio.to_thread(
+                    self.farm_reports.for_manager, str(interaction.user.id),
+                    context["server_key"], context["save_key"], context["world_id"], days)
+            except ValueError as error:
+                await interaction.followup.send(str(error), ephemeral=True)
+                return
+            except PyMongoError:
+                logging.exception("Farm report temporarily unavailable")
+                await interaction.followup.send(
+                    "Farm report is temporarily unavailable; please try again later.", ephemeral=True)
+                return
+            report = {**report, "farm_name": discord.utils.escape_markdown(
+                str(report.get("farm_name") or "verified farm"))}
+            await interaction.followup.send(
+                format_farm_report(report), ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none())
+
+        @farm_report.autocomplete("server")
+        async def farm_report_server_autocomplete(interaction: discord.Interaction, current: str):
+            return await server_choices(interaction, current)
 
         @self.tree.command(name="vehicles", description="List your verified farm's live FS25 vehicles")
         @app_commands.check(channel_check)
@@ -2131,6 +2165,7 @@ class NetworkBot(discord.Client):
         self.activity_publisher.start()
         self.bank_notification_publisher.start()
         self.server_status_publisher.start()
+        self.market_finance_publisher.start()
         self.health_reporter.start()
         guild = self.get_guild(self.guild.id)
         if guild is not None and self.channels.get("mod_suggestions"):
@@ -2143,6 +2178,7 @@ class NetworkBot(discord.Client):
         self.activity_publisher.start()
         self.bank_notification_publisher.start()
         self.server_status_publisher.start()
+        self.market_finance_publisher.start()
         self.health_reporter.start()
         await self._sync_command_registry("gateway_resumed")
 
@@ -2151,6 +2187,7 @@ class NetworkBot(discord.Client):
         await self.activity_publisher.stop()
         await self.bank_notification_publisher.stop()
         await self.server_status_publisher.stop()
+        await self.market_finance_publisher.stop()
         await super().close()
 
 
@@ -2178,6 +2215,7 @@ def main():
     for env_name, channel_name in (("DISCORD_JOBS_CHANNEL_ID", "jobs"),
                                    ("DISCORD_EVENTS_CHANNEL_ID", "events"),
                                    ("DISCORD_MOD_SUGGESTIONS_CHANNEL_ID", "mod_suggestions"),
+                                   ("DISCORD_MARKET_CHANNEL_ID", "market"),
                                    ("DISCORD_SERVER_STATUS_CHANNEL_ID", "server_status")):
         configured = os.environ.get(env_name)
         if configured:

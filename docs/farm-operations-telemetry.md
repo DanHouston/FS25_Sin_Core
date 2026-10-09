@@ -33,6 +33,11 @@ all loose ground crops, identify the human driver, or reconstruct every recipe
 cycle. Native finance-sheet history before deployment is also not backfilled.
 Those are follow-on capture/reporting tasks, not inferred from a sale alone.
 
+The first private `/farm_report` summarizes this captured history together
+with native finance changes for a verified farm manager. It reports observed
+NPC-sale liters, storage movements, completed AI-job hours, and sampled vehicle
+time/distance. Storage movements are not labelled as harvested or sold crop.
+
 Dedicated-server validation: sell a known quantity, load and unload an owned
 silo, run and stop an AI worker, then operate a vehicle for a minute. Compare
 the native sale, stock, AI duration, and operating hours with Central rows;

@@ -25,40 +25,48 @@
         <recipe id="maize_seeds_rush" enabled="false"/>
     </production>
 
-    <!-- Direct crop converters -->
-    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/cerealFactory/cerealFactory.xml" purchasePrice="995000"/>
-    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/grainMill/grainMill.xml" purchasePrice="745000"/>
-    <production id="FS25_BaseGame:data/placeables/mapUS/grainFlourMillUS/grainFlourMillUS.xml" purchasePrice="745000"/>
-    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsSmall/grainFlourMill/grainFlourMill.xml" purchasePrice="75000"/>
-    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/grapeProcessingUnit/grapeProcessingUnit.xml" purchasePrice="525000"/>
-    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsSmall/grapeProcessingPlant/grapeProcessingPlant.xml" purchasePrice="55000"/>
-    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/oilMill/oilMill.xml" purchasePrice="515000"/>
-    <production id="FS25_BaseGame:data/placeables/mapUS/oilPlantUS/oilPlantUS.xml" purchasePrice="515000"/>
-    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsSmall/oilPlant/oilPlant.xml" purchasePrice="50000"/>
-    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/spinnery/spinnery.xml" purchasePrice="1735000"/>
-    <production id="FS25_BaseGame:data/placeables/mapEU/spinnery/spinneryPlaceable.xml" purchasePrice="1735000"/>
-    <production id="FS25_BaseGame:data/placeables/mapUS/spinneryUS/spinneryUS.xml" purchasePrice="1735000"/>
-    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsSmall/spinnery/spinnery.xml" purchasePrice="175000"/>
-    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/sugarMill/sugarMill.xml" purchasePrice="530000"/>
-    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsSmall/sugarMill/sugarMill.xml" purchasePrice="55000"/>
-    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsSmall/cannedPackagedFactory/cannedPackagedFactory.xml" purchasePrice="175000"/>
-    <production id="FS25_BaseGame:data/placeables/mapEU/preservedFoodFactory/preservedFoodFactoryPlaceable.xml" purchasePrice="1770000"/>
-    <production id="FS25_BaseGame:data/placeables/mapUS/cannedPackagedFactoryUS/cannedPackagedFactoryUS.xml" purchasePrice="1770000"/>
-    <production id="FS25_BaseGame:data/placeables/mapEU/potatoProcessingPlant/potatoProcessingPlantPlaceable.xml" purchasePrice="650000"/>
-    <production id="FS25_BaseGame:data/placeables/mapEU/soupFactory/soupFactoryPlaceable.xml" purchasePrice="805000"/>
-    <production id="FS25_BaseGame:data/placeables/mapUS/ropemakerUS/ropeMakerUS.xml" purchasePrice="2325000"/>
+    <!-- Direct crop converters: ten times native cycles, preserving each recipe's input/output ratio. -->
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/cerealFactory/cerealFactory.xml" purchasePrice="995000" cyclesScale="10"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/grainMill/grainMill.xml" purchasePrice="745000" cyclesScale="10"/>
+    <production id="FS25_BaseGame:data/placeables/mapUS/grainFlourMillUS/grainFlourMillUS.xml" purchasePrice="745000" cyclesScale="10"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsSmall/grainFlourMill/grainFlourMill.xml" purchasePrice="75000" cyclesScale="10"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/grapeProcessingUnit/grapeProcessingUnit.xml" purchasePrice="525000" cyclesScale="10"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsSmall/grapeProcessingPlant/grapeProcessingPlant.xml" purchasePrice="55000" cyclesScale="10"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/oilMill/oilMill.xml" purchasePrice="515000" cyclesScale="10"/>
+    <production id="FS25_BaseGame:data/placeables/mapUS/oilPlantUS/oilPlantUS.xml" purchasePrice="515000" cyclesScale="10"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsSmall/oilPlant/oilPlant.xml" purchasePrice="50000" cyclesScale="10"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/spinnery/spinnery.xml" purchasePrice="1735000">
+        <recipe id="fabric_cotton" cyclesScale="10"/>
+    </production>
+    <production id="FS25_BaseGame:data/placeables/mapEU/spinnery/spinneryPlaceable.xml" purchasePrice="1735000">
+        <recipe id="fabric_cotton" cyclesScale="10"/>
+    </production>
+    <production id="FS25_BaseGame:data/placeables/mapUS/spinneryUS/spinneryUS.xml" purchasePrice="1735000">
+        <recipe id="fabric_cotton" cyclesScale="10"/>
+    </production>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsSmall/spinnery/spinnery.xml" purchasePrice="175000">
+        <recipe id="fabric_cotton" cyclesScale="10"/>
+    </production>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/sugarMill/sugarMill.xml" purchasePrice="530000" cyclesScale="10"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsSmall/sugarMill/sugarMill.xml" purchasePrice="55000" cyclesScale="10"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsSmall/cannedPackagedFactory/cannedPackagedFactory.xml" purchasePrice="175000" cyclesScale="10"/>
+    <production id="FS25_BaseGame:data/placeables/mapEU/preservedFoodFactory/preservedFoodFactoryPlaceable.xml" purchasePrice="1770000" cyclesScale="10"/>
+    <production id="FS25_BaseGame:data/placeables/mapUS/cannedPackagedFactoryUS/cannedPackagedFactoryUS.xml" purchasePrice="1770000" cyclesScale="10"/>
+    <production id="FS25_BaseGame:data/placeables/mapEU/potatoProcessingPlant/potatoProcessingPlantPlaceable.xml" purchasePrice="650000" cyclesScale="10"/>
+    <production id="FS25_BaseGame:data/placeables/mapEU/soupFactory/soupFactoryPlaceable.xml" purchasePrice="805000" cyclesScale="10"/>
+    <production id="FS25_BaseGame:data/placeables/mapUS/ropemakerUS/ropeMakerUS.xml" purchasePrice="2325000" cyclesScale="10"/>
 
     <!-- Downstream food and animal production -->
-    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/bakery/bakery.xml" purchasePrice="535000"/>
-    <production id="FS25_BaseGame:data/placeables/mapEU/bakery/bakery.xml" purchasePrice="535000"/>
-    <production id="FS25_BaseGame:data/placeables/mapUS/bakeryUS/bakeryUS.xml" purchasePrice="535000"/>
-    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsSmall/bakery/bakery.xml" purchasePrice="55000"/>
-    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/dairy/dairy.xml" purchasePrice="610000"/>
-    <production id="FS25_BaseGame:data/placeables/mapEU/dairy/dairyPlaceable.xml" purchasePrice="610000"/>
-    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsSmall/dairy/dairy.xml" purchasePrice="60000"/>
-    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/tailorShop/tailorShop.xml" purchasePrice="2455000"/>
-    <production id="FS25_BaseGame:data/placeables/mapUS/tailorUS/tailorUS.xml" purchasePrice="2455000"/>
-    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsSmall/tailorShop/tailorShop.xml" purchasePrice="245000"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/bakery/bakery.xml" purchasePrice="535000" cyclesScale="10"/>
+    <production id="FS25_BaseGame:data/placeables/mapEU/bakery/bakery.xml" purchasePrice="535000" cyclesScale="10"/>
+    <production id="FS25_BaseGame:data/placeables/mapUS/bakeryUS/bakeryUS.xml" purchasePrice="535000" cyclesScale="10"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsSmall/bakery/bakery.xml" purchasePrice="55000" cyclesScale="10"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/dairy/dairy.xml" purchasePrice="610000" cyclesScale="10"/>
+    <production id="FS25_BaseGame:data/placeables/mapEU/dairy/dairyPlaceable.xml" purchasePrice="610000" cyclesScale="10"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsSmall/dairy/dairy.xml" purchasePrice="60000" cyclesScale="10"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/tailorShop/tailorShop.xml" purchasePrice="2455000" cyclesScale="10"/>
+    <production id="FS25_BaseGame:data/placeables/mapUS/tailorUS/tailorUS.xml" purchasePrice="2455000" cyclesScale="10"/>
+    <production id="FS25_BaseGame:data/placeables/brandless/productionPointsSmall/tailorShop/tailorShop.xml" purchasePrice="245000" cyclesScale="10"/>
 
     <!-- American Silos Production Pack: 4x silage throughput; other recipes retain tier rates. -->
     <production id="FS25_AmericanSilosProductionPack:silos/staveSiloSmall.xml" purchasePrice="302500">

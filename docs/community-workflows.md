@@ -132,6 +132,21 @@ may legitimately differ because the farm earned or spent more money, so a
 snapshot received more than 45 seconds after settlement is treated as newer
 game state rather than forced to equal the old receipt.
 
+`/farm_report [days] [server]` is an ephemeral, caller-only report for a verified farm
+manager. It uses the currently active server/save/world and the latest game
+snapshot to confirm the farm before querying immutable finance and operations
+history. The default window is 7 real-world days; 1-30 are allowed. It shows
+native finance categories, crop/product sales in liters, storage movement,
+AI-job hours, and sampled vehicle operating time/distance. It does not backfill
+history or claim storage movement is harvest yield. Current bank checking is
+not a farm-owned asset and is deliberately omitted.
+
+The configured `#market` channel receives one dated daily server-finance card
+after 00:10 Eastern time. It combines all verified active server worlds for
+the preceding real-world day and updates the same card if late observations
+arrive. The revenue/expense headings mean native positive/negative cash flow;
+they are not a profit calculation or an assertion that every inflow was a sale.
+
 `/equity` is an ephemeral, caller-only snapshot. It combines the caller's SiN
 checking balance with the active, verified farm's native cash balance; the
 farm's assets are shared by its members, not personally owned by the caller.
@@ -224,7 +239,7 @@ REQUIRED` until a verified GIANTS runtime API and replication path is proven.
 
 ## Current Discord command surface
 
-- Money: `/balance`, `/equity`, `/deposit`, `/withdraw`, `/pay`; staff-only
+- Money and farm activity: `/balance`, `/equity`, `/farm_report`, `/deposit`, `/withdraw`, `/pay`; staff-only
   `/admin_pay` in `#staff` (withdrawal availability is server-configured).
 - Contracts: `/contract_create`, `/contract_list`, `/contract_view`,
   `/contract_accept`, `/contract_complete`. Cancellation is performed from the
