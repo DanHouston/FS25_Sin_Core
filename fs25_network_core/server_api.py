@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import threading
+import time
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -472,6 +473,7 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
         IDs and are independently idempotent, making a retry after a partial
         database failure safe.
         """
+        started = time.monotonic()
         try:
             length = int(self.headers.get("Content-Length", "-1"))
             if length < 0 or length > 1_000_000:
@@ -536,6 +538,9 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
                 LOG.exception("central API event processing failure")
                 results.append({"index": index, "event_id": event_id,
                                 "http_status": 500, "error": "internal_error"})
+        accepted = sum(1 for result in results if result.get("http_status") == 200)
+        LOG.info("operation batch processed server=%s envelopes=%s accepted=%s duration_ms=%s",
+                 server_key, len(events), accepted, int((time.monotonic() - started) * 1000))
         _json_response(self, 200, {"results": results})
 
 

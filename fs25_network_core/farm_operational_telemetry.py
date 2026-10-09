@@ -7,7 +7,8 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 from bson.decimal128 import Decimal128
-from pymongo.errors import DuplicateKeyError
+from pymongo import UpdateOne
+from pymongo.errors import BulkWriteError
 
 
 class FarmOperationalValidationError(ValueError):
@@ -145,13 +146,14 @@ class FarmOperationalTelemetry:
         # recovery from a partial database failure idempotent.
         values = [validate_farm_operation(row) for row in changes]
         inserted = []
+        storage_movements = []
         for event_id, data in zip(ids, values):
             scope = "|".join((str(server_key), str(save_key), str(world_id), event_id))
             if (data["kind"] in {"storage_in", "storage_out"}
                     and self._has_game_hour(data)
                     and self._storage_source_marker(event_id, data) is not None):
-                inserted.append(self._ingest_storage_hour(server_key, save_key, world_id,
-                                                          event_id, data))
+                storage_movements.append(self._ingest_storage_hour(
+                    server_key, save_key, world_id, event_id, data))
                 continue
             document = {
                 "_id": hashlib.sha256(scope.encode("utf-8")).hexdigest(),
@@ -162,6 +164,7 @@ class FarmOperationalTelemetry:
             self.db.farm_operational_events.update_one(
                 {"_id": document["_id"]}, {"$setOnInsert": document}, upsert=True)
             inserted.append(document)
+        inserted.extend(self._ingest_storage_hours(storage_movements))
         return inserted
 
     @staticmethod
@@ -208,13 +211,6 @@ class FarmOperationalTelemetry:
         source_field, source_mask = self._storage_source_marker(event_id, data)
         runtime_key = source_field.split(".")[1]
         received_at = datetime.now(timezone.utc)
-        collection = self.db.farm_storage_hourly
-        # During deployment, retries may refer to source-specific hourly rows
-        # created by the previous key format. Recognize their dedupe bit so a
-        # replay is not counted again in the new consolidated bucket.
-        if collection.find_one({"_id": legacy_bucket_id,
-                                source_field: {"$bitsAllSet": source_mask}}, {"_id": 1}) is not None:
-            return {"_id": legacy_bucket_id, "bucket": "game_hour", "duplicate": True, **data}
         update = {
             "$setOnInsert": {"server_key": str(server_key), "save_key": str(save_key),
                              "world_id": str(world_id), "farm_id": data["farm_id"],
@@ -234,22 +230,73 @@ class FarmOperationalTelemetry:
             "$addToSet": {"source_keys": source_key, "runtime_keys": runtime_key,
                           "runtime_nodes": data["runtime_node"] or "unknown"},
         }
-        # One Mongo document is the transaction boundary: source ID insertion
-        # and numeric increment are atomic, even if Central crashes before its
-        # batch marker is written. An upsert race is resolved by checking the
-        # already-accounted-for source ID, not by applying a second increment.
-        for _ in range(4):
-            try:
-                collection.update_one(
-                    {"_id": bucket_id, "$or": [
-                        {source_field: {"$exists": False}},
-                        {source_field: {"$bitsAllClear": source_mask}},
-                    ]},
-                    update, upsert=True)
-                return {"_id": bucket_id, "bucket": "game_hour", **data}
-            except DuplicateKeyError:
-                if collection.find_one({"_id": bucket_id,
-                                        source_field: {"$bitsAllSet": source_mask}},
-                                       {"_id": 1}) is not None:
-                    return {"_id": bucket_id, "bucket": "game_hour", **data}
-        raise RuntimeError("storage bucket contention; retry the batch")
+        return {"_id": bucket_id, "legacy_bucket_id": legacy_bucket_id,
+                "source_field": source_field, "source_mask": source_mask,
+                "update": update, "data": data}
+
+    @staticmethod
+    def _marker_is_set(document, field, mask):
+        value = document
+        for part in field.split("."):
+            value = value.get(part) if isinstance(value, dict) else None
+        try:
+            return value is not None and int(value) & int(mask) == int(mask)
+        except (TypeError, ValueError):
+            return False
+
+    def _ingest_storage_hours(self, movements):
+        """Apply hourly movements with batched reads/writes and per-row atomicity."""
+        if not movements:
+            return []
+        collection = self.db.farm_storage_hourly
+        legacy_ids = list({movement["legacy_bucket_id"] for movement in movements})
+        marker_projection = {"_id": 1}
+        marker_projection.update({movement["source_field"]: 1 for movement in movements})
+        legacy_documents = {
+            document["_id"]: document
+            for document in collection.find({"_id": {"$in": legacy_ids}}, marker_projection)
+        }
+        operations = []
+        results = []
+        for movement in movements:
+            if self._marker_is_set(legacy_documents.get(movement["legacy_bucket_id"]),
+                                   movement["source_field"], movement["source_mask"]):
+                results.append({"_id": movement["legacy_bucket_id"], "bucket": "game_hour",
+                                "duplicate": True, **movement["data"]})
+                continue
+            query = {"_id": movement["_id"], "$or": [
+                {movement["source_field"]: {"$exists": False}},
+                {movement["source_field"]: {"$bitsAllClear": movement["source_mask"]}},
+            ]}
+            operations.append(UpdateOne(query, movement["update"], upsert=True))
+            results.append({"_id": movement["_id"], "bucket": "game_hour", **movement["data"]})
+        if not operations:
+            return results
+        try:
+            # Each update atomically writes its dedupe bit and aggregate delta.
+            # A partial bulk failure is safe to replay; the source bit prevents
+            # every successfully applied row from being counted twice.
+            collection.bulk_write(operations, ordered=False)
+            return results
+        except BulkWriteError as error:
+            details = error.details or {}
+            write_errors = details.get("writeErrors", [])
+            if not write_errors or any(item.get("code") != 11000 for item in write_errors):
+                raise
+            # An unordered upsert can report duplicate _id when a concurrent
+            # replay already set that source bit. Verify all rows with one read
+            # before acknowledging the envelope.
+            current_ids = list({movement["_id"] for movement in movements})
+            current_documents = {
+                document["_id"]: document
+                for document in collection.find({"_id": {"$in": current_ids}}, marker_projection)
+            }
+            for movement in movements:
+                current = current_documents.get(movement["_id"])
+                legacy = legacy_documents.get(movement["legacy_bucket_id"])
+                if not (self._marker_is_set(current, movement["source_field"],
+                                            movement["source_mask"])
+                        or self._marker_is_set(legacy, movement["source_field"],
+                                               movement["source_mask"])):
+                    raise RuntimeError("storage bucket contention; retry the batch") from error
+            return results

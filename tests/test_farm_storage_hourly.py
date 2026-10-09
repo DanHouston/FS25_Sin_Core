@@ -7,7 +7,7 @@ from decimal import Decimal
 from unittest.mock import MagicMock
 
 from bson.decimal128 import Decimal128
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import BulkWriteError, DuplicateKeyError
 
 from fs25_network_core.farm_operational_telemetry import FarmOperationalTelemetry
 
@@ -48,6 +48,8 @@ class AtomicHourlyCollection:
 
     def __init__(self):
         self.documents = {}
+        self.bulk_calls = 0
+        self.find_calls = 0
 
     def update_one(self, query, update, *, upsert):
         bucket_id = query["_id"]
@@ -97,6 +99,25 @@ class AtomicHourlyCollection:
         if value is not None and int(value) & int(condition["$bitsAllSet"]):
             return {"_id": current["_id"]}
         return None
+
+    def find(self, query, projection=None):
+        self.find_calls += 1
+        ids = set(query["_id"]["$in"])
+        return [document for key, document in self.documents.items() if key in ids]
+
+    def bulk_write(self, operations, *, ordered):
+        self.bulk_calls += 1
+        self.last_bulk_size = len(operations)
+        self.last_ordered = ordered
+        errors = []
+        for index, operation in enumerate(operations):
+            try:
+                self.update_one(operation._filter, operation._doc, upsert=operation._upsert)
+            except DuplicateKeyError:
+                errors.append({"index": index, "code": 11000, "errmsg": "source already applied"})
+        if errors:
+            raise BulkWriteError({"writeErrors": errors, "nInserted": 0, "nMatched": 0,
+                                  "nModified": 0, "nUpserted": 0, "upserted": []})
 
 
 class HourlyStorageAggregationTests(unittest.TestCase):
@@ -173,6 +194,23 @@ class HourlyStorageAggregationTests(unittest.TestCase):
         self.assertEqual(bucket["event_count"], 256)
         self.assertEqual(bucket["delivery_count"], 128)
         self.assertEqual(bucket["liters"].to_decimal(), Decimal("16.000"))
+
+    def test_storage_batch_uses_one_prefetch_and_one_bulk_write(self):
+        rows = [event(i, hour=i % 3, liters="0.125") for i in range(1, 129)]
+        self.ingest(rows)
+        collection = self.database.db.farm_storage_hourly
+        self.assertEqual(collection.find_calls, 1)
+        self.assertEqual(collection.bulk_calls, 1)
+        self.assertEqual(collection.last_bulk_size, 128)
+        self.assertFalse(collection.last_ordered)
+
+    def test_replay_after_bulk_duplicate_confirms_source_bits_without_double_count(self):
+        rows = [event(i, liters="0.125") for i in range(1, 4)]
+        self.ingest(rows)
+        self.ingest(rows)
+        bucket = next(iter(self.database.db.farm_storage_hourly.documents.values()))
+        self.assertEqual(bucket["delivery_count"], 3)
+        self.assertEqual(bucket["liters"].to_decimal(), Decimal("0.375"))
 
     def test_new_runtime_can_add_to_existing_hour_bucket(self):
         self.ingest([event(1, liters="2.5")])
