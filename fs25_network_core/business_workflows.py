@@ -484,6 +484,53 @@ class TransferService:
         self.db, self.authorization = database.db, authorization
         self.worlds = WorldGenerationRegistry(database)
 
+    def create_vehicle_by_code(self, requester_id, destination_farm_id, vehicle_code,
+                               destination_server=None, admin_override=False, reason=None):
+        """Create a same-world vehicle transfer, deriving source scope from its SiN code."""
+        code_text = str(vehicle_code or "").strip().upper()
+        if not re.fullmatch(r"[A-Z0-9]{5,12}", code_text):
+            raise ValueError("Enter the vehicle's 5-12 character SiN code from /vehicles")
+        code = self.db.vehicle_codes.find_one({"code": code_text})
+        if not isinstance(code, dict):
+            raise ValueError("Vehicle code was not found; refresh /vehicles and try again")
+        server_key, save_key, world_id = (code.get("server_key"), code.get("save_key"), code.get("world_id"))
+        if any(not isinstance(value, str) or not value for value in (server_key, save_key, world_id)):
+            raise ValueError("Vehicle code does not have a complete active game identity")
+        if destination_server is not None and str(destination_server) != server_key:
+            raise ValueError("Cross-server vehicle transfers are not available yet; choose the vehicle's current server")
+        if self.worlds.require_active(server_key, save_key, world_id) != world_id:
+            raise ValueError("Vehicle code is not in the active FS25 world")
+
+        snapshot = self.db.server_snapshots.find_one({
+            "server_key": server_key, "save_key": save_key, "world_id": world_id,
+            "source": "game"}, sort=[("received_at", -1)])
+        if not isinstance(snapshot, dict):
+            raise ValueError("A current authoritative vehicle snapshot is required")
+        received = snapshot.get("received_at")
+        if not isinstance(received, datetime):
+            raise ValueError("Authoritative vehicle snapshot timestamp is unavailable")
+        if received.tzinfo is None:
+            received = received.replace(tzinfo=timezone.utc)
+        age = (_now() - received).total_seconds()
+        from .vehicle_inventory import MAX_SNAPSHOT_AGE_SECONDS, validate_vehicle_inventory
+        if age < -30 or age > MAX_SNAPSHOT_AGE_SECONDS:
+            raise ValueError("Authoritative vehicle snapshot is stale; retry after the next server update")
+        vehicles = validate_vehicle_inventory(snapshot)
+        if vehicles is None:
+            raise ValueError("Authoritative vehicle inventory is unavailable")
+        native_id = code.get("native_unique_id")
+        matches = [vehicle for vehicle in vehicles if vehicle.get("unique_id") == native_id]
+        if len(matches) != 1:
+            raise ValueError("Vehicle is no longer in the live server inventory")
+        destination_farm_id = int(destination_farm_id)
+        farms = snapshot.get("farms") or {}
+        if (str(destination_farm_id) not in farms
+                and destination_farm_id not in farms):
+            raise ValueError("Destination farm is not present on the vehicle's current server")
+        return self.create("vehicle", str(requester_id), server_key, save_key,
+                           matches[0]["farm_id"], destination_farm_id, code_text,
+                           world_id=world_id, admin_override=admin_override, reason=reason)
+
     def create(self, kind, requester_id, server_key, save_key, source_farm_id, destination_farm_id,
                item, quantity=None, source_location=None, world_id=None, admin_override=False, reason=None):
         active = self.worlds.active_id(server_key, save_key)

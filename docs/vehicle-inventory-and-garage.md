@@ -28,18 +28,28 @@ destination farm with its own verified manager authority.
 
 ## Live farm-to-farm transfers
 
-`/transfer_request` is initiated by a confirmed manager of the source farm and
-queues the operation immediately; the destination farm does not approve it.
-The request uses the durable vehicle code, not the native ID. Dispatch is
-allowed only when the latest game snapshot is complete and no older than two
-minutes. A staff-only `/transfer_dispatch` remains available for retry after a
-stale snapshot or temporary dispatch problem.
+`/transfer_vehicle destination_server destination_farm vehicle_code` is
+initiated by a confirmed manager of the source farm and queues the operation
+immediately; the destination farm does not approve it. The vehicle code
+identifies its source server, save, world, and native vehicle, so the member
+does not have to repeat the source farm ID. `destination_server` is included
+for the multi-server workflow, but today it must be the same server identified
+by the vehicle code. Selecting another server is rejected: cross-server
+movement is not implemented. The destination farm is selected on that same
+active FS25 world. Dispatch is allowed only when the latest game snapshot is
+complete and no older than two minutes. A staff-only `/transfer_dispatch`
+remains available for retry after a stale snapshot or temporary dispatch
+problem.
 
-Staff can use `/admin_vehicle_transfer` for a directly authorized correction
-or relocation when the source-farm manager cannot initiate it. It requires a
-reason, records the staff actor and reason on the transfer, and still applies
-the same fresh-snapshot, live ownership, safety, and native readback checks.
-Staff authority does not permit guessing an asset or bypassing FS25 validation.
+Staff can use
+`/admin_transfer_vehicle destination_server destination_farm vehicle_code reason`
+for a directly authorized correction or relocation when the source-farm
+manager cannot initiate it. The destination fields match the member command;
+the staff command adds a required audit reason. The source server and farm are
+derived from the vehicle code and live inventory. The destination server must
+currently match that source server. It still applies the same fresh-snapshot,
+live ownership, safety, and native readback checks. Staff authority does not
+permit guessing an asset or bypassing FS25 validation.
 
 The server resolves the exact native ID again and checks current ownership,
 owned-property state, occupancy, AI control, and attachment state before

@@ -418,6 +418,16 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
             options = command.to_dict(self.bot.tree)["options"]
             self.assertEqual([option["name"] for option in options], ["amount"])
 
+    async def test_vehicle_transfer_commands_use_short_codes_and_omit_redundant_source_fields(self):
+        member = self.bot.tree.get_command("transfer_vehicle")
+        admin = self.bot.tree.get_command("admin_transfer_vehicle")
+        self.assertIsNone(self.bot.tree.get_command("transfer_request"))
+        self.assertIsNone(self.bot.tree.get_command("admin_vehicle_transfer"))
+        self.assertEqual([option["name"] for option in member.to_dict(self.bot.tree)["options"]],
+                         ["destination_server", "destination_farm", "vehicle_code"])
+        self.assertEqual([option["name"] for option in admin.to_dict(self.bot.tree)["options"]],
+                         ["destination_server", "destination_farm", "vehicle_code", "reason"])
+
     async def test_bank_context_carries_active_world_generation(self):
         database = self.bot.bank.database.db
         database.game_identities.find.return_value.limit.return_value = [{

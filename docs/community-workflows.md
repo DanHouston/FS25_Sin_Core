@@ -250,7 +250,8 @@ REQUIRED` until a verified GIANTS runtime API and replication path is proven.
   `/invoice_pay`, `/invoice_cancel`.
 - Community events: `/event_create`, `/event_list`, `/event_view`,
   `/event_join`, `/event_leave`, `/event_cancel`, `/event_complete`.
-- Transfers: manager `/transfer_request`; staff `/admin_vehicle_transfer` for
+- Transfers: manager `/transfer_vehicle destination_server destination_farm vehicle_code`;
+  staff `/admin_transfer_vehicle destination_server destination_farm vehicle_code reason` for
   audited admin-initiated moves, `/transfer_list` for review, and
   `/transfer_dispatch` for retry.
 - Diagnostics: `/activity_status` is self-service anywhere in the configured

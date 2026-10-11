@@ -1578,15 +1578,17 @@ class NetworkBot(discord.Client):
         async def event_complete_autocomplete(interaction: discord.Interaction, current: str):
             return await event_choices(interaction, current)
 
-        @self.tree.command(name="transfer_request", description="Request a farm-to-farm vehicle transfer")
+        @self.tree.command(name="transfer_vehicle", description="Transfer a farm vehicle to a farm on its current server")
         @app_commands.check(channel_check)
-        @app_commands.choices(kind=[app_commands.Choice(name="Vehicle", value="vehicle")])
-        async def transfer_request(interaction: discord.Interaction, kind: app_commands.Choice[str], server: str,
-                                   source_farm_id: app_commands.Range[int, 1], destination_farm_id: app_commands.Range[int, 1],
-                                   item: str, quantity: float = None):
-            save_key = selected_save(server_config(interaction, server, "reconcile"))
-            record = await asyncio.to_thread(self.transfers.create, kind.value, str(interaction.user.id), server,
-                                             save_key, source_farm_id, destination_farm_id, item, quantity)
+        @app_commands.describe(destination_server="Server where the vehicle should arrive (currently must be its current server)",
+                               destination_farm="FS25 destination farm ID on that server",
+                               vehicle_code="Short SiN code shown by /vehicles")
+        async def transfer_vehicle(interaction: discord.Interaction,
+                                   destination_server: str, destination_farm: app_commands.Range[int, 1],
+                                   vehicle_code: str):
+            record = await asyncio.to_thread(
+                self.transfers.create_vehicle_by_code, str(interaction.user.id), destination_farm, vehicle_code,
+                destination_server=destination_server)
             try:
                 operation_id = await asyncio.to_thread(
                     self.transfers.queue_game_operation, record["transfer_id"], str(interaction.user.id))
@@ -1594,32 +1596,33 @@ class NetworkBot(discord.Client):
                 await interaction.response.send_message(
                     f"Transfer `{record['transfer_id']}` was not sent: {error}. "
                     "No FS25 ownership change occurred; the vehicle remains with the source farm. "
-                    "A SiN admin can retry after the issue is resolved.",
-                    ephemeral=True)
+                    "A SiN admin can retry after the issue is resolved.", ephemeral=True)
             else:
                 await interaction.response.send_message(
-                    f"Transfer `{record['transfer_id']}` is queued as `{operation_id}` from farm "
-                    f"{source_farm_id} to farm {destination_farm_id}. It completes only after FS25 "
+                    f"Transfer `{record['transfer_id']}` is queued as `{operation_id}` on "
+                    f"{record['server_key']} from farm {record['source_farm_id']} "
+                    f"to farm {record['destination_farm_id']}. It completes only after FS25 "
                     "confirms the destination owner. If sent to the wrong farm, that farm can transfer "
                     "it back with a new request.", ephemeral=True)
 
-        @transfer_request.autocomplete("server")
-        async def transfer_request_server_autocomplete(interaction: discord.Interaction, current: str):
+        @transfer_vehicle.autocomplete("destination_server")
+        async def transfer_vehicle_destination_server_autocomplete(interaction: discord.Interaction, current: str):
             return await server_choices(interaction, current, "reconcile")
 
-        @self.tree.command(name="admin_vehicle_transfer", description="Staff: transfer a vehicle between farms")
+        @self.tree.command(name="admin_transfer_vehicle", description="Staff: transfer a vehicle to a farm on its current server")
         @app_commands.check(channel_check)
         @app_commands.default_permissions(administrator=True)
-        async def admin_vehicle_transfer(interaction: discord.Interaction, server: str,
-                                         source_farm_id: app_commands.Range[int, 1],
-                                         destination_farm_id: app_commands.Range[int, 1],
+        @app_commands.describe(destination_server="Server where the vehicle should arrive (currently must be its current server)",
+                               destination_farm="FS25 destination farm ID on that server",
+                               vehicle_code="Short SiN code shown by /vehicles",
+                               reason="Audit note explaining this admin-initiated transfer")
+        async def admin_transfer_vehicle(interaction: discord.Interaction,
+                                         destination_server: str, destination_farm: app_commands.Range[int, 1],
                                          vehicle_code: str, reason: str):
             staff_check(interaction)
-            save_key = selected_save(server_config(interaction, server, "reconcile"))
             record = await asyncio.to_thread(
-                self.transfers.create, "vehicle", str(interaction.user.id), server, save_key,
-                source_farm_id, destination_farm_id, vehicle_code,
-                admin_override=True, reason=reason)
+                self.transfers.create_vehicle_by_code, str(interaction.user.id), destination_farm,
+                vehicle_code, destination_server=destination_server, admin_override=True, reason=reason)
             try:
                 operation_id = await asyncio.to_thread(
                     self.transfers.queue_game_operation, record["transfer_id"], str(interaction.user.id))
@@ -1631,12 +1634,13 @@ class NetworkBot(discord.Client):
             else:
                 await interaction.response.send_message(
                     f"Admin transfer `{record['transfer_id']}` is queued as `{operation_id}`: "
-                    f"vehicle `{record['item']}` from farm {source_farm_id} to farm {destination_farm_id}. "
+                    f"vehicle `{record['item']}` on {record['server_key']} from farm "
+                    f"{record['source_farm_id']} to farm {record['destination_farm_id']}. "
                     "FS25 must confirm the destination owner before this is marked complete. "
                     f"Audit reason: {record['admin_reason']}", ephemeral=True)
 
-        @admin_vehicle_transfer.autocomplete("server")
-        async def admin_vehicle_transfer_server_autocomplete(interaction: discord.Interaction, current: str):
+        @admin_transfer_vehicle.autocomplete("destination_server")
+        async def admin_transfer_vehicle_destination_server_autocomplete(interaction: discord.Interaction, current: str):
             return await server_choices(interaction, current, "reconcile")
 
         @self.tree.command(name="transfer_list", description="Staff: list durable farm transfers")

@@ -186,6 +186,61 @@ class BusinessWorkflowTests(unittest.TestCase):
         self.assertEqual(record["admin_actor_discord_id"], "staff-actor")
         self.assertEqual(record["admin_reason"], "Player requested farm move")
 
+    def test_member_transfer_resolves_source_server_and_farm_from_vehicle_code(self):
+        authorization = MagicMock()
+        authorization.db.memberships.find_one.return_value = {"state": "active"}
+        service = TransferService(self.database, authorization)
+        service.worlds.active_id = MagicMock(return_value="world-a")
+        service.worlds.require_active = MagicMock(return_value="world-a")
+        self.db.vehicle_codes.find_one.return_value = {
+            "code": "ABCDE", "server_key": "server-a", "save_key": "save-a",
+            "world_id": "world-a", "native_unique_id": "native-1"}
+        self.db.server_snapshots.find_one.return_value = {
+            "received_at": datetime.now(timezone.utc), "vehicle_inventory_ready": True,
+            "farms": {"2": "Source", "4": "Destination"},
+            "vehicles": [{"unique_id": "native-1", "farm_id": 2, "filename": "tractor.xml"}]}
+
+        record = service.create_vehicle_by_code("manager", 4, "abcde", destination_server="server-a")
+
+        self.assertEqual((record["server_key"], record["save_key"], record["world_id"]),
+                         ("server-a", "save-a", "world-a"))
+        self.assertEqual((record["source_farm_id"], record["destination_farm_id"], record["item"]),
+                         (2, 4, "ABCDE"))
+        authorization.db.memberships.find_one.assert_called_once()
+
+    def test_vehicle_transfer_rejects_destination_server_different_from_vehicle_server(self):
+        service = TransferService(self.database, MagicMock())
+        self.db.vehicle_codes.find_one.return_value = {
+            "code": "ABCDE", "server_key": "server-a", "save_key": "save-a",
+            "world_id": "world-a", "native_unique_id": "native-1"}
+
+        with self.assertRaisesRegex(ValueError, "Cross-server vehicle transfers are not available yet"):
+            service.create_vehicle_by_code("manager", 4, "ABCDE", destination_server="server-b")
+
+        self.db.server_snapshots.find_one.assert_not_called()
+        self.db.transfers.insert_one.assert_not_called()
+
+    def test_admin_transfer_resolves_vehicle_code_and_keeps_audit_reason(self):
+        authorization = MagicMock()
+        service = TransferService(self.database, authorization)
+        service.worlds.active_id = MagicMock(return_value="world-a")
+        service.worlds.require_active = MagicMock(return_value="world-a")
+        self.db.vehicle_codes.find_one.return_value = {
+            "code": "ABCDE", "server_key": "server-a", "save_key": "save-a",
+            "world_id": "world-a", "native_unique_id": "native-1"}
+        self.db.server_snapshots.find_one.return_value = {
+            "received_at": datetime.now(timezone.utc), "vehicle_inventory_ready": True,
+            "farms": {"2": "Source", "4": "Destination"},
+            "vehicles": [{"unique_id": "native-1", "farm_id": 2, "filename": "tractor.xml"}]}
+
+        record = service.create_vehicle_by_code(
+            "staff", 4, "ABCDE", destination_server="server-a", admin_override=True,
+            reason="Requested by farm owner")
+
+        self.assertEqual(record["source_farm_id"], 2)
+        self.assertEqual(record["admin_reason"], "Requested by farm owner")
+        authorization.db.memberships.find_one.assert_not_called()
+
     def test_admin_transfer_requires_reason_and_is_vehicle_only(self):
         service = TransferService(self.database, MagicMock())
         service.worlds.active_id = MagicMock(return_value=None)
