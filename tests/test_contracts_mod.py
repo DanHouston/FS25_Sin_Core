@@ -48,6 +48,7 @@ class ContractsModTests(unittest.TestCase):
         source = (MOD / "scripts/SiNContracts.lua").read_text(encoding="utf-8")
         self.assertIn("SiN FS25 Contracts", descriptor)
         self.assertIn('filename="scripts/SiNContracts.lua"', descriptor)
+        self.assertIn('filename="events/SiNContractsAdminDiagnosticEvent.lua"', descriptor)
         self.assertIn('"getMissions"', source)
         self.assertIn("registerMission", source)
         self.assertIn("startMission", source)

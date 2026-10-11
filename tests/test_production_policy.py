@@ -73,6 +73,11 @@ class ProductionPolicyTests(unittest.TestCase):
         entries = {node.get("id"): node for node in root.findall("production")}
         expected = {
             "FS25_DieselProduktion:DieselProduction.xml": "324000",
+            "FS25_BaseGame:data/placeables/mapUS/ropemakerUS/ropeMakerUS.xml": "1165000",
+            "FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/spinnery/spinnery.xml": "865000",
+            "FS25_BaseGame:data/placeables/mapEU/spinnery/spinneryPlaceable.xml": "865000",
+            "FS25_BaseGame:data/placeables/mapUS/spinneryUS/spinneryUS.xml": "865000",
+            "FS25_BaseGame:data/placeables/brandless/productionPointsSmall/spinnery/spinnery.xml": "85000",
             "FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/cerealFactory/cerealFactory.xml": "995000",
             "FS25_BaseGame:data/placeables/mapUS/oilPlantUS/oilPlantUS.xml": "515000",
             "FS25_BaseGame:data/placeables/mapEU/preservedFoodFactory/preservedFoodFactoryPlaceable.xml": "1770000",
@@ -86,7 +91,7 @@ class ProductionPolicyTests(unittest.TestCase):
         for canonical_id, price in expected.items():
             self.assertEqual(entries[canonical_id].get("purchasePrice"), price)
 
-    def test_gross_payback_factories_have_the_planned_tenfold_rate(self):
+    def test_gross_payback_factories_have_their_planned_cycle_scale(self):
         root = ElementTree.parse(MOD / "config/production-policy.xml").getroot()
         entries = [entry for entry in root.findall("production")
                    if entry.get("id", "").startswith("FS25_BaseGame:")]
@@ -97,7 +102,11 @@ class ProductionPolicyTests(unittest.TestCase):
                     self.assertIsNone(entry.get("cyclesScale"))
                     recipes = entry.findall("recipe")
                     self.assertEqual([(recipe.get("id"), recipe.get("cyclesScale")) for recipe in recipes],
-                                     [("fabric_cotton", "10")])
+                                     [("fabric_cotton", "5")])
+                elif "/ropemakerUS/" in entry.get("id", ""):
+                    self.assertEqual(entry.get("cyclesScale"), "5")
+                    self.assertEqual(entry.get("purchasePrice"), "1165000")
+                    self.assertEqual(entry.findall("recipe"), [])
                 else:
                     self.assertEqual(entry.get("cyclesScale"), "10")
                     self.assertEqual(entry.findall("recipe"), [])

@@ -203,11 +203,13 @@ friendly autocomplete labels while durable IDs remain internal.
 
 ## Transfers
 
-`transfers` records vehicle/product requests. Source-farm manager authority is
-required before a request is created; destination acceptance and a durable
-operation receipt are required before completion. The current mod has no
-unverified vehicle or storage mutation call: unsupported operations are not
-reported as applied and remain a reconciliation concern.
+`transfers` records vehicle transfer requests. A confirmed source-farm manager
+initiates the transfer and it is queued immediately; the destination farm does
+not approve it. The server rechecks the exact vehicle and both farms before
+changing ownership. A failure leaves the vehicle with the source farm. If the
+owner selected the wrong destination and the mutation completed, the new owner
+must initiate a separate transfer back. Completion requires a durable,
+authoritative owner readback. Garage storage/retrieval is not enabled.
 
 ## Durable operation rules
 
@@ -248,8 +250,9 @@ REQUIRED` until a verified GIANTS runtime API and replication path is proven.
   `/invoice_pay`, `/invoice_cancel`.
 - Community events: `/event_create`, `/event_list`, `/event_view`,
   `/event_join`, `/event_leave`, `/event_cancel`, `/event_complete`.
-- Transfers: staff-only `/transfer_request`, `/transfer_list`,
-  `/transfer_accept`, `/transfer_dispatch`.
+- Transfers: manager `/transfer_request`; staff `/admin_vehicle_transfer` for
+  audited admin-initiated moves, `/transfer_list` for review, and
+  `/transfer_dispatch` for retry.
 - Diagnostics: `/activity_status` is self-service anywhere in the configured
   guild; the optional `member` lookup remains staff-only and channel-scoped.
   Server/runtime diagnostics remain available through the read-only FS25

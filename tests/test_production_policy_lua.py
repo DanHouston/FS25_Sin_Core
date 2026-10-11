@@ -110,7 +110,7 @@ class ProductionPolicyLuaTests(unittest.TestCase):
             end
         """)
         lua.execute((MOD / "scripts/SiNProductionPolicy.lua").read_text(encoding="utf-8"))
-        recipe = lua.table_from({"cyclesScale": 10, "inputs": lua.table(), "outputs": lua.table()})
+        recipe = lua.table_from({"cyclesScale": 5, "inputs": lua.table(), "outputs": lua.table()})
         canonical_id = "FS25_BaseGame:data/placeables/brandless/productionPointsGeneric/spinnery/spinnery.xml"
         lua.globals().SiNProductionPolicy.policies[canonical_id] = lua.table_from({
             "recipes": lua.table_from({"fabric_cotton": recipe})
@@ -120,7 +120,7 @@ class ProductionPolicyLuaTests(unittest.TestCase):
         self.assertTrue(lua.globals().ProductionPoint.load(
             point, None, xml_file, "placeable.productionPoint", None, None
         ))
-        self.assertEqual((point.loadedRates.fabric_wool, point.loadedRates.fabric_cotton), (60, 1000))
+        self.assertEqual((point.loadedRates.fabric_wool, point.loadedRates.fabric_cotton), (60, 500))
 
     def test_seed_rush_recipes_are_removed_from_native_indexes(self):
         lua = LuaRuntime(unpack_returned_tuples=True)

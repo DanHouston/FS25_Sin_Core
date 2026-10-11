@@ -485,7 +485,7 @@ class TransferService:
         self.worlds = WorldGenerationRegistry(database)
 
     def create(self, kind, requester_id, server_key, save_key, source_farm_id, destination_farm_id,
-               item, quantity=None, source_location=None, world_id=None):
+               item, quantity=None, source_location=None, world_id=None, admin_override=False, reason=None):
         active = self.worlds.active_id(server_key, save_key)
         if active:
             world_id = self.worlds.require_active(server_key, save_key, world_id or active)
@@ -493,12 +493,16 @@ class TransferService:
             raise ValueError("FS25 world generation is not current for this server/save")
         if kind not in {"vehicle", "product"}:
             raise ValueError("Transfer kind must be vehicle or product")
+        if admin_override and kind != "vehicle":
+            raise ValueError("Admin override is supported only for vehicle transfers")
+        if admin_override:
+            reason = _text(reason, "Admin transfer reason", 200)
         if int(source_farm_id) <= 0 or int(destination_farm_id) <= 0 or int(source_farm_id) == int(destination_farm_id):
             raise ValueError("Source and destination farms must be different positive IDs")
         item = _text(item, "Transfer item", 120)
         if kind == "product" and (type(quantity) not in (int, float) or quantity <= 0):
             raise ValueError("Product quantity must be positive")
-        if self.authorization is not None:
+        if self.authorization is not None and not admin_override:
             manager_query = {
                 "discord_id": str(requester_id), "server_id": server_key, "save_id": save_key,
                 "farm_id": int(source_farm_id), "desired_role": "farm_manager",
@@ -515,8 +519,12 @@ class TransferService:
                   "server_key": server_key, "save_key": save_key, "source_farm_id": int(source_farm_id),
                   "destination_farm_id": int(destination_farm_id), "item": item,
                    "quantity": quantity, "source_location": source_location, "status": "requested",
-                   "created_at": _now(), "accepted_at": None, "operation_id": None,
+                   "initiator_type": "admin" if admin_override else "farm_manager",
+                   "created_at": _now(), "operation_id": None,
                    "receipt": None}
+        if admin_override:
+            record["admin_actor_discord_id"] = str(requester_id)
+            record["admin_reason"] = reason
         if world_id:
             record["world_id"] = world_id
         self.db.transfers.insert_one(record)
@@ -524,30 +532,54 @@ class TransferService:
 
     def get(self, transfer_id): return self.db.transfers.find_one({"transfer_id": str(transfer_id)})
 
-    def accept(self, transfer_id, actor_id):
-        record = self.get(transfer_id)
-        if record and record.get("world_id"):
-            self.worlds.require_active(record["server_key"], record["save_key"], record["world_id"])
-        if not record or record.get("status") != "requested":
-            raise ValueError("Transfer is not awaiting acceptance")
-        if record.get("requester_discord_id") == str(actor_id):
-            raise ValueError("Requester cannot accept their own transfer")
-        result = self.db.transfers.update_one(
-            {"transfer_id": str(transfer_id), "status": "requested"},
-            {"$set": {"status": "accepted", "accepted_by": str(actor_id), "accepted_at": _now()}})
-        if result.modified_count != 1:
-            raise ValueError("Transfer changed before it could be accepted")
-        return self.get(transfer_id)
-
     def queue_game_operation(self, transfer_id, actor_id):
         record = self.get(transfer_id)
         if record and record.get("world_id"):
             self.worlds.require_active(record["server_key"], record["save_key"], record["world_id"])
-        if not record or record.get("status") not in {"accepted", "pending_game"}:
-            raise ValueError("Transfer must be accepted before game delivery")
+        if not record or record.get("status") not in {"requested", "pending_game"}:
+            raise ValueError("Transfer is not ready for game delivery")
         operation_id = record.get("operation_id") or _id("transfer", transfer_id)
         payload = {key: record.get(key) for key in ("transfer_id", "kind", "source_farm_id",
                                                      "destination_farm_id", "item", "quantity", "source_location")}
+        if record["kind"] == "vehicle":
+            # A short code is only a user-facing handle. Resolve it to the
+            # permanent native ID and verify the latest complete game
+            # inventory still proves source-farm ownership before dispatch.
+            if not record.get("world_id"):
+                raise ValueError("Vehicle transfer requires an active FS25 world identity")
+            scope = {"server_key": record["server_key"], "save_key": record["save_key"],
+                     "world_id": record["world_id"]}
+            code = self.db.vehicle_codes.find_one({"code": str(record["item"]).strip().upper()})
+            if (not isinstance(code, dict)
+                    or any(code.get(key) != value for key, value in scope.items())
+                    or not isinstance(code.get("native_unique_id"), str)
+                    or not code["native_unique_id"]):
+                raise ValueError("Vehicle code is not registered in this server/save world")
+            from .vehicle_inventory import MAX_SNAPSHOT_AGE_SECONDS, validate_vehicle_inventory
+            snapshot = self.db.server_snapshots.find_one({
+                "server_key": record["server_key"], "save_key": record["save_key"],
+                "world_id": record["world_id"], "source": "game"},
+                sort=[("received_at", -1)])
+            if not isinstance(snapshot, dict):
+                raise ValueError("A current authoritative vehicle snapshot is required")
+            received = snapshot.get("received_at")
+            if not isinstance(received, datetime):
+                raise ValueError("Authoritative vehicle snapshot timestamp is unavailable")
+            if received.tzinfo is None:
+                received = received.replace(tzinfo=timezone.utc)
+            age = (_now() - received).total_seconds()
+            if age < -30 or age > MAX_SNAPSHOT_AGE_SECONDS:
+                raise ValueError("Authoritative vehicle snapshot is stale")
+            vehicles = validate_vehicle_inventory(snapshot)
+            if vehicles is None:
+                raise ValueError("Authoritative vehicle inventory is unavailable")
+            matches = [vehicle for vehicle in vehicles
+                       if vehicle["unique_id"] == code["native_unique_id"]]
+            if len(matches) != 1 or matches[0]["farm_id"] != record["source_farm_id"]:
+                raise ValueError("Vehicle is no longer in the source farm's live inventory")
+            payload.pop("item", None)
+            payload["vehicle_code"] = code["code"]
+            payload["vehicle_unique_id"] = code["native_unique_id"]
         operation_values = {"_id": operation_id, "operation_id": operation_id,
                             "operation_type": record["kind"] + "_transfer", "server_key": record["server_key"],
                             "save_key": record["save_key"], "payload": payload, "state": "pending",
@@ -578,7 +610,31 @@ class TransferService:
         outcome = receipt.get("status")
         if outcome not in {"applied", "already_applied", "failed", "pending_validation", "definitively_not_applied"}:
             raise ValueError("Invalid transfer receipt status")
-        target_status = "completed" if outcome in {"applied", "already_applied"} else "reconciliation_required"
+        if record.get("kind") == "vehicle":
+            payload = receipt.get("result") if isinstance(receipt.get("result"), dict) else receipt
+            if (receipt.get("operation_type") != "vehicle_transfer"
+                    or str(payload.get("transfer_id") or "") != str(record["transfer_id"])
+                    or str(payload.get("vehicle_unique_id") or "") != str(
+                        (self.db.farm_operations.find_one({"_id": record.get("operation_id")},
+                                                          projection={"payload": 1}) or {})
+                        .get("payload", {}).get("vehicle_unique_id") or "")
+                    or str(payload.get("source_farm_id") or "") != str(record["source_farm_id"])
+                    or str(payload.get("destination_farm_id") or "") != str(record["destination_farm_id"])):
+                raise ValueError("Vehicle transfer receipt does not match its queued asset and farms")
+            if outcome in {"applied", "already_applied"} and (
+                    str(payload.get("owner_farm_id") or "") != str(record["destination_farm_id"])
+                    or not self._receipt_bool(payload.get("authoritative_readback"))):
+                raise ValueError("Vehicle transfer success requires destination-owner readback")
+            if outcome in {"failed", "definitively_not_applied"} and (
+                    str(payload.get("owner_farm_id") or "") != str(record["source_farm_id"])
+                    or not self._receipt_bool(payload.get("authoritative_readback"))):
+                # Never tell the sender the transfer failed and the vehicle
+                # stayed put unless the game explicitly read back source
+                # ownership. Unknown or contradictory state needs repair.
+                outcome = "pending_validation"
+        target_status = ("completed" if outcome in {"applied", "already_applied"}
+                         else "failed" if outcome in {"failed", "definitively_not_applied"}
+                         else "reconciliation_required")
         current_status = record.get("status")
         if current_status == "completed":
             if target_status != "completed":
@@ -594,10 +650,18 @@ class TransferService:
                       "completed_at": _now() if target_status == "completed" else None}})
         if result.modified_count != 1:
             raise ValueError("Transfer changed before its receipt could be committed")
-        operation_state = "succeeded" if target_status == "completed" else "reconciliation_required"
+        operation_state = ("succeeded" if target_status == "completed"
+                           else "failed" if target_status == "failed"
+                           else "reconciliation_required")
         operation_result = self.db.farm_operations.update_one(
             {"_id": record.get("operation_id"), "operation_type": record.get("kind") + "_transfer"},
             {"$set": {"state": operation_state, "receipt": receipt, "updated_at": _now()}})
         if operation_result.modified_count != 1:
             raise ValueError("Transfer operation changed before its receipt could be committed")
         return self.get(transfer_id)
+
+    @staticmethod
+    def _receipt_bool(value):
+        # Agent receipts are read from XML attributes, so native booleans
+        # arrive as the strings "true"/"false" rather than Python bools.
+        return value is True or (isinstance(value, str) and value.strip().lower() == "true")

@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 from fs25_network_core.banking_engine import BankingEngine
@@ -172,6 +173,132 @@ class BusinessWorkflowTests(unittest.TestCase):
         service.authorization.db.memberships.find_one.return_value = None
         with self.assertRaises(ValueError):
             service.create("vehicle", "actor", "server", "save", 1, 2, "tractor", 1)
+
+    def test_admin_vehicle_transfer_bypasses_manager_check_and_records_audit_reason(self):
+        authorization = MagicMock()
+        service = TransferService(self.database, authorization)
+        service.worlds.active_id = MagicMock(return_value=None)
+        record = service.create("vehicle", "staff-actor", "server", "save", 1, 2, "ABCDE",
+                                admin_override=True, reason="Player requested farm move")
+        self.db.transfers.insert_one.assert_called_once_with(record)
+        authorization.db.memberships.find_one.assert_not_called()
+        self.assertEqual(record["initiator_type"], "admin")
+        self.assertEqual(record["admin_actor_discord_id"], "staff-actor")
+        self.assertEqual(record["admin_reason"], "Player requested farm move")
+
+    def test_admin_transfer_requires_reason_and_is_vehicle_only(self):
+        service = TransferService(self.database, MagicMock())
+        service.worlds.active_id = MagicMock(return_value=None)
+        with self.assertRaisesRegex(ValueError, "reason"):
+            service.create("vehicle", "staff-actor", "server", "save", 1, 2, "ABCDE",
+                           admin_override=True, reason="  ")
+        with self.assertRaisesRegex(ValueError, "vehicle"):
+            service.create("product", "staff-actor", "server", "save", 1, 2, "WHEAT", 100,
+                           admin_override=True, reason="staff correction")
+        self.db.transfers.insert_one.assert_not_called()
+
+    def test_vehicle_transfer_dispatch_requires_fresh_authoritative_inventory(self):
+        service = TransferService(self.database)
+        service.worlds.active_id = MagicMock(return_value="world-a")
+        service.worlds.require_active = MagicMock(return_value="world-a")
+        self.db.transfers.find_one.return_value = {
+            "transfer_id": "transfer-1", "kind": "vehicle", "status": "requested",
+            "server_key": "server", "save_key": "save", "world_id": "world-a",
+            "source_farm_id": 2, "destination_farm_id": 4, "item": "ABCDE"}
+        self.db.vehicle_codes.find_one.return_value = {
+            "code": "ABCDE", "server_key": "server", "save_key": "save",
+            "world_id": "world-a", "native_unique_id": "native-1"}
+        self.db.server_snapshots.find_one.return_value = {
+            "received_at": datetime.now(timezone.utc) - timedelta(minutes=3)}
+        with self.assertRaisesRegex(ValueError, "stale"):
+            service.queue_game_operation("transfer-1", "actor")
+        self.db.farm_operations.update_one.assert_not_called()
+
+    def test_owner_initiated_transfer_queues_without_destination_acceptance(self):
+        service = TransferService(self.database)
+        service.worlds.active_id = MagicMock(return_value="world-a")
+        service.worlds.require_active = MagicMock(return_value="world-a")
+        self.db.transfers.find_one.return_value = {
+            "transfer_id": "transfer-1", "kind": "vehicle", "status": "requested",
+            "server_key": "server", "save_key": "save", "world_id": "world-a",
+            "source_farm_id": 2, "destination_farm_id": 4, "item": "ABCDE"}
+        self.db.vehicle_codes.find_one.return_value = {
+            "code": "ABCDE", "server_key": "server", "save_key": "save",
+            "world_id": "world-a", "native_unique_id": "native-1"}
+        self.db.server_snapshots.find_one.return_value = {
+            "received_at": datetime.now(timezone.utc), "vehicle_inventory_ready": True,
+            "farms": {"2": "Source", "4": "Destination"},
+            "vehicles": [{"unique_id": "native-1", "farm_id": 2,
+                          "filename": "vehicle.xml", "name": "Tractor"}]}
+        operation_id = service.queue_game_operation("transfer-1", "source-manager")
+        operation = self.db.farm_operations.update_one.call_args.args[1]["$setOnInsert"]
+        self.assertEqual(operation_id, operation["operation_id"])
+        self.assertEqual(operation["operation_type"], "vehicle_transfer")
+        self.assertEqual(operation["payload"]["vehicle_unique_id"], "native-1")
+        self.assertNotIn("item", operation["payload"])
+
+    def test_vehicle_transfer_receipt_accepts_xml_boolean_and_requires_native_readback(self):
+        service = TransferService(self.database)
+        service.worlds.active_id = MagicMock(return_value="world-a")
+        service.worlds.require_active = MagicMock(return_value="world-a")
+        pending = {"transfer_id": "transfer-1", "kind": "vehicle", "status": "pending_game",
+                   "operation_id": "operation-1", "server_key": "server", "save_key": "save",
+                   "world_id": "world-a", "source_farm_id": 2, "destination_farm_id": 4}
+        completed = dict(pending, status="completed")
+        self.db.transfers.find_one.side_effect = [pending, completed]
+        self.db.farm_operations.find_one.return_value = {
+            "payload": {"vehicle_unique_id": "native-1"}}
+        self.db.transfers.update_one.return_value.modified_count = 1
+        self.db.farm_operations.update_one.return_value.modified_count = 1
+        receipt = {
+            "operation_id": "operation-1", "operation_type": "vehicle_transfer", "status": "applied",
+            "result": {"transfer_id": "transfer-1", "vehicle_unique_id": "native-1",
+                       "source_farm_id": "2", "destination_farm_id": "4",
+                       "owner_farm_id": "4", "authoritative_readback": "true"}}
+        result = service.accept_receipt("transfer-1", receipt, "server", "save", "world-a")
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(self.db.farm_operations.update_one.call_args.args[1]["$set"]["state"], "succeeded")
+
+    def test_vehicle_transfer_receipt_rejects_success_without_readback(self):
+        service = TransferService(self.database)
+        service.worlds.active_id = MagicMock(return_value="world-a")
+        service.worlds.require_active = MagicMock(return_value="world-a")
+        pending = {"transfer_id": "transfer-1", "kind": "vehicle", "status": "pending_game",
+                   "operation_id": "operation-1", "server_key": "server", "save_key": "save",
+                   "world_id": "world-a", "source_farm_id": 2, "destination_farm_id": 4}
+        self.db.transfers.find_one.return_value = pending
+        self.db.farm_operations.find_one.return_value = {
+            "payload": {"vehicle_unique_id": "native-1"}}
+        receipt = {
+            "operation_id": "operation-1", "operation_type": "vehicle_transfer", "status": "applied",
+            "result": {"transfer_id": "transfer-1", "vehicle_unique_id": "native-1",
+                       "source_farm_id": "2", "destination_farm_id": "4",
+                       "owner_farm_id": "4", "authoritative_readback": "false"}}
+        with self.assertRaisesRegex(ValueError, "readback"):
+            service.accept_receipt("transfer-1", receipt, "server", "save", "world-a")
+        self.db.transfers.update_one.assert_not_called()
+
+    def test_vehicle_transfer_failure_requires_source_owner_readback(self):
+        service = TransferService(self.database)
+        service.worlds.active_id = MagicMock(return_value="world-a")
+        service.worlds.require_active = MagicMock(return_value="world-a")
+        pending = {"transfer_id": "transfer-1", "kind": "vehicle", "status": "pending_game",
+                   "operation_id": "operation-1", "server_key": "server", "save_key": "save",
+                   "world_id": "world-a", "source_farm_id": 2, "destination_farm_id": 4}
+        reconciliation = dict(pending, status="reconciliation_required")
+        self.db.transfers.find_one.side_effect = [pending, reconciliation]
+        self.db.farm_operations.find_one.return_value = {
+            "payload": {"vehicle_unique_id": "native-1"}}
+        self.db.transfers.update_one.return_value.modified_count = 1
+        self.db.farm_operations.update_one.return_value.modified_count = 1
+        receipt = {
+            "operation_id": "operation-1", "operation_type": "vehicle_transfer",
+            "status": "definitively_not_applied",
+            "result": {"transfer_id": "transfer-1", "vehicle_unique_id": "native-1",
+                       "source_farm_id": "2", "destination_farm_id": "4",
+                       "owner_farm_id": "0", "authoritative_readback": "false"}}
+        result = service.accept_receipt("transfer-1", receipt, "server", "save", "world-a")
+        self.assertEqual(result["status"], "reconciliation_required")
 
     def test_wallet_transfer_projects_ledger_once(self):
         engine = BankingEngine(self.database)

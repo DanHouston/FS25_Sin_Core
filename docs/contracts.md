@@ -173,7 +173,17 @@ the field's unrelated native state and excludes owned, occupied, pending,
 mission-disabled, invalid, mature, or recently recovered fields. If FS25 rejects
 the resulting field state, no contract is forced onto the board.
 
-`sinContractSupply` is a read-only server console diagnostic. The explicit
+`sinContractSupply` and `sinContracts` are read-only diagnostics. A connected
+GIANTS server admin can run them from their client; the request is handled on
+the authoritative server and its result is returned privately to that admin.
+The server resolves the requesting user from the authenticated connection and
+checks the native master-user flag. The supply result reports free NPC fields
+that pass each native field-mission eligibility predicate, including plowing
+and stone picking, plus counts excluded by ownership/availability. These
+requests do not change fields or missions. They do not require DEBUG mode or a
+server restart once this mod version is installed.
+
+The explicit
 `sinContractSupplyTest` command can exercise supported recovery actions in a
 disposable save; its `recovery` mode simulates the automatic maximum-three-field
 pass without waiting for three empty cycles. It still queues only native field
@@ -189,8 +199,8 @@ and mission lifecycle logs.
 
 ## Live diagnostics
 
-The server installs a bounded `sinContracts` console command. By default it
-prints a concise mission-count snapshot; per-mission field/state/equipment and
+The server installs bounded `sinContracts` and `sinContractSupply` console
+commands. The former returns a concise mission-count snapshot; per-mission field/state/equipment and
 estimate details are behind the disabled-by-default DEBUG flag. The same
 in-memory records are updated when lifecycle transitions are observed, are
 bounded to 128 missions, and never mutate native mission fields.

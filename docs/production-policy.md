@@ -94,7 +94,7 @@ The explicit farm-supply and silo recipe policy includes:
 
 The approved direct-crop and downstream factory entries also apply the planned
 `cyclesScale="10"` to every native recipe while retaining each recipe's native
-input/output ratio. The four spinnery entries instead apply `cyclesScale="10"`
+input/output ratio. The four spinnery entries instead apply `cyclesScale="5"`
 only to `fabric_cotton`; wool stays at its native rate. Rates are calculated
 from the XML supplied to native `ProductionPoint.load`, not from a hard-coded
 list of recipe rates. A missing or invalid native recipe fails closed and is

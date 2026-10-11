@@ -26,15 +26,15 @@ is unavailable at native load.
 | Small Grape Processing Plant | Raisins | $55,000 | $105,170 | $52,585 |
 | Oil Mill / US Oil Plant | Sunflower oil | $515,000 | $1,025,280 | $512,640 |
 | Small Oil Plant | Sunflower oil | $50,000 | $102,528 | $51,264 |
-| Generic / EU Spinnery (cotton line) | Fabric | $1,735,000 | $3,467,520 | $1,733,760 |
-| Small Spinnery (cotton line) | Fabric | $175,000 | $346,752 | $173,376 |
+| Generic / EU Spinnery (cotton line) | Fabric | $865,000 | $1,733,760 | $866,880 |
+| Small Spinnery (cotton line) | Fabric | $85,000 | $173,376 | $86,688 |
 | Sugar Mill | Cut-sugar-beet sugar | $530,000 | $1,061,928 | $530,964 |
 | Small Sugar Mill | Cut-sugar-beet sugar | $55,000 | $106,193 | $53,096 |
 | Small Canned & Packaged Factory | Rice boxes | $175,000 | $353,808 | $176,904 |
 | Preserved Food / US Canned Factory | Rice boxes | $1,770,000 | $3,538,080 | $1,769,040 |
 | Potato Processing Plant | Potato chips, olive oil | $650,000 | $1,296,000 | $648,000 |
 | Soup Factory | Potato soup cans | $805,000 | $1,613,520 | $806,760 |
-| US Rope Maker | Cotton rope | $2,325,000 | $4,654,080 | $2,327,040 |
+| US Rope Maker | Cotton rope | $1,165,000 | $2,327,040 | $1,163,520 |
 | Generic / EU / US Bakery | Bread | $535,000 | $1,070,091 | $535,046 |
 | Small Bakery | Bread | $55,000 | $107,009 | $53,505 |
 | Generic / EU Dairy | Goat cheese | $610,000 | $1,220,567 | $610,284 |
@@ -46,7 +46,9 @@ is unavailable at native load.
 
 The base-game factory values above are derived from
 `reports/production-margin-report.csv` native output per hour multiplied by
-the configured `cyclesScale="10"` where applicable. Farm-supply rows use their
+the configured cycle scale where applicable (10x for the general crop-converter
+group; the spinnery cotton lines and US Rope Maker are intentionally 5x).
+Farm-supply rows use their
 explicit policy rates and outputs; seed rush recipes are disabled. Silo rows use
 the existing 1,000 L pig-food output per cycle at 1.5 or 2 cycles/hour. The
 spinnery wool line is deliberately not multiplied; only cotton is.

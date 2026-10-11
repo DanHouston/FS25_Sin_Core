@@ -13,12 +13,15 @@ is not an assertion that the asset is economically balanced.
 
 ## Method used for crop converters
 
-For a direct crop-consuming factory, the candidate assumes:
+For a direct crop-consuming factory, the standard candidate assumes:
 
 ```text
 effective cycles/hour = native cycles/hour x 10
 purchase-price candidate = highest native annual gross x 10 x 6/12
 ```
+
+The spinnery cotton lines and US Rope Maker are exceptions at 5x throughput;
+their prices use six months of gross output at that configured rate.
 
 A game year is 288 active game-hours (24 hours x 12 months). Gross output uses
 the arithmetic average of the native Mar-Feb fill-type price factors. Farm-grown
@@ -44,15 +47,15 @@ concurrency semantics.
 | Small Grape Processing Plant | $36k | $10k-$11k | **$55k** | 10x cycles; high sustainable recipe | Review |
 | Oil Mill; US Oil Plant | $240k | $68k-$103k | **$515k** | 10x cycles; high sustainable recipe; preserve native conversion pending oil-yield decision | Review |
 | Small Oil Plant | $36k | $7k-$10k | **$50k** | 10x cycles; high sustainable recipe; preserve native conversion pending oil-yield decision | Review |
-| Spinnery; EU Spinnery; US Spinnery | $180k | $347k | **$1.735m** | 10x cotton line only; high recipe | Review |
-| Small Spinnery | $36k | $35k | **$175k** | 10x cotton line only; high recipe | Review |
+| Spinnery; EU Spinnery; US Spinnery | $180k | $347k native / $1.734m at 5x | **$865k** | 5x cotton line only; six months of gross output | Configured |
+| Small Spinnery | $36k | $35k native / $173k at 5x | **$85k** | 5x cotton line only; six months of gross output | Configured |
 | Sugar Mill | $240k | $53k-$106k | **$530k** | 10x cycles; high sustainable recipe | Review |
 | Small Sugar Mill | $36k | $5k-$11k | **$55k** | 10x cycles; high sustainable recipe | Review |
 | Small Canned & Packaged Factory | $36k | $7k-$35k | **$175k** | 10x direct-crop lines; high sustainable recipe | Review |
 | Preserved Food Factory; US Canned & Packaged Factory | $330k | $73k-$354k | **$1.77m** | 10x direct-crop lines; high sustainable recipe | Review |
 | Potato Processing Plant | $360k | $130k | **$650k** | 10x cycles | Review |
 | Soup Factory | $405k | $102k-$161k | **$805k** | 10x cycles; high sustainable recipe | Review |
-| US Rope Maker | $300k | $465k | **$2.325m** | 10x cycles; high sustainable recipe | Review |
+| US Rope Maker | $300k | $465k native / $2.327m at 5x | **$1.165m** | 5x cycles; cotton rope, six months of gross output | Configured |
 
 The large/small pairs above already use a native 10:1 throughput relationship.
 The candidate preserves both that relationship and each recipe's native

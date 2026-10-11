@@ -114,7 +114,8 @@ class DeploymentPackagingTests(unittest.TestCase):
                 self.assertIn("FruitTypeManager.loadMapData", archive.read("scripts/SiNCropSettings.lua").decode("utf-8"))
             with ZipFile(output / "SiN_FS25_Contracts.zip") as archive:
                 self.assertEqual(set(archive.namelist()), {
-                    "modDesc.xml", "scripts/SiNContracts.lua", "icon_contracts.dds"
+                    "modDesc.xml", "events/SiNContractsAdminDiagnosticEvent.lua",
+                    "scripts/SiNContracts.lua", "icon_contracts.dds"
                 })
                 contract_source = archive.read("scripts/SiNContracts.lua").decode("utf-8")
                 self.assertIn("MissionManager", contract_source)

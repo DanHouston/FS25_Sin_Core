@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8" standalone="no"?>
 <modDesc descVersion="92">
     <author>SiN (SimNet)</author>
-    <version>0.2.2.0</version>
+    <version>0.2.2.1</version>
     <iconFilename>icon_contracts.dds</iconFilename>
     <title>
         <en>SiN FS25 Contracts</en>
@@ -11,6 +11,7 @@
     </description>
     <multiplayer supported="true"/>
     <extraSourceFiles>
+        <sourceFile filename="events/SiNContractsAdminDiagnosticEvent.lua"/>
         <sourceFile filename="scripts/SiNContracts.lua"/>
     </extraSourceFiles>
 </modDesc>

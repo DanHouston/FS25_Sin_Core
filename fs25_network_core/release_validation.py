@@ -160,7 +160,8 @@ def _validate_crop_archive(path: Path) -> None:
 
 
 def _validate_contracts_archive(path: Path) -> None:
-    expected_required = {"modDesc.xml", "scripts/SiNContracts.lua", "icon_contracts.dds"}
+    event_name = "events/SiNContractsAdminDiagnosticEvent.lua"
+    expected_required = {"modDesc.xml", event_name, "scripts/SiNContracts.lua", "icon_contracts.dds"}
     try:
         with ZipFile(path) as archive:
             names = set(_safe_archive_names(archive, path.name))
@@ -173,12 +174,13 @@ def _validate_contracts_archive(path: Path) -> None:
             if descriptor.get("descVersion") != "92":
                 raise ReleaseValidationError("SiN_FS25_Contracts.zip has an unexpected descVersion")
             source_names = [node.get("filename") for node in descriptor.findall("./extraSourceFiles/sourceFile")]
-            if source_names != ["scripts/SiNContracts.lua"]:
+            if source_names != [event_name, "scripts/SiNContracts.lua"]:
                 raise ReleaseValidationError("SiN_FS25_Contracts.zip has unexpected source files")
             icon_name = descriptor.findtext("iconFilename")
             if icon_name != "icon_contracts.dds":
                 raise ReleaseValidationError("SiN_FS25_Contracts.zip has an invalid iconFilename")
             validate_fs25_lua_source(archive.read("scripts/SiNContracts.lua"), "scripts/SiNContracts.lua")
+            validate_fs25_lua_source(archive.read(event_name), event_name)
     except BadZipFile as error:
         raise ReleaseValidationError("SiN_FS25_Contracts.zip is not a valid ZIP archive") from error
 

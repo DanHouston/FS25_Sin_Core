@@ -834,7 +834,8 @@ local NATIVE_FIELD_CENSUS_TYPES = {
     "cultivateMission",
     "sowMission",
     "harvestMission",
-    "mowMission"
+    "mowMission",
+    "stonePickMission"
 }
 
 local function diagnosticMissionClass(manager, name)
@@ -872,6 +873,63 @@ local function nativeMissionFieldEligibility(classObject, field)
     if type(predicate) ~= "function" then return false end
     local ok, result = pcall(predicate, field)
     return ok and result == true
+end
+
+function SiNContracts:getAdminDiagnostic(action)
+    local manager = g_missionManager
+    if manager == nil then return "Contract diagnostics are not ready on the server." end
+
+    if action == "contracts" then
+        local available, missions = self:availableMissionCount(manager)
+        local byType = {}
+        for _, mission in pairs(missions or {}) do
+            if missionIsAvailable(mission) then
+                local name = missionType(mission)
+                byType[name] = (byType[name] or 0) + 1
+            end
+        end
+        local names = {}
+        for name in pairs(byType) do table.insert(names, name) end
+        table.sort(names)
+        local parts = {}
+        for _, name in ipairs(names) do
+            table.insert(parts, string.format("%s=%d", name, byType[name]))
+        end
+        return string.format("Available offers=%d (%s)", available,
+            #parts > 0 and table.concat(parts, ", ") or "none")
+    end
+
+    if action == "supply" then
+        local now = nowMs() or 0
+        local candidates, excluded = self:getSupplyFieldCandidates(manager, now)
+        local counts = {}
+        for _, name in ipairs(NATIVE_FIELD_CENSUS_TYPES) do
+            local classObject = diagnosticMissionClass(manager, name)
+            local eligible = 0
+            if classObject ~= nil then
+                for _, candidate in ipairs(candidates) do
+                    if nativeMissionFieldEligibility(classObject, candidate.field) then
+                        eligible = eligible + 1
+                    end
+                end
+            end
+            counts[name] = eligible
+        end
+        local parts = {}
+        for _, name in ipairs(NATIVE_FIELD_CENSUS_TYPES) do
+            table.insert(parts, string.format("%s=%s", name,
+                counts[name] ~= nil and tostring(counts[name]) or "unavailable"))
+        end
+        local message = string.format(
+            "Free NPC fields=%d; eligible: %s; excluded owned=%d occupied=%d pending=%d cooldown=%d disabled=%d invalid=%d",
+            #candidates, table.concat(parts, ", "), excluded.owned or 0,
+            excluded.occupied or 0, excluded.pending or 0, excluded.cooldown or 0,
+            excluded.disabled or 0, excluded.invalid or 0)
+        logInfo("admin read-only supply diagnostic %s", message)
+        return message
+    end
+
+    return "Unknown diagnostic. Available: contracts, supply."
 end
 
 function SiNContracts:preferEligibleNativeField(manager, missionTypeName, nativeField)
@@ -1482,6 +1540,13 @@ function SiNContracts:installDetailsHook()
 end
 
 function SiNContracts:consoleCommandContracts()
+    if call(g_currentMission, "getIsServer") ~= true then
+        if SiNContractsAdminDiagnosticEvent ~= nil
+            and SiNContractsAdminDiagnosticEvent.sendRequest("contracts") then
+            return "SiN contract diagnostic requested; the server will return it privately."
+        end
+        return "Unable to request the server diagnostic; check that you are connected and the Contracts mod is loaded."
+    end
     local count = self:scan("console")
     logInfo("diagnostic snapshot missions=%d efficiency=%.2f", count, EFFICIENCY)
     local ids = {}
@@ -1506,30 +1571,22 @@ function SiNContracts:consoleCommandContracts()
                 tostring(item.capacity or "unavailable"))
         end
     end
-    return string.format("SiN contracts observed %d native missions", count)
+    return self:getAdminDiagnostic("contracts")
 end
 
 -- Read-only operator probe for the recovery layer.  It deliberately reports
 -- candidates without queuing a FieldUpdateTask; recovery itself is only armed
 -- after repeated native generation exhaustion below the recovery soft target.
 function SiNContracts:consoleCommandContractSupply()
-    if call(g_currentMission, "getIsServer") ~= true or g_missionManager == nil then
-        return "SiN contract supply is available on the authoritative server only"
-    end
-    local now = nowMs() or 0
-    local candidates, excluded = self:getSupplyFieldCandidates(g_missionManager, now)
-    local counts = {}
-    for _, action in ipairs(SUPPLY_ACTIONS) do counts[action] = 0 end
-    for _, candidate in ipairs(candidates) do
-        for _, action in ipairs(SUPPLY_ACTIONS) do
-            if self:getSupplyActionReason(candidate, action) == nil then counts[action] = counts[action] + 1 end
+    if call(g_currentMission, "getIsServer") ~= true then
+        if SiNContractsAdminDiagnosticEvent ~= nil
+            and SiNContractsAdminDiagnosticEvent.sendRequest("supply") then
+            return "SiN supply diagnostic requested; the server will return it privately."
         end
+        return "Unable to request the server diagnostic; check that you are connected and the Contracts mod is loaded."
     end
-    logInfo("native supply diagnostic candidates=%d herbicide=%d fertilize=%d stonePick=%d cultivate=%d plow=%d excluded=owned:%d occupied:%d pending:%d cooldown:%d invalid:%d disabled:%d",
-        #candidates, counts.herbicide, counts.fertilize, counts.stonePick, counts.cultivate, counts.plow,
-        excluded.owned or 0, excluded.occupied or 0, excluded.pending or 0, excluded.cooldown or 0,
-        excluded.invalid or 0, excluded.disabled or 0)
-    return string.format("SiN contract supply candidates: %d", #candidates)
+    if g_missionManager == nil then return "SiN contract supply is not ready on the server." end
+    return self:getAdminDiagnostic("supply")
 end
 
 local function appendMethod(target, name, callback, marker, preserveReturns)

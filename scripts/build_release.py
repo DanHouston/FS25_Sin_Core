@@ -134,7 +134,7 @@ def build_contracts_mod(destination):
     source_names = [node.get("filename") for node in descriptor_xml.findall("./extraSourceFiles/sourceFile")]
     if not icon_name or Path(icon_name).name != icon_name or not (source / icon_name).is_file():
         raise ValueError("SiN_FS25_Contracts mod descriptor/icon is invalid")
-    if source_names != ["scripts/SiNContracts.lua"]:
+    if source_names != ["events/SiNContractsAdminDiagnosticEvent.lua", "scripts/SiNContracts.lua"]:
         raise ValueError("SiN_FS25_Contracts descriptor has unexpected source files")
     names_to_package = ["modDesc.xml", *source_names, icon_name]
     for name in names_to_package:

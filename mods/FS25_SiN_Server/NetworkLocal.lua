@@ -2683,6 +2683,8 @@ function FS25SiNServer:processPermissionCommands()
                     self:processChatCommand(command, operationId)
                 elseif operationType == "deposit_funds" or operationType == "withdraw_funds" then
                     self:processMoneyCommand(command, operationId, operationType)
+                elseif operationType == "vehicle_transfer" then
+                    self:processVehicleTransferCommand(command, operationId)
                 else
                     local requestedRole = command:getString("permissionCommand#role")
                     if requestedRole == "contractor" then
@@ -2824,6 +2826,146 @@ function FS25SiNServer:processMoneyCommand(command, operationId, operationType)
     receipt:setString("networkLocalReceipt#receipt", reason)
     self:setReceiptWorldId(receipt, "networkLocalReceipt")
     self:saveReceiptAndConsume(receipt, command, operationId)
+end
+
+-- Transfer one owned vehicle between farms in the current save.  The exact
+-- native ID and source/destination are supplied by the authenticated Central
+-- operation; the game server re-checks the live object before mutating it.
+function FS25SiNServer:processVehicleTransferCommand(command, operationId)
+    local transferId = command:getString("networkLocalCommand#transfer_id")
+    local vehicleId = command:getString("networkLocalCommand#vehicle_unique_id")
+    local sourceFarmId = command:getInt("networkLocalCommand#source_farm_id")
+    local destinationFarmId = command:getInt("networkLocalCommand#destination_farm_id")
+    local vehicleSystem = g_currentMission ~= nil and g_currentMission.vehicleSystem or nil
+    local farmManager = g_farmManager
+    local sourceFarm = farmManager ~= nil and sourceFarmId ~= nil and farmManager:getFarmById(sourceFarmId) or nil
+    local destinationFarm = farmManager ~= nil and destinationFarmId ~= nil and farmManager:getFarmById(destinationFarmId) or nil
+    local matches = {}
+    if vehicleSystem ~= nil and type(vehicleSystem.vehicles) == "table" and vehicleId ~= nil then
+        for _, vehicle in pairs(vehicleSystem.vehicles) do
+            if vehicle ~= nil and type(vehicle.getUniqueId) == "function" then
+                local ok, uniqueId = pcall(vehicle.getUniqueId, vehicle)
+                if ok and tostring(uniqueId) == tostring(vehicleId) then
+                    table.insert(matches, vehicle)
+                end
+            end
+        end
+    end
+
+    local vehicle = #matches == 1 and matches[1] or nil
+    local ownerBefore = nil
+    if vehicle ~= nil and type(vehicle.getOwnerFarmId) == "function" then
+        local ok, value = pcall(vehicle.getOwnerFarmId, vehicle)
+        if ok then ownerBefore = tonumber(value) end
+    end
+    local status = "definitively_not_applied"
+    local reason = "vehicle, source farm, or destination farm did not pass live validation"
+    local mutationPerformed = false
+    local ownerAfter = ownerBefore
+    local authoritativeReadback = ownerBefore ~= nil
+
+    if g_currentMission == nil or not g_currentMission:getIsServer() then
+        reason = "vehicle transfers may only be applied by the authoritative server"
+    elseif transferId == nil or transferId == "" or vehicleId == nil or vehicleId == ""
+        or sourceFarm == nil or destinationFarm == nil
+        or tonumber(sourceFarmId) == tonumber(destinationFarmId) then
+        reason = "transfer identity or farm scope is invalid"
+    elseif #matches ~= 1 then
+        status = "pending_validation"
+        reason = #matches == 0 and "native vehicle ID is not present; current owner cannot be verified"
+            or "native vehicle ID is ambiguous in the live server inventory"
+    elseif vehicle.propertyState ~= VehiclePropertyState.OWNED then
+        reason = "only fully owned vehicles can be transferred"
+    elseif ownerBefore == tonumber(destinationFarmId) then
+        -- A prior run may have changed ownership but failed before writing its
+        -- durable receipt. Do not guess that this operation caused the state.
+        status = "pending_validation"
+        reason = "vehicle already belongs to destination; prior operation outcome requires reconciliation"
+        authoritativeReadback = true
+    elseif ownerBefore ~= tonumber(sourceFarmId) then
+        reason = "native vehicle owner does not match the authorized source farm"
+    else
+        local canTransfer = true
+        local rejection = nil
+        if type(vehicle.getIsEntered) ~= "function" then
+            canTransfer = false
+            rejection = "vehicle occupancy state is unavailable"
+        else
+            local ok, entered = pcall(vehicle.getIsEntered, vehicle)
+            if not ok then canTransfer = false; rejection = "vehicle occupancy state is unavailable"
+            elseif entered == true then canTransfer = false; rejection = "vehicle is currently occupied" end
+        end
+        if canTransfer and type(vehicle.getIsAIActive) ~= "function" then
+            canTransfer = false
+            rejection = "vehicle AI state is unavailable"
+        elseif canTransfer then
+            local ok, active = pcall(vehicle.getIsAIActive, vehicle)
+            if not ok then canTransfer = false; rejection = "vehicle AI state is unavailable"
+            elseif active == true then canTransfer = false; rejection = "vehicle is currently controlled by AI" end
+        end
+        if canTransfer and vehicle.rootVehicle ~= nil and vehicle.rootVehicle ~= vehicle then
+            canTransfer = false
+            rejection = "detach this vehicle before transferring it"
+        end
+        if canTransfer and type(vehicle.getChildVehicles) ~= "function" then
+            canTransfer = false
+            rejection = "attached vehicle state is unavailable"
+        elseif canTransfer then
+            local ok, children = pcall(vehicle.getChildVehicles, vehicle)
+            if not ok or type(children) ~= "table" then
+                canTransfer = false
+                rejection = "attached vehicle state is unavailable"
+            elseif #children > 1 then
+                canTransfer = false
+                rejection = "detach all attached vehicles before transferring this vehicle"
+            end
+        end
+        if not canTransfer then
+            reason = rejection
+        elseif type(vehicle.setOwnerFarmId) ~= "function" then
+            status = "pending_validation"
+            reason = "native vehicle ownership mutation API is unavailable"
+        else
+            local mutationOk, mutationError = pcall(vehicle.setOwnerFarmId, vehicle, tonumber(destinationFarmId))
+            if type(vehicle.getOwnerFarmId) == "function" then
+                local readOk, value = pcall(vehicle.getOwnerFarmId, vehicle)
+                if readOk then
+                    ownerAfter = tonumber(value)
+                    authoritativeReadback = ownerAfter ~= nil
+                end
+            end
+            mutationPerformed = ownerAfter ~= ownerBefore
+            if authoritativeReadback and ownerAfter == tonumber(destinationFarmId) then
+                status = "applied"
+                reason = "vehicle ownership changed and destination owner was verified"
+            else
+                status = "pending_validation"
+                reason = mutationOk and "vehicle owner readback did not match destination"
+                    or ("native ownership mutation failed: " .. tostring(mutationError))
+            end
+        end
+    end
+
+    local receipt = XMLFile.create("networkLocalVehicleTransferReceipt",
+        self.receiptDirectory .. operationId .. ".xml", "networkLocalReceipt")
+    if receipt == nil then return end
+    receipt:setString("networkLocalReceipt#operation_id", operationId)
+    receipt:setString("networkLocalReceipt#operation_type", "vehicle_transfer")
+    receipt:setString("networkLocalReceipt#transfer_id", tostring(transferId or ""))
+    receipt:setString("networkLocalReceipt#vehicle_unique_id", tostring(vehicleId or ""))
+    receipt:setInt("networkLocalReceipt#source_farm_id", tonumber(sourceFarmId) or 0)
+    receipt:setInt("networkLocalReceipt#destination_farm_id", tonumber(destinationFarmId) or 0)
+    receipt:setInt("networkLocalReceipt#owner_before_farm_id", ownerBefore or 0)
+    receipt:setInt("networkLocalReceipt#owner_farm_id", ownerAfter or 0)
+    receipt:setBool("networkLocalReceipt#mutation_performed", mutationPerformed)
+    receipt:setBool("networkLocalReceipt#authoritative_readback", authoritativeReadback)
+    receipt:setString("networkLocalReceipt#status", status)
+    receipt:setString("networkLocalReceipt#receipt", reason)
+    self:setReceiptWorldId(receipt, "networkLocalReceipt")
+    self:saveReceiptAndConsume(receipt, command, operationId)
+    Logging.info("[SiN Vehicle Transfer] operation=%s transfer=%s vehicle=%s source=%s destination=%s status=%s owner=%s",
+        operationId, tostring(transferId), tostring(vehicleId), tostring(sourceFarmId),
+        tostring(destinationFarmId), status, tostring(ownerAfter))
 end
 
 function FS25SiNServer:processContractorPermissionCommand(command, operationId)
