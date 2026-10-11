@@ -192,6 +192,15 @@ class Database:
         self.db.native_contracts.create_index(
             [("server_key", 1), ("save_key", 1), ("world_id", 1), ("mission_id", 1)], unique=True)
         self.db.native_contracts.create_index([("lifecycle", 1), ("updated_at", -1)])
+        self.db.native_contract_lifecycle_events.create_index(
+            [("server_key", 1), ("save_key", 1), ("world_id", 1),
+             ("mission_id", 1), ("observed_at", 1)],
+            name="native_contract_lifecycle_world_history")
+        self.db.farm_operational_events.create_index(
+            [("server_key", 1), ("save_key", 1), ("world_id", 1),
+             ("mission_id", 1), ("kind", 1), ("interval_start_ms", 1)],
+            partialFilterExpression={"kind": "contract_work"},
+            name="contract_work_world_report")
         self.db.invoices.create_index("invoice_id", unique=True)
         self.db.invoices.create_index([("recipient_discord_id", 1), ("status", 1)])
         self.db.community_events.create_index("event_id", unique=True)

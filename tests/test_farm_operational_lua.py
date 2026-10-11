@@ -74,6 +74,129 @@ def add_checkpoint_mock(lua):
 
 
 class FarmOperationalLuaTests(unittest.TestCase):
+    @staticmethod
+    def contract_work_runtime():
+        lua = runtime()
+        lua.execute(r'''
+            g_currentMission.time = 61000
+            g_currentMission.userManager = {getUniqueUserIdByUserId=function(_, userId)
+                return userId == 7 and "player-seven-stable" or nil
+            end}
+            field = {getId=function() return 40 end}
+            contract = {farmId=2, type="fertilizeMission", uniqueId=9001,
+                getIsRunning=function() return true end, getUniqueId=function() return 9001 end,
+                getField=function() return field end}
+            g_missionManager = {getMissionAtWorldPosition=function() return contract end}
+            getWorldTranslation = function(node) return node, 0, node end
+            tractor = {controllerUserId=7, getUniqueId=function() return "tractor-1" end}
+            tool = {getUniqueId=function() return "implement-1" end, getRootVehicle=function() return tractor end,
+                spec_workArea={workAreas={{start=100,width=101,height=102,type=4,
+                    lastWorkedHectares=0.25,lastProcessingTime=61000}}}}
+        ''')
+        return lua
+
+    def test_manual_only_job_records_player_area_and_time(self):
+        lua = self.contract_work_runtime()
+        lua.execute("FS25SiNServer:observeContractWorkTick(tool, 1000)")
+        self.assertEqual(lua.eval("#FS25SiNServer.operationWindow"), 1)
+        self.assertEqual(lua.eval("FS25SiNServer.operationWindow[1].values.actor_kind"), "player")
+        self.assertEqual(lua.eval("FS25SiNServer.operationWindow[1].values.worked_area_ha"), 0.25)
+
+    def test_ai_only_job_records_ai_only_with_native_job_evidence(self):
+        lua = self.contract_work_runtime()
+        lua.execute(r'''
+            tractor.controllerUserId = nil
+            FS25SiNServer.activeAIJobsByVehicleId["tractor-1"] = {jobId="ai-job-1", farmId=2}
+            FS25SiNServer:observeContractWorkTick(tool, 1000)
+        ''')
+        self.assertEqual(lua.eval("#FS25SiNServer.operationWindow"), 1)
+        self.assertEqual(lua.eval("FS25SiNServer.operationWindow[1].values.actor_kind"), "ai")
+        self.assertEqual(lua.eval("FS25SiNServer.operationWindow[1].values.unique_user_id"), "")
+
+    def test_contract_work_captures_only_processed_hectares_and_explicit_actor_source(self):
+        lua = runtime()
+        lua.execute(r'''
+            g_currentMission.time = 61000
+            g_currentMission.userManager = {getUniqueUserIdByUserId=function(_, userId)
+                if userId == 7 then return "player-seven-stable" end
+                if userId == 8 then return "player-eight-stable" end
+            end}
+            field = {getId=function() return 40 end}
+            contract = {farmId=2, type="fertilizeMission", uniqueId=9001,
+                getIsRunning=function() return true end, getUniqueId=function() return 9001 end,
+                getField=function() return field end}
+            g_missionManager = {getMissionAtWorldPosition=function() return contract end}
+            getWorldTranslation = function(node) return node, 0, node end
+            g_workAreaTypeManager = {getWorkAreaTypeByIndex=function(_, index)
+                return {name=index == 4 and "sprayer" or "fertilizer"}
+            end}
+            tractor = {controllerUserId=7, getUniqueId=function() return "tractor-1" end}
+            function makeImplement(id, areaType)
+                return {getUniqueId=function() return id end, getRootVehicle=function() return tractor end,
+                    spec_workArea={workAreas={{start=100,width=101,height=102,type=areaType,
+                        lastWorkedHectares=0.125,lastProcessingTime=g_currentMission.time}}}}
+            end
+            playerTool = makeImplement("sprayer-1", 4)
+            FS25SiNServer:observeContractWorkTick(playerTool, 1000)
+            g_currentMission.time = 62000
+            playerTool.spec_workArea.workAreas[1].lastProcessingTime = 62000
+            playerTool.spec_workArea.workAreas[1].lastWorkedHectares = 0.25
+            tractor.controllerUserId = 8
+            FS25SiNServer:observeContractWorkTick(playerTool, 1000)
+            g_currentMission.time = 63000
+            playerTool.spec_workArea.workAreas[1].lastProcessingTime = 63000
+            tractor.controllerUserId = nil
+            FS25SiNServer.activeAIJobsByVehicleId["tractor-1"] = {jobId="ai-44",farmId=2}
+            FS25SiNServer:observeContractWorkTick(playerTool, 1000)
+            g_currentMission.time = 64000
+            playerTool.spec_workArea.workAreas[1].lastProcessingTime = 64000
+            FS25SiNServer.activeAIJobsByVehicleId["tractor-1"] = nil
+            FS25SiNServer:observeContractWorkTick(playerTool, 1000)
+            g_currentMission.time = 65000
+            playerTool.spec_workArea.workAreas[1].lastProcessingTime = 64000
+            FS25SiNServer:observeContractWorkTick(playerTool, 1000)
+        ''')
+        self.assertEqual(lua.eval("#FS25SiNServer.operationWindow"), 4)
+        self.assertEqual(lua.eval("FS25SiNServer.operationWindow[1].values.actor_kind"), "player")
+        self.assertEqual(lua.eval("FS25SiNServer.operationWindow[1].values.unique_user_id"),
+                         "player-seven-stable")
+        self.assertEqual(lua.eval("FS25SiNServer.operationWindow[2].values.unique_user_id"),
+                         "player-eight-stable")
+        self.assertEqual(lua.eval("FS25SiNServer.operationWindow[3].values.actor_kind"), "ai")
+        self.assertEqual(lua.eval("FS25SiNServer.operationWindow[3].values.job_id"), "ai-44")
+        self.assertEqual(lua.eval("FS25SiNServer.operationWindow[4].values.actor_kind"), "unknown")
+        self.assertEqual(lua.eval("FS25SiNServer.operationWindow[4].values.attribution_reason"),
+                         "operator_unavailable")
+        self.assertEqual(lua.eval("FS25SiNServer.operationWindow[1].values.worked_area_ha"), 0.125)
+        self.assertEqual(lua.eval("FS25SiNServer.operationWindow[1].values.productive_ms"), 1000)
+        self.assertEqual(lua.eval("FS25SiNServer.operationWindow[1].values.field_id"), "40")
+
+    def test_contract_work_checkpoint_survives_reload_with_same_event_identity(self):
+        lua = runtime()
+        add_checkpoint_mock(lua)
+        lua.execute(r'''
+            g_currentMission.time = 61000
+            field = {getId=function() return 40 end}
+            contract = {farmId=2, type="plowMission", uniqueId=9002,
+                getIsRunning=function() return true end, getUniqueId=function() return 9002 end,
+                getField=function() return field end}
+            g_missionManager = {getMissionAtWorldPosition=function() return contract end}
+            tractor = {getUniqueId=function() return "tractor-1" end}
+            tool = {getUniqueId=function() return "plow-1" end, getRootVehicle=function() return tractor end,
+                spec_workArea={workAreas={{start=100,width=101,height=102,type=1,
+                    lastWorkedHectares=0.5,lastProcessingTime=61000}}}}
+            FS25SiNServer:observeContractWorkTick(tool, 1000)
+            originalId = FS25SiNServer.operationWindow[1].eventId
+            FS25SiNServer:checkpointFarmOperations()
+            FS25SiNServer.operationWindow = {}
+            FS25SiNServer.operationPending = {}
+            FS25SiNServer:loadFarmOperationsCheckpoint()
+            restoredId = FS25SiNServer.operationWindow[1].eventId
+            restoredHectares = FS25SiNServer.operationWindow[1].values.worked_area_ha
+        ''')
+        self.assertEqual(lua.eval("originalId"), lua.eval("restoredId"))
+        self.assertEqual(lua.eval("restoredHectares"), 0.5)
+
     def test_sale_coalesces_liters_without_changing_native_return(self):
         lua = runtime()
         lua.execute(r'''

@@ -26,6 +26,14 @@ def row(kind="sale", **overrides):
     elif kind == "vehicle_usage":
         base.update(vehicle_id="vehicle-1", operating_ms="120000",
                     operating_after_ms="530000", distance_estimated_m="518.75")
+    elif kind == "contract_work":
+        base.update(mission_id="mission-9", mission_type="fertilizeMission", field_id="40",
+                    actor_kind="player", unique_user_id="stable-player-1", job_id="",
+                    activity_type="sprayer", vehicle_id="tractor-1", implement_id="sprayer-1",
+                    productive_ms="12000", worked_area_ha="0.12345678901234567",
+                    interval_start_ms="60000", interval_end_ms="72000",
+                    evidence="work_area_processing", attribution_reason="", runtime_id="runtime-1",
+                    work_ticks="48")
     else:
         base.update(job_id="34", vehicle_id="vehicle-1")
         if kind == "ai_started":
@@ -58,6 +66,26 @@ class OperationalValidationTests(unittest.TestCase):
         self.assertEqual(value["operating_ms"], 120000)
         self.assertEqual(value["distance_estimated_m"], 518.75)
 
+    def test_contract_work_requires_direct_player_identity_and_bounded_interval(self):
+        value = validate_farm_operation(row("contract_work"))
+        self.assertEqual(value["mission_id"], "mission-9")
+        self.assertEqual(value["unique_user_id"], "stable-player-1")
+        self.assertEqual(value["productive_ms"], 12000)
+        self.assertAlmostEqual(value["worked_area_ha"], 0.12345678901234567)
+        for overrides in ({"actor_kind": "player", "unique_user_id": ""},
+                          {"actor_kind": "ai", "unique_user_id": "stable-player-1"},
+                          {"interval_end_ms": "120001"},
+                          {"productive_ms": "12001"}):
+            with self.subTest(overrides=overrides), self.assertRaises(FarmOperationalValidationError):
+                validate_farm_operation(row("contract_work", **overrides))
+
+    def test_unknown_contribution_is_valid_without_fabricated_player_or_ai(self):
+        value = validate_farm_operation(row("contract_work", actor_kind="unknown",
+                                            unique_user_id="", job_id="",
+                                            attribution_reason="operator_unavailable"))
+        self.assertEqual(value["actor_kind"], "unknown")
+        self.assertIsNone(value["unique_user_id"])
+
     def test_rejects_malformed_and_nonfinite_physical_values(self):
         for bad in (row(liters="0"), row(liters="NaN"), row(farm_id="0"),
                     row(liters="1e999"), row(kind="not_a_kind"),
@@ -78,6 +106,18 @@ class OperationalIngestTests(unittest.TestCase):
         self.assertEqual(first["_id"], second["_id"])
         self.assertNotEqual(first["_id"], new_world["_id"])
         self.assertTrue(self.database.db.farm_operational_events.update_one.call_args.kwargs["upsert"])
+
+    def test_contract_work_duplicate_delivery_is_idempotent_and_world_scoped(self):
+        first = self.telemetry.ingest_batch("server", "save", "world-a", {
+            "changes": [row("contract_work")]})[0]
+        self.telemetry.ingest_batch("server", "save", "world-a", {
+            "changes": [row("contract_work")]})
+        other_world = self.telemetry.ingest_batch("server", "save", "world-b", {
+            "changes": [row("contract_work")]})[0]
+        calls = self.database.db.farm_operational_events.update_one.call_args_list
+        self.assertEqual(calls[0].args[0]["_id"], calls[1].args[0]["_id"])
+        self.assertNotEqual(first["_id"], other_world["_id"])
+        self.assertEqual(first["mission_id"], "mission-9")
 
     def test_batch_rejected_before_any_write(self):
         with self.assertRaises(FarmOperationalValidationError):

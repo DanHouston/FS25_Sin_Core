@@ -527,6 +527,30 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("not a verified manager", interaction.followup.send.await_args.args[0])
         self.assertTrue(interaction.followup.send.await_args.kwargs["ephemeral"])
 
+    async def test_contract_report_is_staff_only_ephemeral_and_active_world_scoped(self):
+        command = self.bot.tree.get_command("contract_report")
+        interaction = MagicMock()
+        interaction.guild_id = 1
+        interaction.user.roles = [SimpleNamespace(id=42)]
+        interaction.response.defer = AsyncMock()
+        interaction.followup.send = AsyncMock()
+        self.bot.server_registry.eligible_server = MagicMock(return_value={
+            "server_key": "server", "saves": [{"save_key": "save"}]})
+        self.bot.server_registry.active_runtime = MagicMock(return_value={
+            "save_key": "save", "world_id": "world-a"})
+        self.bot.contract_reports.for_contract = MagicMock(return_value={
+            "contract": {"mission_id": "m1", "mission_type": "fertilizeMission",
+                          "field_id": "40", "area_ha": 7.25, "accepting_farm_id": "2",
+                          "lifecycle": "completed", "actual_payout": None},
+            "lifecycle": [], "contributions": [], "interval_count": 0})
+
+        await command.callback(interaction, "server", "m1")
+
+        self.bot.contract_reports.for_contract.assert_called_once_with(
+            "server", "save", "world-a", "m1")
+        self.assertIn("Native contract contribution", interaction.followup.send.await_args.args[0])
+        self.assertTrue(interaction.followup.send.await_args.kwargs["ephemeral"])
+
     async def test_pay_uses_linked_player_wallets_and_reports_final_balance(self):
         command = self.bot.tree.get_command("pay")
         options = command.to_dict(self.bot.tree)["options"]

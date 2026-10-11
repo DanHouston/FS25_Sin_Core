@@ -147,11 +147,19 @@ and observes native generation start/completion. It does not override
 `generationTimer`. There are no SiN refill batches, retry loops, or guaranteed
 offer counts; FS25 decides whether a valid mission can be generated.
 
-For `plowMission`, `cultivateMission`, `sowMission`, `harvestMission`, and
-`mowMission`, SiN may prefer a different free NPC field only when that mission
-type's native `isAvailableForField` predicate accepts it. The native field
-picker still runs, and native mission generation performs its normal validation.
-No other mission type receives this preference.
+For `plowMission`, `cultivateMission`, `sowMission`, `harvestMission`,
+`mowMission`, and `stonePickMission`, SiN may prefer a different free NPC field
+only when that mission type's native `isAvailableForField` predicate accepts it.
+The native field picker still runs, and native mission generation performs its
+normal validation. No other mission type receives this preference.
+
+Winter is not a blanket reason to suppress otherwise valid field contracts.
+While evaluating native field mission eligibility during winter, SiN temporarily
+presents spring to the native predicate and restores the real season immediately
+afterward. Native crop, growth, ground, ownership, and other field-state checks
+still run unchanged. This does not fabricate crop readiness or modify field
+state. Mowing is the exception: it retains GIANTS' native winter check because
+dormant winter grass is not mowable.
 
 If three consecutive native generation cycles finish without increasing the
 available `CREATED` offer count, the server may queue field recovery when fewer
@@ -180,8 +188,14 @@ The server resolves the requesting user from the authenticated connection and
 checks the native master-user flag. The supply result reports free NPC fields
 that pass each native field-mission eligibility predicate, including plowing
 and stone picking, plus counts excluded by ownership/availability. These
-requests do not change fields or missions. They do not require DEBUG mode or a
-server restart once this mod version is installed.
+requests do not change fields or missions. The supply diagnostic reports native
+mission eligibility across all valid free NPC fields separately from the
+narrower recovery-candidate pool. SiN's pending-update and one-hour field
+cooldown filters limit only automatic recovery; they do not remove a field from
+native MissionManager consideration. This distinction is useful when comparing
+the diagnostic with map/PDA field-condition layers. The commands do not require
+DEBUG mode; install the updated Contracts mod and reload the map/save to get
+the corrected counts.
 
 The explicit
 `sinContractSupplyTest` command can exercise supported recovery actions in a
@@ -193,15 +207,23 @@ the automatic recovery list and automatic recovery never changes ground/plow
 state.
 
 Generation exhaustion details, field censuses/samples, construction traces,
-field-state detail, and equipment detail are DEBUG-only. Normal startup and
-operation retain concise cap-adjustment, field-substitution, recovery-summary,
-and mission lifecycle logs.
+field-state detail, and equipment detail are disabled by default. A server
+admin can enable them live with `sinContractDebug on`, inspect the setting with
+`sinContractDebug status`, and turn them off with `sinContractDebug off`. From a
+connected client, run the same command while logged in as the GIANTS server
+admin/master user; the authenticated server checks that role and returns the
+result privately. This toggle does not require DEBUG mode, a mod rebuild, or a
+map/server restart. After first enable, trace wrappers remain installed but
+return directly to native behavior without collecting trace data while off.
+Normal operation retains concise cap-adjustment, field-substitution,
+recovery-summary, and mission lifecycle logs.
 
 ## Live diagnostics
 
-The server installs bounded `sinContracts` and `sinContractSupply` console
-commands. The former returns a concise mission-count snapshot; per-mission field/state/equipment and
-estimate details are behind the disabled-by-default DEBUG flag. The same
+The server installs bounded `sinContracts`, `sinContractSupply`, and
+`sinContractDebug` console commands. The former returns a concise mission-count
+snapshot; per-mission field/state/equipment and estimate details remain behind
+the disabled-by-default DEBUG flag. The same
 in-memory records are updated when lifecycle transitions are observed, are
 bounded to 128 missions, and never mutate native mission fields.
 

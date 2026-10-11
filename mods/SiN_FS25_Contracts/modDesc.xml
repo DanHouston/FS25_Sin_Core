@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="utf-8" standalone="no"?>
 <modDesc descVersion="92">
     <author>SiN (SimNet)</author>
-    <version>0.2.2.1</version>
+    <version>0.2.2.6</version>
     <iconFilename>icon_contracts.dds</iconFilename>
     <title>
         <en>SiN FS25 Contracts</en>
     </title>
     <description>
-        <en>Native FS25 contract diagnostics and guarded replenishment.</en>
+        <en>Native FS25 contract diagnostics, runtime generation tracing, and guarded replenishment.</en>
     </description>
     <multiplayer supported="true"/>
     <extraSourceFiles>

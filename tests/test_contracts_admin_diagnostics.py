@@ -76,7 +76,7 @@ class ContractsAdminDiagnosticTests(unittest.TestCase):
             assert(string.find(table.concat(serverLogs, ";"), "complete action=supply", 1, true) ~= nil)
             SiNContractsAdminDiagnosticEvent.new("arbitrary", "", false):run(connection)
             assert(diagnosticCalls == 1)
-            assert(string.find(response.message, "Unknown diagnostic", 1, true) ~= nil)
+            assert(string.find(response.message, "Unknown request", 1, true) ~= nil)
         """)
 
     def test_client_receives_private_server_response(self):
@@ -109,9 +109,68 @@ class ContractsAdminDiagnosticTests(unittest.TestCase):
             }
             local contractsResult = SiNContracts:consoleCommandContracts()
             local supplyResult = SiNContracts:consoleCommandContractSupply()
+            local debugResult = SiNContracts:consoleCommandContractsDebug("on")
             assert(requested[1] == "contracts" and requested[2] == "supply")
+            assert(requested[3] == "generation-debug-on")
             assert(string.find(contractsResult, "requested", 1, true) ~= nil)
             assert(string.find(supplyResult, "requested", 1, true) ~= nil)
+            assert(string.find(debugResult, "request sent", 1, true) ~= nil)
+        """)
+
+    def test_only_server_admin_can_change_runtime_generation_diagnostics(self):
+        lua = self._runtime()
+        lua.execute("""
+            serverLogs = {}
+            Logging.info = function(message) table.insert(serverLogs, message) end
+            local enabled = false
+            SiNContracts.setGenerationDiagnosticsEnabled = function(_, value)
+                enabled = value
+                return value and "Native generation diagnostics enabled." or "Native generation diagnostics disabled."
+            end
+            g_currentMission.userManager = {
+                getUserByConnection=function()
+                    return {getIsMasterUser=function() return true end, getId=function() return 42 end}
+                end
+            }
+            local connection = {
+                getIsServer=function() return false end,
+                sendEvent=function(_, event) response = event end
+            }
+            SiNContractsAdminDiagnosticEvent.new("generation-debug-on", "", false):run(connection)
+            assert(enabled == true)
+            assert(response.isResponse == true)
+            assert(string.find(response.message, "enabled", 1, true) ~= nil)
+
+            enabled = false
+            g_currentMission.userManager = {
+                getUserByConnection=function()
+                    return {getIsMasterUser=function() return false end, getId=function() return 43 end}
+                end
+            }
+            SiNContractsAdminDiagnosticEvent.new("generation-debug-on", "", false):run(connection)
+            assert(enabled == false)
+            assert(string.find(response.message, "Denied", 1, true) ~= nil)
+        """)
+
+    def test_runtime_debug_command_enables_trace_hooks_without_reloading_map(self):
+        lua = self._runtime()
+        lua.execute("""
+            local installed = 0
+            SiNContracts.installNativeGenerationTraceHooks = function()
+                installed = installed + 1
+                return true
+            end
+            SiNContracts.nativeGenerationObservation = {attempts={}}
+            local result = SiNContracts:consoleCommandContractsDebug("on")
+            assert(SiNContracts.generationDiagnosticsEnabled == true)
+            assert(SiNContracts.nativeGenerationObservation == nil)
+            assert(installed == 1)
+            assert(string.find(result, "enabled", 1, true) ~= nil)
+            result = SiNContracts:consoleCommandContractsDebug("off")
+            assert(SiNContracts.generationDiagnosticsEnabled == false)
+            assert(installed == 1)
+            assert(string.find(result, "disabled", 1, true) ~= nil)
+            assert(string.find(SiNContracts:consoleCommandContractsDebug("bad"), "Usage", 1, true) ~= nil)
         """)
 
     def test_supply_summary_uses_native_eligibility_and_does_not_change_fields(self):
@@ -136,12 +195,18 @@ class ContractsAdminDiagnosticTests(unittest.TestCase):
                 {name="mowMission", classObject={isAvailableForField=function() return false end}},
                 {name="stonePickMission", classObject={isAvailableForField=function(candidate) return candidate.id == 2 end}}
             }}
+            -- Field 1 is still available to native mission generation, but the
+            -- SiN recovery cooldown excludes it from recovery candidates.
+            SiNContracts.supplyAdjustedFields[1] = {atMs=1000, action="plow"}
             local beforePlow, beforeStone = plow.state.plowLevel, stones.state.stoneLevel
             local summary = SiNContracts:getAdminDiagnostic("supply")
-            assert(string.find(summary, "Free NPC fields=2", 1, true) ~= nil)
+            assert(string.find(summary, "Native NPC fields=2", 1, true) ~= nil)
             assert(string.find(summary, "plowMission=1", 1, true) ~= nil)
             assert(string.find(summary, "stonePickMission=1", 1, true) ~= nil)
-            assert(string.find(summary, "excluded owned=1", 1, true) ~= nil)
+            assert(string.find(summary, "recovery fields=1", 1, true) ~= nil)
+            assert(string.find(summary, "recovery excluded owned=1", 1, true) ~= nil)
+            assert(string.find(summary, "cooldown=1", 1, true) ~= nil)
+            assert(string.find(summary, "native excluded owned=1", 1, true) ~= nil)
             assert(plow.state.plowLevel == beforePlow and stones.state.stoneLevel == beforeStone)
         """)
 

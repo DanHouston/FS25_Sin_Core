@@ -576,6 +576,47 @@ class ContractsLuaTests(unittest.TestCase):
             assert(SiNContracts:preferEligibleNativeField(manager, "fertilizeMission", nativeField) == nativeField)
         """)
 
+    def test_winter_does_not_veto_native_field_eligibility_but_other_checks_remain(self):
+        lua = self._runtime()
+        lua.execute("""
+            Season = {SPRING = 1, WINTER = 4}
+            g_currentMission.environment = {currentSeason = Season.WINTER}
+            local function field(valid)
+                local value = {valid = valid}
+                function value:getFieldState() return {isValid = self.valid} end
+                return value
+            end
+            local validField, invalidField = field(true), field(false)
+            local function nativeEligibility(candidate)
+                assert(g_currentMission.environment.currentSeason == Season.SPRING)
+                return candidate:getFieldState().isValid
+            end
+            local plow = {isAvailableForField = nativeEligibility}
+            local stonePick = {isAvailableForField = function(candidate, mission)
+                assert(g_currentMission.environment.currentSeason == Season.SPRING)
+                if mission == nil and not candidate:getFieldState().isValid then return false end
+                return true
+            end}
+            local mow = {isAvailableForField = function()
+                return g_currentMission.environment.currentSeason ~= Season.WINTER
+            end}
+            local manager = {missionTypes = {
+                {name = "plowMission", classObject = plow},
+                {name = "stonePickMission", classObject = stonePick},
+                {name = "mowMission", classObject = mow}
+            }}
+            assert(SiNContracts:installWinterMissionEligibilityPolicy(manager))
+            assert(plow.isAvailableForField(validField) == true)
+            assert(plow.isAvailableForField(invalidField) == false)
+            assert(stonePick.isAvailableForField(validField, nil) == true)
+            assert(stonePick.isAvailableForField(invalidField, nil) == false)
+            -- Existing mission validation also ignores the seasonal veto.
+            assert(stonePick.isAvailableForField(validField, {}) == true)
+            -- Dormant winter grass remains unavailable for mowing.
+            assert(mow.isAvailableForField(validField) == false)
+            assert(g_currentMission.environment.currentSeason == Season.WINTER)
+        """)
+
     def test_client_does_not_wrap_native_mission_manager_actions(self):
         lua = self._runtime()
         lua.execute(
@@ -666,7 +707,7 @@ class ContractsLuaTests(unittest.TestCase):
             """
         )
 
-    def test_verbose_native_generation_diagnostics_are_debug_only(self):
+    def test_verbose_native_generation_diagnostics_are_suppressed_by_default(self):
         lua = self._runtime()
         lua.execute(
             """
@@ -685,7 +726,8 @@ class ContractsLuaTests(unittest.TestCase):
             function MissionManager:update() self.missionGenerationInProgress = false end
             SiNContracts:onNativeGenerationStarted(MissionManager)
             MissionManager.missionGenerationInProgress = false
-            SiNContracts:onNativeGenerationFinished(MissionManager)
+            local traceOk, traceError = pcall(SiNContracts.onNativeGenerationFinished, SiNContracts, MissionManager)
+            assert(traceOk, tostring(traceError))
             assert(#messages == 0)
             SiNContracts.records["debug-only"] = {
                 missionType = "harvestMission", status = "CREATED", equipment = {},

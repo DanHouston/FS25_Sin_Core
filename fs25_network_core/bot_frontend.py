@@ -29,6 +29,8 @@ from .business_workflows import (ChatService, ContractService, InvoiceService,
 from .farm_lifecycle import FarmLifecycle, SYSTEM_FARM_NAME, FIRST_FIELD_MAX_PRICE
 from .vehicle_inventory import VehicleInventoryService
 from .farm_report import FarmReportService, format_farm_report
+from .contract_contribution import (ContractContributionReportService,
+                                    format_contract_contribution_report)
 from .market_finance import DailyMarketFinancePublisher
 from .map_service import MapService, MapStore, MapUnavailable, MapValidationError
 from .mod_suggestions import (ModSuggestionModal, build_suggestion_post,
@@ -436,6 +438,8 @@ class NetworkBot(discord.Client):
         self.farm_lifecycle = FarmLifecycle(bank.database, self.authorization)
         self.vehicle_inventory = VehicleInventoryService(bank.database)
         self.farm_reports = FarmReportService(bank.database)
+        self.contract_reports = ContractContributionReportService(
+            bank.database, self.authorization.resolve_player_identity)
         self.activity_publisher = ActivityPublisher(self, bank.database)
         self.bank_notification_publisher = BankNotificationPublisher(self, bank)
         # This is a durable one-card-per-server projection, not an activity
@@ -1180,6 +1184,38 @@ class NetworkBot(discord.Client):
         @farm_report.autocomplete("server")
         async def farm_report_server_autocomplete(interaction: discord.Interaction, current: str):
             return await server_choices(interaction, current)
+
+        @self.tree.command(name="contract_report", description="Staff: report measured player/AI work on a native FS25 contract")
+        @app_commands.check(channel_check)
+        @app_commands.default_permissions(administrator=True)
+        async def contract_report(interaction: discord.Interaction, server: str, mission_id: str):
+            staff_check(interaction)
+            config = server_config(interaction, server)
+            await interaction.response.defer(ephemeral=True)
+            try:
+                save_key = selected_save(config)
+                runtime = await asyncio.to_thread(self.server_registry.active_runtime, server)
+                if (not isinstance(runtime, dict) or str(runtime.get("save_key") or "") != str(save_key)
+                        or not str(runtime.get("world_id") or "")):
+                    raise ValueError("No active world generation is available for this server/save")
+                report = await asyncio.to_thread(self.contract_reports.for_contract,
+                    server, save_key, runtime["world_id"], mission_id)
+                message = format_contract_contribution_report(report)
+            except ValueError as error:
+                await interaction.followup.send(str(error), ephemeral=True)
+                return
+            except PyMongoError:
+                logging.exception("Contract contribution report temporarily unavailable")
+                await interaction.followup.send(
+                    "Contract contribution report is temporarily unavailable; please try again later.",
+                    ephemeral=True)
+                return
+            await interaction.followup.send(message, ephemeral=True,
+                                            allowed_mentions=discord.AllowedMentions.none())
+
+        @contract_report.autocomplete("server")
+        async def contract_report_server_autocomplete(interaction: discord.Interaction, current: str):
+            return await server_choices(interaction, current, "reconcile")
 
         @self.tree.command(name="vehicles", description="List your verified farm's live FS25 vehicles")
         @app_commands.check(channel_check)

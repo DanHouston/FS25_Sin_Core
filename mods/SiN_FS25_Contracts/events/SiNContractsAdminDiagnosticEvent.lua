@@ -1,6 +1,6 @@
--- Read-only client requests for authoritative contract diagnostics.
--- The server resolves the sender from the authenticated connection and never
--- trusts a client-supplied user ID or admin flag.
+-- Client requests for server-authoritative contract diagnostics and the
+-- runtime generation-debug toggle. The server resolves the sender from the
+-- authenticated connection and never trusts a client-supplied user/admin ID.
 SiNContractsAdminDiagnosticEvent = {}
 local SiNContractsAdminDiagnosticEvent_mt = Class(SiNContractsAdminDiagnosticEvent, Event)
 InitEventClass(SiNContractsAdminDiagnosticEvent, "SiNContractsAdminDiagnosticEvent")
@@ -91,17 +91,22 @@ function SiNContractsAdminDiagnosticEvent:run(connection)
         return
     end
 
-    if action ~= "contracts" and action ~= "supply" then
+    local debugAction = nil
+    for _, value in ipairs({"on", "off", "status"}) do
+        if action == "generation-debug-" .. value then debugAction = value end
+    end
+    if action ~= "contracts" and action ~= "supply" and debugAction == nil then
         serverInfo(string.format("request denied action=%s userId=%s reason=unsupported", action,
             getUserId(user)))
-        if not sendResponse(connection, action, "Unknown diagnostic. Available: contracts, supply.") then
+        if not sendResponse(connection, action,
+            "Unknown request. Available: contracts, supply, generation debug on|off|status.") then
             serverInfo(string.format("response send failed action=%s", action))
         end
         return
     end
 
     local handler = SiNContracts
-    if handler == nil or type(handler.getAdminDiagnostic) ~= "function" then
+    if handler == nil then
         serverInfo(string.format("request unavailable action=%s reason=handler-not-ready", action))
         if not sendResponse(connection, action, "Unavailable: contract diagnostics are not ready on the server.") then
             serverInfo(string.format("response send failed action=%s", action))
@@ -109,11 +114,26 @@ function SiNContractsAdminDiagnosticEvent:run(connection)
         return
     end
 
-    local ok, result = pcall(handler.getAdminDiagnostic, handler, action)
+    local ok, result
+    if debugAction ~= nil then
+        if debugAction == "status" then
+            result = string.format("Native generation diagnostics are %s.",
+                handler.generationDiagnosticsEnabled == true and "enabled" or "disabled")
+            ok = true
+        elseif type(handler.setGenerationDiagnosticsEnabled) == "function" then
+            ok, result = pcall(handler.setGenerationDiagnosticsEnabled, handler, debugAction == "on")
+        else
+            ok, result = false, "runtime debug toggle unavailable"
+        end
+    elseif type(handler.getAdminDiagnostic) == "function" then
+        ok, result = pcall(handler.getAdminDiagnostic, handler, action)
+    else
+        ok, result = false, "diagnostic handler unavailable"
+    end
     if not ok then
-        result = "Unavailable: server diagnostic failed; check the server log."
+        result = "Unavailable: server request failed; check the server log."
         if Logging ~= nil and type(Logging.warning) == "function" then
-            Logging.warning("[SiN Contracts] remote diagnostic failed action=%s", action)
+            Logging.warning("[SiN Contracts] remote request failed action=%s", action)
         end
     end
     result = tostring(result or "Unavailable: no diagnostic result.")

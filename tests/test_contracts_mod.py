@@ -108,7 +108,7 @@ class ContractsModTests(unittest.TestCase):
         preference_block = re.search(
             r"NATIVE_ELIGIBLE_FIELD_PREFERENCE_TYPES\s*=\s*\{([^}]+)\}", source, re.S)
         self.assertIsNotNone(preference_block)
-        for mission_type in ("plowMission", "cultivateMission", "sowMission", "harvestMission", "mowMission"):
+        for mission_type in ("plowMission", "cultivateMission", "sowMission", "harvestMission", "mowMission", "stonePickMission"):
             self.assertRegex(preference_block.group(1), rf"{mission_type}\s*=\s*true")
         self.assertIn("EMPTY_CYCLES_BEFORE_SUPPLY_RECOVERY = 3", source)
         self.assertIn("DEBUG = false", source)

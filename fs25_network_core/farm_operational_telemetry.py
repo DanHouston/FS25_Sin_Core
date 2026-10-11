@@ -70,7 +70,7 @@ def validate_farm_operation(row):
         raise FarmOperationalValidationError("operation must be an object")
     kind = _label(row, "kind", 32)
     if kind not in {"sale", "storage_in", "storage_out", "ai_started", "ai_stopped",
-                    "vehicle_usage"}:
+                    "vehicle_usage", "contract_work"}:
         raise FarmOperationalValidationError("unknown operation kind")
     value = {
         "kind": kind,
@@ -116,6 +116,44 @@ def validate_farm_operation(row):
         else:
             value["duration_ms"] = _integer(row, "duration_ms", 0, 9007199254740991, required=False)
             value["stop_reason"] = _label(row, "stop_reason", 256, required=False)
+    elif kind == "contract_work":
+        actor_kind = _label(row, "actor_kind", 16)
+        if actor_kind not in {"player", "ai", "unknown"}:
+            raise FarmOperationalValidationError("actor_kind is invalid")
+        start_ms = _integer(row, "interval_start_ms", 0, 9007199254740991)
+        end_ms = _integer(row, "interval_end_ms", 1, 9007199254740991)
+        if end_ms <= start_ms or end_ms - start_ms > 60000:
+            raise FarmOperationalValidationError("contract work interval must be 1-60000ms")
+        productive_ms = _integer(row, "productive_ms", 0, 60000)
+        if productive_ms > end_ms - start_ms:
+            raise FarmOperationalValidationError("productive_ms exceeds the interval")
+        unique_user_id = _label(row, "unique_user_id", 256, required=False)
+        if actor_kind == "player" and not unique_user_id:
+            raise FarmOperationalValidationError("player contribution requires stable player identity")
+        if actor_kind != "player" and unique_user_id:
+            raise FarmOperationalValidationError("only player contributions may include player identity")
+        worked_area = _number(row, "worked_area_ha", minimum=Decimal(0))
+        if worked_area <= 0:
+            raise FarmOperationalValidationError("worked_area_ha must be positive")
+        value.update({
+            "mission_id": _label(row, "mission_id", 128),
+            "mission_type": _label(row, "mission_type", 128),
+            "field_id": _label(row, "field_id", 64),
+            "actor_kind": actor_kind,
+            "unique_user_id": unique_user_id or None,
+            "job_id": _label(row, "job_id", 128, required=False) or None,
+            "activity_type": _label(row, "activity_type", 64),
+            "vehicle_id": _label(row, "vehicle_id", 256, required=False) or None,
+            "implement_id": _label(row, "implement_id", 256, required=False) or None,
+            "productive_ms": productive_ms,
+            "worked_area_ha": worked_area,
+            "interval_start_ms": start_ms,
+            "interval_end_ms": end_ms,
+            "evidence": _label(row, "evidence", 64),
+            "attribution_reason": _label(row, "attribution_reason", 64, required=False) or None,
+            "runtime_id": _label(row, "runtime_id", 128, required=False) or None,
+            "work_ticks": _integer(row, "work_ticks", 1, 9007199254740991),
+        })
     else:
         value.update({
             "vehicle_id": _label(row, "vehicle_id", 256),

@@ -50,6 +50,34 @@ class NativeContractService:
             "accepting_player": str(payload.get("accepting_player") or ""),
             "last_event_id": str(event_id), "updated_at": now,
         }
+        # Keep an append-only, idempotent lifecycle history beside the current
+        # projection. The observation clock is Central receipt time; native
+        # game-clock fields are retained separately and are never substituted.
+        history_id = hashlib.sha256(("|".join((str(server_key), str(save_key),
+                                               str(world_id or "legacy"), str(event_id)))).encode("utf-8")).hexdigest()
+        history = {"_id": history_id, "server_key": str(server_key),
+                   "save_key": str(save_key), "world_id": str(world_id or "legacy"),
+                   "mission_id": mission_id, "event_id": str(event_id),
+                   "lifecycle": lifecycle, "mission_type": fields["mission_type"],
+                   "outcome": ("completed" if lifecycle == "completed" else
+                               "cancelled" if lifecycle == "cancelled" else
+                               "expired" if lifecycle == "expired" else None),
+                   "finish_state": str(payload.get("finish_state") or "") or None,
+                   "field_id": fields["field_id"], "field_name": fields["field_name"],
+                   "area_ha": fields["area_ha"], "accepting_farm_id": fields["accepting_farm_id"],
+                   "accepting_player": fields["accepting_player"], "reward": fields["reward"],
+                   "actual_payout": _number(payload, "actual_payout"),
+                   "game_runtime_ms": _number(payload, "game_runtime_ms"),
+                   "game_year": _number(payload, "game_year"),
+                   "game_period": _number(payload, "game_period"),
+                   "game_day": _number(payload, "game_day"),
+                   "game_time_ms": _number(payload, "game_time_ms"),
+                   "observed_at": now}
+        self.db.native_contract_lifecycle_events.update_one(
+            {"_id": history_id}, {"$setOnInsert": history}, upsert=True)
+        fields[f"{lifecycle}_observed_at"] = now
+        if history["actual_payout"] is not None:
+            fields["actual_payout"] = history["actual_payout"]
         self.db.native_contracts.update_one(
             {"_id": key},
             {"$setOnInsert": {"server_key": str(server_key), "save_key": str(save_key),

@@ -37,7 +37,10 @@ local OPERATION_CHECKPOINT_FIELDS = {
     "event_count", "stock_after_liters", "runtime_node", "position_x", "position_z",
     "station_price", "station_name", "placeable_id", "job_id", "job_type",
     "vehicle_id", "duration_ms", "stop_reason", "operating_ms", "operating_after_ms",
-    "distance_estimated_m",
+    "distance_estimated_m", "mission_id", "mission_type", "field_id", "actor_kind",
+    "unique_user_id", "activity_type", "implement_id", "productive_ms", "worked_area_ha",
+    "interval_start_ms", "interval_end_ms", "evidence", "work_ticks", "attribution_reason",
+    "runtime_id",
 }
 
 local function safeCheckpointPart(value)
@@ -60,6 +63,8 @@ function FS25SiNServer:initializeFarmOperations()
     self.vehicleUsage = {}
     self.storageIdentityCache = setmetatable({}, {__mode="k"})
     self.activeAIJobs = setmetatable({}, {__mode="k"})
+    self.activeAIJobsByVehicleId = {}
+    self.contractWorkBuckets = {}
     local mission = g_currentMission
     local saveId = mission ~= nil and mission.missionInfo ~= nil
         and mission.missionInfo.savegameIndex or 0
@@ -72,6 +77,7 @@ function FS25SiNServer:initializeFarmOperations()
         .. safeCheckpointPart(saveId) .. "-" .. safeCheckpointPart(self.operationCheckpointScope.worldId)) or nil
     self:loadFarmOperationsCheckpoint()
     self:installFarmOperationHooks()
+    self:installContractWorkHook()
     Logging.info("[SiN Farm Telemetry] hooks sales=%s storage=%s ai=%s",
         tostring(SellingStation ~= nil and SellingStation.sellFillType == self.saleHookWrapper),
         tostring(Storage ~= nil and Storage.setFillLevel == self.storageHookWrapper),
@@ -98,6 +104,7 @@ function FS25SiNServer:newFarmOperation(kind, farmId, values)
     values.game_year = env ~= nil and env.currentYear or ""
     values.game_time_ms = env ~= nil and type(env.dayTime) == "number"
         and math.floor(env.dayTime) or ""
+    values.runtime_id = tostring(self.runtimeNonce or "unknown")
     local record = {eventId=string.format("%s-%s-operation-%d", tostring(self.serverKey or "unbound"),
         tostring(self.runtimeNonce or "runtime"), self.operationSequence), values=values}
     table.insert(self.operationWindow, record)
@@ -325,10 +332,13 @@ function FS25SiNServer:onFarmAIJobStarted(job, farmId)
     if not validFarmId(farmId) then return end
     local id = nativeJobId(job)
     if id == nil then return end
-    self.activeAIJobs[job] = {farmId=tonumber(farmId), startMs=type(g_time) == "number" and g_time or nil}
+    local vehicleId = nativeVehicleId(job)
+    self.activeAIJobs[job] = {farmId=tonumber(farmId), startMs=type(g_time) == "number" and g_time or nil,
+        vehicleId=vehicleId}
+    if vehicleId ~= nil then self.activeAIJobsByVehicleId[vehicleId] = {jobId=id, farmId=tonumber(farmId)} end
     self:newFarmOperation("ai_started", farmId, {job_id=id,
         job_type=tostring(job.name or job.className or "unknown"),
-        vehicle_id=nativeVehicleId(job) or ""})
+        vehicle_id=vehicleId or ""})
 end
 
 function FS25SiNServer:onFarmAIJobStopped(job, aiMessage)
@@ -336,12 +346,142 @@ function FS25SiNServer:onFarmAIJobStopped(job, aiMessage)
     self.activeAIJobs[job] = nil
     local farmId = active ~= nil and active.farmId or (job ~= nil and job.farmId or nil)
     local id = nativeJobId(job)
+    if active ~= nil and active.vehicleId ~= nil then
+        local current = self.activeAIJobsByVehicleId[active.vehicleId]
+        if current ~= nil and current.jobId == id then self.activeAIJobsByVehicleId[active.vehicleId] = nil end
+    end
     if id == nil or not validFarmId(farmId) then return end
     local duration = active ~= nil and active.startMs ~= nil and type(g_time) == "number"
         and math.floor(math.max(0, g_time - active.startMs)) or ""
     self:newFarmOperation("ai_stopped", farmId, {job_id=id,
         vehicle_id=nativeVehicleId(job) or "", duration_ms=duration,
         stop_reason=aiMessage ~= nil and tostring(aiMessage) or ""})
+end
+
+local function contractWorkIdentity(rootVehicle, aiJob)
+    local controller = rootVehicle ~= nil and rootVehicle.controllerUserId or nil
+    if controller ~= nil and g_currentMission ~= nil and g_currentMission.userManager ~= nil
+        and type(g_currentMission.userManager.getUniqueUserIdByUserId) == "function" then
+        local ok, uniqueId = pcall(g_currentMission.userManager.getUniqueUserIdByUserId,
+            g_currentMission.userManager, controller)
+        if ok and uniqueId ~= nil and tostring(uniqueId) ~= "" then
+            return "player", tostring(uniqueId), nil
+        end
+        return "unknown", nil, "stable_player_identity_unavailable"
+    end
+    if aiJob ~= nil then return "ai", nil, nil end
+    return "unknown", nil, "operator_unavailable"
+end
+
+local function contractWorkMission(workArea)
+    local manager = g_missionManager
+    if manager == nil or type(manager.getMissionAtWorldPosition) ~= "function"
+        or getWorldTranslation == nil or workArea == nil then return nil end
+    local x, z, count = 0, 0, 0
+    for _, node in ipairs({workArea.start, workArea.width, workArea.height}) do
+        if node ~= nil and node ~= 0 then
+            local ok, nx, _, nz = pcall(getWorldTranslation, node)
+            if ok and type(nx) == "number" and type(nz) == "number" then
+                x, z, count = x + nx, z + nz, count + 1
+            end
+        end
+    end
+    if count == 0 then return nil end
+    local ok, mission = pcall(manager.getMissionAtWorldPosition, manager, x / count, z / count)
+    if not ok or mission == nil or type(mission.getIsRunning) ~= "function" then return nil end
+    local runningOk, running = pcall(mission.getIsRunning, mission)
+    if not runningOk or running ~= true then return nil end
+    local missionId = type(mission.getUniqueId) == "function" and mission:getUniqueId()
+        or mission.uniqueId or mission.missionId
+    local field = type(mission.getField) == "function" and mission:getField() or mission.field
+    local fieldId = field ~= nil and ((type(field.getId) == "function" and field:getId())
+        or field.id or field.fieldId) or nil
+    local missionType = mission.type or mission.missionType or mission.typeName or "unknown"
+    if type(missionType) == "table" then missionType = missionType.name or missionType.typeName or "unknown" end
+    if missionId == nil or fieldId == nil or not validFarmId(mission.farmId) then return nil end
+    return tostring(missionId), tostring(missionType), tostring(fieldId), tonumber(mission.farmId)
+end
+
+-- WorkArea.onUpdateTick is the native point at which FS25 stores hectares only
+-- after a processing callback returned realArea > 0. Aggregate those real
+-- work results in memory into <=60s rows; never write a mailbox file per frame.
+function FS25SiNServer:observeContractWorkTick(vehicle, dt)
+    local missionState = g_currentMission
+    local spec = vehicle ~= nil and vehicle.spec_workArea or nil
+    if missionState == nil or missionState.isRunning ~= true or spec == nil
+        or type(spec.workAreas) ~= "table" or type(dt) ~= "number" or dt <= 0 then return end
+    local rootVehicle = type(vehicle.getRootVehicle) == "function" and vehicle:getRootVehicle() or vehicle
+    local vehicleId = rootVehicle ~= nil and type(rootVehicle.getUniqueId) == "function"
+        and rootVehicle:getUniqueId() or nil
+    local implementId = type(vehicle.getUniqueId) == "function" and vehicle:getUniqueId() or nil
+    local aiJob = vehicleId ~= nil and self.activeAIJobsByVehicleId[tostring(vehicleId)] or nil
+    local tickedBuckets = {}
+    for _, workArea in pairs(spec.workAreas) do
+        local hectares = tonumber(workArea.lastWorkedHectares)
+        if hectares ~= nil and hectares > 0 and workArea.lastProcessingTime == missionState.time then
+            local missionId, missionType, fieldId, acceptingFarmId = contractWorkMission(workArea)
+            if missionId ~= nil then
+                local actorKind, uniqueUserId, unknownReason = contractWorkIdentity(rootVehicle, aiJob)
+                local activity = tostring(workArea.type or "unknown")
+                if g_workAreaTypeManager ~= nil and type(g_workAreaTypeManager.getWorkAreaTypeByIndex) == "function" then
+                    local typeOk, workType = pcall(g_workAreaTypeManager.getWorkAreaTypeByIndex,
+                        g_workAreaTypeManager, workArea.type)
+                    if typeOk and type(workType) == "table" then
+                        activity = tostring(workType.name or workType.typeName or activity)
+                    end
+                end
+                local now = math.floor(tonumber(missionState.time) or 0)
+                local intervalStart = math.floor(now / 60000) * 60000
+                local actorKey = uniqueUserId or (aiJob ~= nil and aiJob.jobId) or unknownReason or ""
+                local key = table.concat({missionId, tostring(acceptingFarmId), actorKind,
+                    tostring(actorKey), tostring(vehicleId or ""), tostring(implementId or ""),
+                    activity, tostring(intervalStart)}, "|")
+                local record = self.contractWorkBuckets[key]
+                if record == nil then
+                    record = self:newFarmOperation("contract_work", acceptingFarmId, {
+                        mission_id=missionId, mission_type=missionType, field_id=fieldId,
+                        actor_kind=actorKind, unique_user_id=uniqueUserId or "",
+                        job_id=aiJob ~= nil and aiJob.jobId or "", activity_type=activity,
+                        vehicle_id=tostring(vehicleId or ""), implement_id=tostring(implementId or ""),
+                        productive_ms=0, worked_area_ha=0,
+                        interval_start_ms=math.floor(math.max(intervalStart, now - dt)), interval_end_ms=now,
+                        evidence="work_area_processing", work_ticks=0,
+                        attribution_reason=unknownReason or "",
+                        runtime_id=tostring(self.runtimeNonce or "unknown")})
+                    if record ~= nil then self.contractWorkBuckets[key] = record end
+                end
+                if record ~= nil then
+                    if tickedBuckets[key] ~= true then
+                        record.values.productive_ms = record.values.productive_ms + math.floor(math.min(dt, 60000))
+                        record.values.work_ticks = record.values.work_ticks + 1
+                        tickedBuckets[key] = true
+                    end
+                    record.values.worked_area_ha = record.values.worked_area_ha + hectares
+                    record.values.interval_start_ms = math.min(record.values.interval_start_ms,
+                        math.floor(math.max(intervalStart, now - dt)))
+                    record.values.interval_end_ms = math.max(record.values.interval_end_ms, now)
+                    self.operationCheckpointDirty = true
+                end
+            end
+        end
+    end
+end
+
+function FS25SiNServer:installContractWorkHook()
+    if self.contractWorkHookInstalled == true or WorkArea == nil
+        or type(WorkArea.onUpdateTick) ~= "function" or Utils == nil
+        or type(Utils.appendedFunction) ~= "function" then return false end
+    local original = WorkArea.onUpdateTick
+    local wrapper = Utils.appendedFunction(original, function(vehicle, dt)
+        if g_currentMission ~= nil and g_currentMission.getIsServer ~= nil
+            and g_currentMission:getIsServer() then
+            pcall(FS25SiNServer.observeContractWorkTick, FS25SiNServer, vehicle, dt)
+        end
+    end)
+    WorkArea.onUpdateTick = wrapper
+    self.contractWorkHookOriginal, self.contractWorkHookWrapper = original, wrapper
+    self.contractWorkHookInstalled = true
+    return true
 end
 
 function FS25SiNServer:installFarmOperationHooks()
@@ -406,6 +546,7 @@ function FS25SiNServer:flushFarmOperations()
     end
     self.operationWindow = {}
     self.operationAggregates = {}
+    self.contractWorkBuckets = {}
     if #self.operationPending == 0 then return end
     local count = math.min(#self.operationPending, 128)
     local batchId = self.operationPending[1].eventId .. "-through-"
@@ -521,6 +662,7 @@ end
 function FS25SiNServer:updateFarmOperations(dt)
     if type(self.operationPending) ~= "table" then self:initializeFarmOperations() end
     self:installFarmOperationHooks()
+    self:installContractWorkHook()
     self.vehicleSampleElapsed = self.vehicleSampleElapsed + dt
     self.vehiclePublishElapsed = self.vehiclePublishElapsed + dt
     if self.vehicleSampleElapsed >= 10000 then
@@ -560,6 +702,9 @@ function FS25SiNServer:shutdownFarmOperations()
     end
     if Storage ~= nil and Storage.setFillLevel == self.storageHookWrapper then
         Storage.setFillLevel = self.storageHookOriginal
+    end
+    if WorkArea ~= nil and WorkArea.onUpdateTick == self.contractWorkHookWrapper then
+        WorkArea.onUpdateTick = self.contractWorkHookOriginal
     end
     if self.aiJobHooksInstalled and g_messageCenter ~= nil
         and type(g_messageCenter.unsubscribe) == "function" then

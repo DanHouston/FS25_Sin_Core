@@ -547,7 +547,9 @@ function FS25SiNServer:onNativeContractLifecycle(envelope)
     -- also contains an acknowledgment callback and must never enter the file.
     local fields = {"mission_id", "mission_type", "field_id", "field_name", "area_ha",
         "farmland_id", "reward", "estimated_hours", "estimated_dollars_per_hour",
-        "accepting_farm_id", "accepting_farm_name", "accepting_player"}
+        "accepting_farm_id", "accepting_farm_name", "accepting_player",
+        "game_runtime_ms", "game_year", "game_period", "game_day", "game_time_ms",
+        "finish_state"}
     local payload = {}
     for _, key in ipairs(fields) do
         local value = source[key]
