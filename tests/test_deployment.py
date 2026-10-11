@@ -367,6 +367,8 @@ class DeploymentPackagingTests(unittest.TestCase):
         self.assertNotIn('http://192.168.1.185:8787', updater)
         self.assertIn('SiN FS25 Agent', updater)
         self.assertIn('Set-ScheduledTask -TaskName $AgentTaskName -Action $action', updater)
+        self.assertIn('if ($actionMatches) { return }', updater)
+        self.assertIn('The task\'s saved Windows credentials may need to be refreshed in Task Scheduler.', updater)
         self.assertIn('Start-ScheduledTask -TaskName $AgentTaskName', updater)
         self.assertNotIn('Start-Process -FilePath "python.exe"', updater)
         self.assertNotIn('FS25_SiN_Server.zip', updater)

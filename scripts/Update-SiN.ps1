@@ -55,7 +55,34 @@ function Set-AgentTaskAction {
     $arguments = '-m fs25_network_core.agent --watch --backend-url "{0}" --mailbox-dir "{1}" --interval {2}' -f `
         $ApiUrl, $MailboxDir, $PollInterval
     $action = New-ScheduledTaskAction -Execute $python -Argument $arguments -WorkingDirectory $AgentRoot
-    Set-ScheduledTask -TaskName $AgentTaskName -Action $action -ErrorAction Stop | Out-Null
+    $task = Get-AgentTask
+    $currentActions = @($task.Actions)
+    $expectedExecute = [IO.Path]::GetFullPath($python)
+    $expectedWorkingDirectory = [IO.Path]::GetFullPath($AgentRoot)
+    $currentExecute = ""
+    $currentWorkingDirectory = ""
+    if ($currentActions.Count -eq 1) {
+        $currentExecute = [string]$currentActions[0].Execute
+        $currentWorkingDirectory = [string]$currentActions[0].WorkingDirectory
+        if ($currentExecute) {
+            $currentExecute = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($currentExecute))
+        }
+        if ($currentWorkingDirectory) {
+            $currentWorkingDirectory = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($currentWorkingDirectory))
+        }
+    }
+    $actionMatches = $currentActions.Count -eq 1 -and
+        $currentExecute -ieq $expectedExecute -and
+        [string]$currentActions[0].Arguments -ceq $arguments -and
+        $currentWorkingDirectory -ieq $expectedWorkingDirectory
+    if ($actionMatches) { return }
+
+    try {
+        Set-ScheduledTask -TaskName $AgentTaskName -Action $action -ErrorAction Stop | Out-Null
+    } catch {
+        $principal = $task.Principal
+        throw "Could not update the Agent scheduled-task action for '$($principal.UserId)' (logon type $($principal.LogonType)): $($_.Exception.Message). The task's saved Windows credentials may need to be refreshed in Task Scheduler."
+    }
 }
 
 function Assert-CanonicalMailbox {
