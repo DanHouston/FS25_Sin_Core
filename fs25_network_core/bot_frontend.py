@@ -1185,6 +1185,41 @@ class NetworkBot(discord.Client):
         async def farm_report_server_autocomplete(interaction: discord.Interaction, current: str):
             return await server_choices(interaction, current)
 
+        @self.tree.command(name="farm_report_admin", description="Staff: view a farm's finance, activity, and contract work")
+        @app_commands.describe(farm_id="Farm ID from the current server snapshot")
+        @app_commands.check(channel_check)
+        @app_commands.default_permissions(administrator=True)
+        async def farm_report_admin(interaction: discord.Interaction, server: str,
+                                    farm_id: app_commands.Range[int, 1, 254],
+                                    days: app_commands.Range[int, 1, 30] = 7):
+            staff_check(interaction)
+            config = server_config(interaction, server)
+            await interaction.response.defer(ephemeral=True)
+            try:
+                save_key = selected_save(config)
+                runtime = await asyncio.to_thread(self.server_registry.active_runtime, server)
+                if (not isinstance(runtime, dict) or str(runtime.get("save_key") or "") != str(save_key)
+                        or not str(runtime.get("world_id") or "")):
+                    raise ValueError("No active world generation is available for this server/save")
+                report = await asyncio.to_thread(self.farm_reports.for_admin, server, save_key,
+                                                 runtime["world_id"], farm_id, days)
+            except ValueError as error:
+                await interaction.followup.send(str(error), ephemeral=True)
+                return
+            except PyMongoError:
+                logging.exception("Admin farm report temporarily unavailable")
+                await interaction.followup.send(
+                    "Farm report is temporarily unavailable; please try again later.", ephemeral=True)
+                return
+            report = {**report, "farm_name": discord.utils.escape_markdown(
+                str(report.get("farm_name") or f"Farm {farm_id}"))}
+            await interaction.followup.send(format_farm_report(report), ephemeral=True,
+                                            allowed_mentions=discord.AllowedMentions.none())
+
+        @farm_report_admin.autocomplete("server")
+        async def farm_report_admin_server_autocomplete(interaction: discord.Interaction, current: str):
+            return await server_choices(interaction, current, "reconcile")
+
         @self.tree.command(name="contract_report", description="Staff: report measured player/AI work on a native FS25 contract")
         @app_commands.describe(contract_code="Choose the matching field and contract type; no code memorization needed")
         @app_commands.check(channel_check)

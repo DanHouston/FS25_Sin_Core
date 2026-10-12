@@ -32,13 +32,22 @@ class FarmReportService:
         self.worlds = WorldGenerationRegistry(database)
 
     def for_manager(self, discord_id, server_key, save_key, world_id, days=7):
-        if type(days) is not int or not 1 <= days <= 30:
-            raise ValueError("Report window must be 1-30 days")
         active_world = self.worlds.require_active(server_key, save_key, world_id)
         link = self.admin.lookup(discord_id, server_key, save_key, world_id=active_world)
         farm_id = link.get("farm_id")
         if type(farm_id) is not int or not 1 <= farm_id <= 254:
             raise ValueError("verified farm manager assignment is unavailable")
+        return self._for_farm(server_key, save_key, active_world, farm_id, days)
+
+    def for_admin(self, server_key, save_key, world_id, farm_id, days=7):
+        active_world = self.worlds.require_active(server_key, save_key, world_id)
+        if type(farm_id) is not int or not 1 <= farm_id <= 254:
+            raise ValueError("Farm ID must be between 1 and 254")
+        return self._for_farm(server_key, save_key, active_world, farm_id, days)
+
+    def _for_farm(self, server_key, save_key, active_world, farm_id, days):
+        if type(days) is not int or not 1 <= days <= 30:
+            raise ValueError("Report window must be 1-30 days")
         snapshot = self.db.server_snapshots.find_one({
             "server_key": str(server_key), "save_key": str(save_key),
             "world_id": active_world, "source": "game"}, sort=[("received_at", -1)])
@@ -77,6 +86,17 @@ class FarmReportService:
                         "liters": {"$sum": "$liters"}}},
         ]))
         operations.extend(storage)
+        completed_contracts = self.db.native_contracts.count_documents({
+            "server_key": str(server_key), "save_key": str(save_key),
+            "world_id": active_world, "accepting_farm_id": str(farm_id),
+            "lifecycle": "completed", "completed_observed_at": {"$gte": start, "$lte": end}})
+        contract_work = list(self.db.farm_operational_events.aggregate([
+            {"$match": {**match, "kind": "contract_work"}},
+            {"$group": {"_id": "$actor_kind", "hectares": {"$sum": "$worked_area_ha"}}},
+        ]))
+        contract_area = {str(row.get("_id") or "unknown"): _numeric_float(row.get("hectares"))
+                         for row in contract_work}
+        attributed_area = contract_area.get("player", 0) + contract_area.get("ai", 0)
         finance_rows = [{"name": str(row.get("_id") or "UNKNOWN"),
                          "income": float(row.get("income") or 0),
                          "expense": float(row.get("expense") or 0),
@@ -93,7 +113,11 @@ class FarmReportService:
                 "world_id": active_world, "farm_id": farm_id,
                 "farm_name": farms.get(str(farm_id), farms.get(farm_id)),
                 "start": start, "end": end, "days": days,
-                "finance": finance_rows, "operations": operation_rows}
+                "finance": finance_rows, "operations": operation_rows,
+                "completed_contracts": completed_contracts,
+                "contract_player_pct": 100 * contract_area.get("player", 0) / attributed_area if attributed_area else None,
+                "contract_ai_pct": 100 * contract_area.get("ai", 0) / attributed_area if attributed_area else None,
+                "contract_unknown_ha": contract_area.get("unknown", 0)}
 
 
 def format_farm_report(report):
@@ -110,6 +134,14 @@ def format_farm_report(report):
              f"Last {report['days']} real-world day(s) · through <t:{int(report['end'].timestamp())}:f>",
              f"Native finance changes: +{_money(income)} / -{_money(expense)} "
              f"(net {_money(income - expense)})"]
+    lines.append(f"Completed native contracts: {report.get('completed_contracts', 0)}")
+    player_pct, ai_pct = report.get("contract_player_pct"), report.get("contract_ai_pct")
+    if player_pct is None:
+        lines.append("Contract work attribution: unavailable (no measured player/AI work in this window)")
+    else:
+        extra = (f" · {report['contract_unknown_ha']:.4f} ha unattributed"
+                 if report.get("contract_unknown_ha") else "")
+        lines.append(f"Contract work by measured area: Player {player_pct:.1f}% / AI {ai_pct:.1f}%{extra}")
     if finance:
         for label, field in (("Income", "income"), ("Expenses", "expense")):
             leaders = _top([row for row in finance if row[field] > 0], field)

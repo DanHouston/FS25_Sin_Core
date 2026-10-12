@@ -141,6 +141,12 @@ AI-job hours, and sampled vehicle operating time/distance. It does not backfill
 history or claim storage movement is harvest yield. Current bank checking is
 not a farm-owned asset and is deliberately omitted.
 
+`/farm_report_admin [server] [farm_id] [days]` gives staff the same ephemeral
+report for any farm in the current authoritative snapshot. It includes native
+contracts observed completed in the selected window and the player/AI split by
+measured contract-work area. Unknown work is excluded from the percentage
+denominator and its hectares are shown separately.
+
 The configured `#market` channel receives one dated daily server-finance card
 after 00:10 Eastern time. It combines all verified active server worlds for
 the preceding real-world day and updates the same card if late observations
