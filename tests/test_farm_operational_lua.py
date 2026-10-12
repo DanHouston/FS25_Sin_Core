@@ -74,6 +74,111 @@ def add_checkpoint_mock(lua):
 
 
 class FarmOperationalLuaTests(unittest.TestCase):
+    def test_owned_field_definition_hotspots_hide_only_labels_and_restore_when_sold(self):
+        lua = runtime()
+        lua.execute(r'''
+            g_currentMission.getIsClient = function() return true end
+            local owners = {[63]=3, [64]=3, [8]=2}
+            local function hotspot()
+                local value = {visible=true}
+                function value:setVisible(visible) self.visible = visible end
+                function value:getVisible() return self.visible end
+                return value
+            end
+            local definitions, hotspots = {}, {}
+            for fieldNumber=1,79 do
+                local marker = fieldNumber * 10
+                local value = hotspot()
+                definitions[fieldNumber] = {
+                    fieldNumber=fieldNumber, fieldMapIndicator=marker, fieldMapHotspot=value}
+                hotspots[fieldNumber] = value
+            end
+            g_farmManager = nil
+            g_currentMission.farmManager = {getFarmById=function(_, farmId)
+                if farmId == 3 then return {farmId=3, name="SIN HARVEST"} end
+                if farmId == 2 then return {farmId=2, name="Other Farm"} end
+            end}
+            g_currentMission.fieldDefinitionBase = {fieldDefs=definitions}
+            g_farmlandManager = {getFarmlandOwner=function(_, farmlandId) return owners[farmlandId] end}
+            function g_farmlandManager:getFarmlandIdAtWorldPosition(x, z) return math.floor(x / 10) end
+            getWorldTranslation = function(marker) return marker, 0, 0 end
+            diagnosticLog = ""
+            Logging.info = function(message, ...)
+                local line = string.format(message, ...)
+                if string.find(line, "field marker suppression", 1, true) then diagnosticLog = line end
+            end
+            FS25SiNServer.fieldMarkerOriginalVisibility = {}
+            FS25SiNServer:updateOwnedFieldMarkers()
+            afterHide63, afterHide64, unaffectedOtherFarm =
+                hotspots[63].visible, hotspots[64].visible, hotspots[8].visible
+            owners[63] = 2
+            FS25SiNServer:updateOwnedFieldMarkers()
+            afterSale63 = hotspots[63].visible
+            fieldDefinitionsPreserved = #definitions == 79
+        ''')
+        self.assertFalse(lua.eval("afterHide63"), lua.eval("diagnosticLog"))
+        self.assertFalse(lua.eval("afterHide64"))
+        self.assertTrue(lua.eval("unaffectedOtherFarm"))
+        self.assertTrue(lua.eval("afterSale63"))
+        self.assertTrue(lua.eval("fieldDefinitionsPreserved"))
+        self.assertIn("targetFarm=3", lua.eval("diagnosticLog"))
+        self.assertIn("owned=1", lua.eval("diagnosticLog"))
+        self.assertIn("fieldDefinitions=79 hotspots=79", lua.eval("diagnosticLog"))
+
+    def test_owned_farmland_hotspots_use_actual_pda_map_and_preserve_other_hotspots(self):
+        lua = runtime()
+        lua.execute(r'''
+            g_currentMission.getIsClient = function() return true end
+            local owners = {[63]=3, [64]=3, [8]=2}
+            local function farmlandHotspot(id)
+                local value = {visible=true, farmland={id=id, name=tostring(id)}}
+                function value:isa(class) return class == FarmlandHotspot end
+                function value:getFarmland() return self.farmland end
+                function value:setIsVisible(visible) self.visible = visible end
+                function value:getIsVisible() return self.visible end
+                return value
+            end
+            local common63, common64, otherFarm = farmlandHotspot(63), farmlandHotspot(64), farmlandHotspot(8)
+            local shop = {visible=true, setVisible=function(self, visible) self.visible=visible end}
+            FarmlandHotspot = {}
+            g_currentMission.fieldDefinitionBase = nil
+            Utils = {prependedFunction=function(original, callback)
+                return function(self, ...)
+                    callback(self, ...)
+                    return original(self, ...)
+                end
+            end}
+            IngameMapElement = {draw=function(self) self.nativeDrawCalled=true end}
+            g_currentMission.farmManager = {getFarmById=function(_, farmId)
+                if farmId == 3 then return {farmId=3, name="SiN Harvest"} end
+                if farmId == 2 then return {farmId=2, name="Other Farm"} end
+            end}
+            g_farmlandManager = {getFarmlandOwner=function(_, farmlandId) return owners[farmlandId] end}
+            diagnosticLog = ""
+            Logging.info = function(message, ...)
+                local line = string.format(message, ...)
+                if string.find(line, "field marker suppression", 1, true) then diagnosticLog = line end
+            end
+            FS25SiNServer.fieldMarkerOriginalVisibility = {}
+            FS25SiNServer:installIngameMapHotspotHook()
+            mapElement = {ingameMap={hotspots={common63, common64, otherFarm, shop}}}
+            IngameMapElement.draw(mapElement)
+            hidden63, hidden64 = common63.visible, common64.visible
+            visibleOtherFarm, visibleShop = otherFarm.visible, shop.visible
+            mapReceivedNativeDraw = mapElement.nativeDrawCalled
+            owners[63] = 2
+            g_time = 8000
+            IngameMapElement.draw(mapElement)
+            restored63 = common63.visible
+        ''')
+        self.assertFalse(lua.eval("hidden63"), lua.eval("diagnosticLog"))
+        self.assertFalse(lua.eval("hidden64"))
+        self.assertTrue(lua.eval("visibleOtherFarm"))
+        self.assertTrue(lua.eval("visibleShop"))
+        self.assertTrue(lua.eval("mapReceivedNativeDraw"))
+        self.assertTrue(lua.eval("restored63"))
+        self.assertIn("source=ingameMap.hotspots", lua.eval("diagnosticLog"))
+
     @staticmethod
     def contract_work_runtime():
         lua = runtime()
@@ -112,6 +217,17 @@ class FarmOperationalLuaTests(unittest.TestCase):
         self.assertEqual(lua.eval("#FS25SiNServer.operationWindow"), 1)
         self.assertEqual(lua.eval("FS25SiNServer.operationWindow[1].values.actor_kind"), "ai")
         self.assertEqual(lua.eval("FS25SiNServer.operationWindow[1].values.unique_user_id"), "")
+
+    def test_active_ai_job_takes_precedence_over_lingering_controller_identity(self):
+        lua = self.contract_work_runtime()
+        lua.execute(r'''
+            FS25SiNServer.activeAIJobsByVehicleId["tractor-1"] = {jobId="ai-job-1", farmId=2}
+            FS25SiNServer:observeContractWorkTick(tool, 1000)
+        ''')
+        row = lua.eval("FS25SiNServer.operationWindow[1].values")
+        self.assertEqual(row.actor_kind, "ai")
+        self.assertEqual(row.unique_user_id, "")
+        self.assertEqual(row.job_id, "ai-job-1")
 
     def test_contract_work_captures_only_processed_hectares_and_explicit_actor_source(self):
         lua = runtime()
@@ -400,10 +516,71 @@ class FarmOperationalLuaTests(unittest.TestCase):
             vehicleHours = 120000
             FS25SiNServer:sampleFarmVehicleUsage()
             FS25SiNServer:publishFarmVehicleUsage()
+            diagnosticLog = ""
+            Logging.info = function(message, ...)
+                diagnosticLog = string.format(message, ...)
+            end
+            FS25SiNServer:logFarmVehicleUsageDiagnostics()
         ''')
         self.assertEqual(lua.eval("#FS25SiNServer.operationWindow"), 1)
         self.assertEqual(lua.eval("FS25SiNServer.operationWindow[1].values.operating_ms"), 20000)
         self.assertEqual(lua.eval("FS25SiNServer.operationWindow[1].values.distance_estimated_m"), 50)
+        self.assertIn("operatingAdvances=2", lua.eval("diagnosticLog"))
+        self.assertIn("operatingDeltaMs=20000", lua.eval("diagnosticLog"))
+        self.assertIn("distanceMeters=50.00", lua.eval("diagnosticLog"))
+        self.assertIn("queuedOperatingMs=20000", lua.eval("diagnosticLog"))
+        self.assertIn("queuedDistanceMeters=50.00", lua.eval("diagnosticLog"))
+
+    def test_vehicle_sampler_logs_bounded_diagnostic_summary_for_ineligible_objects(self):
+        lua = runtime()
+        lua.execute(r'''
+            diagnosticLog = ""
+            Logging.info = function(message, ...)
+                diagnosticLog = string.format(message, ...)
+            end
+            g_currentMission.vehicleSystem = {getVehicles=function()
+                return {{isPallet=true}, {}, {
+                    getOwnerFarmId=function() return 2 end,
+                    getUniqueId=function() return "vehicle-1" end,
+                    getOperatingTime=function() return 1000 end,
+                    rootNode=99}}
+            end}
+            FS25SiNServer:updateFarmOperations(60000)
+        ''')
+        output = lua.eval("diagnosticLog")
+        self.assertIn("vehicle sampler samples=1", output)
+        self.assertIn("vehiclesSeen=3", output)
+        self.assertIn("excluded=1", output)
+        self.assertIn("missingIdentityApi=1", output)
+        self.assertIn("tracked=1", output)
+        self.assertIn("operatingReadable=1", output)
+        self.assertIn("positionReadable=1", output)
+
+    def test_vehicle_sample_uses_native_vehicle_system_collection(self):
+        lua = runtime()
+        lua.execute(r'''
+            vehicleHours = 5000
+            vehicle = {rootNode=99,
+                getOwnerFarmId=function() return 2 end,
+                getUniqueId=function() return "vehicle-native-list" end,
+                getOperatingTime=function() return vehicleHours end}
+            g_currentMission.vehicleSystem = {vehicles={vehicle}}
+            FS25SiNServer:sampleFarmVehicleUsage()
+            g_time = 17000
+            vehicleHours = 9000
+            FS25SiNServer:sampleFarmVehicleUsage()
+            FS25SiNServer:publishFarmVehicleUsage()
+            diagnosticLog = ""
+            Logging.info = function(message, ...)
+                diagnosticLog = string.format(message, ...)
+            end
+            FS25SiNServer:logFarmVehicleUsageDiagnostics()
+        ''')
+        self.assertEqual(lua.eval("#FS25SiNServer.operationWindow"), 1)
+        self.assertEqual(lua.eval("FS25SiNServer.operationWindow[1].values.operating_ms"), 4000)
+        self.assertIn("vehiclesField=2", lua.eval("diagnosticLog"))
+        self.assertIn("getVehiclesUnavailable=0", lua.eval("diagnosticLog"))
+        self.assertIn("recordsQueued=1", lua.eval("diagnosticLog"))
 
 
 if __name__ == "__main__":

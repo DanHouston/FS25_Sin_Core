@@ -120,6 +120,9 @@ class ContractsModTests(unittest.TestCase):
     def test_native_details_ui_is_return_preserving_and_fail_closed(self):
         source = (MOD / "scripts/SiNContracts.lua").read_text(encoding="utf-8")
         self.assertIn("appendNativeUiDetails", source)
+        self.assertIn("SiN report lookup", source)
+        self.assertIn("select in Discord", source)
+        self.assertIn("contract_code = record.contractCode or contractCodeFromMissionId(id)", source)
         self.assertIn("SiN estimated work time", source)
         self.assertIn("SiN estimated gross $/hour", source)
         self.assertIn("AbstractFieldMission.getDetails", source)

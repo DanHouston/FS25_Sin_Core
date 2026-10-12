@@ -319,14 +319,18 @@ class CentralEventProcessor:
         lifecycle = contract.get("lifecycle")
         if lifecycle == "available":
             lines = [f"📋 **Contract Available — {mission}**", f"**{field}**"]
-            if contract.get("area_ha") is not None: lines[-1] += f" · {contract['area_ha']:.2f} ha"
+            if contract.get("contract_code"):
+                lines.append(f"**SiN reference:** `{contract['contract_code']}`")
+            if contract.get("area_ha") is not None: lines[1] += f" · {contract['area_ha']:.2f} ha"
             if contract.get("reward") is not None: lines.append(f"**Reward:** ${contract['reward']:,.0f}")
             if contract.get("estimated_hours") is not None:
                 lines.append(f"**Estimate:** {contract['estimated_hours']:.2f} h")
             lines.append("Accept it in FS25. This thread records when it is claimed.")
             return "\n".join(lines)
         if lifecycle == "expired":
-            return "⌛ **Expired in FS25**\nThis offer is no longer available."
+            code = contract.get("contract_code")
+            suffix = f"\nSiN reference: `{code}`" if code else ""
+            return f"⌛ **Expired in FS25**{suffix}\nThis offer is no longer available."
         actor = contract.get("accepting_player")
         farm = contract.get("accepting_farm_id")
         farm_name = contract.get("accepting_farm_name")
@@ -336,7 +340,8 @@ class CentralEventProcessor:
             actor = f"{actor} ({farm_name or f'Farm {farm}'})"
         labels = {"accepted": "✅ **Claimed in FS25**", "completed": "🏁 **Completed in FS25**",
                   "cancelled": "↩️ **Cancelled in FS25**"}
-        return f"{labels.get(lifecycle, 'ℹ️ **Contract updated**')}\n{actor}"
+        code = f"\nSiN reference: `{contract['contract_code']}`" if contract.get("contract_code") else ""
+        return f"{labels.get(lifecycle, 'ℹ️ **Contract updated**')}\n{actor}{code}"
 
     def activity_message(self, server, save_key, payload, session_summary=None):
         if str(payload.get("user_id", "")) == "1" and str(payload.get("farm_id", "")) == "0" \

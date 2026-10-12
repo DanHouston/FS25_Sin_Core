@@ -118,6 +118,13 @@ class DatabaseConfigurationTests(unittest.TestCase):
             and options.get("unique") is True
             for keys, options in personal_farm_indexes
         ))
+        contract_code_indexes = fake_database.native_contracts.create_calls
+        self.assertTrue(any(
+            keys == [("server_key", 1), ("save_key", 1), ("world_id", 1), ("contract_code", 1)]
+            and options.get("unique") is True
+            and options.get("partialFilterExpression") == {"contract_code": {"$type": "string"}}
+            for keys, options in contract_code_indexes
+        ))
         hourly_indexes = fake_database.farm_storage_hourly.create_calls
         self.assertTrue(any(keys == [("server_key", 1), ("save_key", 1),
                                      ("world_id", 1), ("farm_id", 1),

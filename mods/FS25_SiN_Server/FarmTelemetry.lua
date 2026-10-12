@@ -60,7 +60,19 @@ function FS25SiNServer:initializeFarmOperations()
     self.operationOverflowLogged = false
     self.vehicleSampleElapsed = 0
     self.vehiclePublishElapsed = 0
+    self.vehicleDiagnosticElapsed = 0
     self.vehicleUsage = {}
+    self.vehicleUsageDiagnostics = {
+        samples=0, missionNotRunning=0, vehicleSystemUnavailable=0,
+        getVehiclesUnavailable=0, vehiclesFieldAvailable=0,
+        getVehiclesMethodUsed=0, enumerationErrors=0, vehiclesSeen=0,
+        excludedObjects=0, missingIdentityApi=0, invalidFarmId=0,
+        invalidVehicleId=0, inspectionErrors=0, tracked=0,
+        operatingReadable=0, operatingAdvances=0, operatingDeltaMs=0,
+        positionReadable=0, acceptedDistance=0, distanceMeters=0,
+        rejectedTeleport=0, recordsQueued=0, queuedOperatingMs=0,
+        queuedDistanceMeters=0, recordRejected=0,
+    }
     self.storageIdentityCache = setmetatable({}, {__mode="k"})
     self.activeAIJobs = setmetatable({}, {__mode="k"})
     self.activeAIJobsByVehicleId = {}
@@ -359,6 +371,9 @@ function FS25SiNServer:onFarmAIJobStopped(job, aiMessage)
 end
 
 local function contractWorkIdentity(rootVehicle, aiJob)
+    -- A live native AI job mapped to this vehicle is direct evidence that the
+    -- worker, not a lingering vehicle controller ID, performed this work.
+    if aiJob ~= nil then return "ai", nil, nil end
     local controller = rootVehicle ~= nil and rootVehicle.controllerUserId or nil
     if controller ~= nil and g_currentMission ~= nil and g_currentMission.userManager ~= nil
         and type(g_currentMission.userManager.getUniqueUserIdByUserId) == "function" then
@@ -369,7 +384,6 @@ local function contractWorkIdentity(rootVehicle, aiJob)
         end
         return "unknown", nil, "stable_player_identity_unavailable"
     end
-    if aiJob ~= nil then return "ai", nil, nil end
     return "unknown", nil, "operator_unavailable"
 end
 
@@ -589,35 +603,70 @@ function FS25SiNServer:emitFarmOperationsBatch(batchId, count)
 end
 
 function FS25SiNServer:sampleFarmVehicleUsage()
+    local diagnostics = self.vehicleUsageDiagnostics
+    if type(diagnostics) ~= "table" then return end
+    diagnostics.samples = diagnostics.samples + 1
     local mission = g_currentMission
     local vehicleSystem = mission ~= nil and mission.vehicleSystem or nil
-    if mission == nil or mission.isRunning ~= true or vehicleSystem == nil
-        or type(vehicleSystem.getVehicles) ~= "function" then return end
-    local ok, vehicles = pcall(vehicleSystem.getVehicles, vehicleSystem)
-    if not ok or type(vehicles) ~= "table" then return end
+    if mission == nil or mission.isRunning ~= true then
+        diagnostics.missionNotRunning = diagnostics.missionNotRunning + 1
+        return
+    end
+    if vehicleSystem == nil then
+        diagnostics.vehicleSystemUnavailable = diagnostics.vehicleSystemUnavailable + 1
+        return
+    end
+    local vehicles = vehicleSystem.vehicles
+    if type(vehicles) == "table" then
+        diagnostics.vehiclesFieldAvailable = diagnostics.vehiclesFieldAvailable + 1
+    elseif type(vehicleSystem.getVehicles) == "function" then
+        diagnostics.getVehiclesMethodUsed = diagnostics.getVehiclesMethodUsed + 1
+        local ok
+        ok, vehicles = pcall(vehicleSystem.getVehicles, vehicleSystem)
+        if not ok then
+            diagnostics.enumerationErrors = diagnostics.enumerationErrors + 1
+            return
+        end
+    end
+    if type(vehicles) ~= "table" then
+        diagnostics.getVehiclesUnavailable = diagnostics.getVehiclesUnavailable + 1
+        return
+    end
     local now = type(g_time) == "number" and g_time or nil
     for _, vehicle in pairs(vehicles) do
-        if vehicle ~= nil and vehicle.isPallet ~= true and vehicle.isBale ~= true
-            and vehicle.isBigBag ~= true and type(vehicle.getUniqueId) == "function"
-            and type(vehicle.getOwnerFarmId) == "function" then
-            pcall(function()
+        diagnostics.vehiclesSeen = diagnostics.vehiclesSeen + 1
+        if vehicle == nil or vehicle.isPallet == true or vehicle.isBale == true
+            or vehicle.isBigBag == true then
+            diagnostics.excludedObjects = diagnostics.excludedObjects + 1
+        elseif type(vehicle.getUniqueId) ~= "function"
+            or type(vehicle.getOwnerFarmId) ~= "function" then
+            diagnostics.missingIdentityApi = diagnostics.missingIdentityApi + 1
+        else
+            local inspected, reason = pcall(function()
                 local farmId = vehicle:getOwnerFarmId()
+                if not validFarmId(farmId) then return "invalidFarmId" end
                 local id = vehicle:getUniqueId()
-                if not validFarmId(farmId) or type(id) ~= "string" or id == "" then return end
+                if type(id) ~= "string" or id == "" then return "invalidVehicleId" end
                 local operating = type(vehicle.getOperatingTime) == "function"
                     and vehicle:getOperatingTime() or nil
+                if type(operating) == "number" and operating >= 0 then
+                    diagnostics.operatingReadable = diagnostics.operatingReadable + 1
+                end
                 local x, z = nil, nil
                 if getWorldTranslation ~= nil and vehicle.rootNode ~= nil
                     and vehicle.rootNode ~= 0 then
                     local y
                     x, y, z = getWorldTranslation(vehicle.rootNode)
+                    if type(x) == "number" and type(z) == "number" then
+                        diagnostics.positionReadable = diagnostics.positionReadable + 1
+                    end
                 end
                 local state = self.vehicleUsage[id]
                 if state == nil or state.farmId ~= tonumber(farmId) then
                     self.vehicleUsage[id] = {farmId=tonumber(farmId), x=x, z=z,
                         at=now, operatingStart=operating, operatingLast=operating,
                         distance=0}
-                    return
+                    return "tracked"
                 end
                 if type(x) == "number" and type(z) == "number"
                     and type(state.x) == "number" and type(state.z) == "number"
@@ -626,14 +675,33 @@ function FS25SiNServer:sampleFarmVehicleUsage()
                     -- Reject map teleports/resets rather than inventing miles.
                     if delta <= 90 * ((now-state.at) / 1000) then
                         state.distance = state.distance + delta
+                        if delta > 0 then
+                            diagnostics.acceptedDistance = diagnostics.acceptedDistance + 1
+                            diagnostics.distanceMeters = diagnostics.distanceMeters + delta
+                        end
+                    else
+                        diagnostics.rejectedTeleport = diagnostics.rejectedTeleport + 1
                     end
                 end
                 state.x, state.z, state.at = x, z, now
                 if type(operating) == "number" and operating >= 0 then
                     if type(state.operatingStart) ~= "number" then state.operatingStart = operating end
+                    if type(state.operatingLast) == "number" and operating > state.operatingLast then
+                        diagnostics.operatingAdvances = diagnostics.operatingAdvances + 1
+                        diagnostics.operatingDeltaMs = diagnostics.operatingDeltaMs
+                            + operating - state.operatingLast
+                    end
                     state.operatingLast = operating
                 end
+                return "tracked"
             end)
+            if not inspected then
+                diagnostics.inspectionErrors = diagnostics.inspectionErrors + 1
+            elseif reason == "invalidFarmId" or reason == "invalidVehicleId" then
+                diagnostics[reason] = diagnostics[reason] + 1
+            elseif reason == "tracked" then
+                diagnostics.tracked = diagnostics.tracked + 1
+            end
         end
     end
 end
@@ -652,11 +720,43 @@ function FS25SiNServer:publishFarmVehicleUsage()
                     and math.floor(state.operatingLast) or "",
                 distance_estimated_m=state.distance})
             if record ~= nil then
+                self.vehicleUsageDiagnostics.queuedOperatingMs =
+                    self.vehicleUsageDiagnostics.queuedOperatingMs + operatingDelta
+                self.vehicleUsageDiagnostics.queuedDistanceMeters =
+                    self.vehicleUsageDiagnostics.queuedDistanceMeters + state.distance
                 state.operatingStart = state.operatingLast
                 state.distance = 0
+                self.vehicleUsageDiagnostics.recordsQueued =
+                    self.vehicleUsageDiagnostics.recordsQueued + 1
+            else
+                self.vehicleUsageDiagnostics.recordRejected =
+                    self.vehicleUsageDiagnostics.recordRejected + 1
             end
         end
     end
+end
+
+function FS25SiNServer:logFarmVehicleUsageDiagnostics()
+    local d = self.vehicleUsageDiagnostics
+    if type(d) ~= "table" or d.samples == 0 then return end
+    Logging.info("[SiN Farm Telemetry] vehicle sampler samples=%d missionNotRunning=%d "
+        .. "vehicleSystemUnavailable=%d getVehiclesUnavailable=%d vehiclesField=%d "
+        .. "getVehiclesMethod=%d enumerationErrors=%d "
+        .. "vehiclesSeen=%d excluded=%d missingIdentityApi=%d invalidFarm=%d invalidId=%d "
+        .. "inspectionErrors=%d tracked=%d operatingReadable=%d operatingAdvances=%d "
+        .. "operatingDeltaMs=%.0f positionReadable=%d distanceSamples=%d "
+        .. "distanceMeters=%.2f teleportRejected=%d recordsQueued=%d "
+        .. "queuedOperatingMs=%.0f queuedDistanceMeters=%.2f recordRejected=%d",
+        d.samples, d.missionNotRunning, d.vehicleSystemUnavailable,
+        d.getVehiclesUnavailable, d.vehiclesFieldAvailable,
+        d.getVehiclesMethodUsed, d.enumerationErrors, d.vehiclesSeen,
+        d.excludedObjects, d.missingIdentityApi, d.invalidFarmId,
+        d.invalidVehicleId, d.inspectionErrors, d.tracked, d.operatingReadable,
+        d.operatingAdvances, d.operatingDeltaMs, d.positionReadable,
+        d.acceptedDistance, d.distanceMeters, d.rejectedTeleport,
+        d.recordsQueued, d.queuedOperatingMs, d.queuedDistanceMeters,
+        d.recordRejected)
+    for key in pairs(d) do d[key] = 0 end
 end
 
 function FS25SiNServer:updateFarmOperations(dt)
@@ -665,6 +765,7 @@ function FS25SiNServer:updateFarmOperations(dt)
     self:installContractWorkHook()
     self.vehicleSampleElapsed = self.vehicleSampleElapsed + dt
     self.vehiclePublishElapsed = self.vehiclePublishElapsed + dt
+    self.vehicleDiagnosticElapsed = self.vehicleDiagnosticElapsed + dt
     if self.vehicleSampleElapsed >= 10000 then
         self.vehicleSampleElapsed = 0
         self:sampleFarmVehicleUsage()
@@ -672,6 +773,10 @@ function FS25SiNServer:updateFarmOperations(dt)
     if self.vehiclePublishElapsed >= 60000 then
         self.vehiclePublishElapsed = 0
         self:publishFarmVehicleUsage()
+    end
+    if self.vehicleDiagnosticElapsed >= 60000 then
+        self.vehicleDiagnosticElapsed = self.vehicleDiagnosticElapsed % 60000
+        self:logFarmVehicleUsageDiagnostics()
     end
     self.operationCheckpointElapsed = self.operationCheckpointElapsed + dt
     if self.operationCheckpointElapsed >= 1000 then

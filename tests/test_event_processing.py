@@ -96,11 +96,12 @@ class EventProcessingTests(unittest.TestCase):
     def test_native_contract_claim_uses_farm_when_native_player_identity_is_unavailable(self):
         message = self.processor.native_contract_message({
             "lifecycle": "accepted", "accepting_player": "not-exposed-by-native-mission",
-            "accepting_farm_id": "4"
+            "accepting_farm_id": "4", "contract_code": "C1A"
         })
         self.assertIn("Claimed in FS25", message)
         self.assertIn("Farm 4", message)
         self.assertNotIn("not-exposed-by-native-mission", message)
+        self.assertIn("C1A", message)
 
     def test_native_contract_claim_uses_authoritative_farm_name_when_present(self):
         message = self.processor.native_contract_message({

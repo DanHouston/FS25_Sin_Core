@@ -1,6 +1,6 @@
 """Read-only, active-world reports of directly observed FS25 contract work."""
 
-from .native_contracts import contract_key
+from .native_contracts import contract_key, mission_id_from_contract_code, native_contract_code
 
 
 def _hours(milliseconds):
@@ -18,7 +18,8 @@ def format_contract_contribution_report(report):
     contributions = report["contributions"]
     lines = [f"**Native contract contribution — {contract['mission_type']} · "
              f"Field {contract['field_id'] or 'unknown'}**",
-             f"Mission `{contract['mission_id']}` · {contract['area_ha'] or 0:,.2f} ha · "
+             f"SiN reference `{contract.get('contract_code') or native_contract_code(contract['mission_id'])}` · "
+             f"native mission `{contract['mission_id']}` · {contract['area_ha'] or 0:,.2f} ha · "
              f"Farm {contract['accepting_farm_id'] or 'unknown'} · "
              f"Current state: {contract['lifecycle']}"]
     if lifecycle:
@@ -71,13 +72,27 @@ class ContractContributionReportService:
         self.db = database.db
         self.identity_resolver = identity_resolver
 
-    def for_contract(self, server_key, save_key, world_id, mission_id):
-        if not all(str(value or "").strip() for value in (server_key, save_key, world_id, mission_id)):
-            raise ValueError("Server, save, world generation, and mission ID are required")
-        identity = contract_key(server_key, save_key, world_id, mission_id)
-        contract = self.db.native_contracts.find_one({"_id": identity})
+    def for_contract(self, server_key, save_key, world_id, contract_code):
+        if not all(str(value or "").strip() for value in (server_key, save_key, world_id, contract_code)):
+            raise ValueError("Server, save, world generation, and contract reference are required")
+        contract_code = str(contract_code).strip()
+        if contract_code[:1].upper() in {"C", "S", "X"}:
+            contract_code = (contract_code.upper() if contract_code[:1].upper() == "S"
+                             else contract_code[:1].upper() + contract_code[1:])
+        contract = self.db.native_contracts.find_one({
+            "server_key": str(server_key), "save_key": str(save_key),
+            "world_id": str(world_id), "contract_code": contract_code})
+        mission_id = mission_id_from_contract_code(contract_code)
+        if mission_id is None:
+            # Accept the native ID too for compatibility with existing admin
+            # notes and reports created before public codes were introduced.
+            mission_id = contract_code
+        if contract is None and mission_id is not None:
+            identity = contract_key(server_key, save_key, world_id, mission_id)
+            contract = self.db.native_contracts.find_one({"_id": identity})
         if not isinstance(contract, dict):
-            raise ValueError("No native FS25 contract record exists for this mission in the active world")
+            raise ValueError("No native FS25 contract record exists for this reference in the active world")
+        mission_id = str(contract.get("mission_id") or mission_id)
         scope = {"server_key": str(server_key), "save_key": str(save_key),
                  "world_id": str(world_id), "mission_id": str(mission_id)}
         lifecycle = list(self.db.native_contract_lifecycle_events.find(scope).sort("observed_at", 1))
@@ -111,3 +126,11 @@ class ContractContributionReportService:
                 f"Player {unique_id[-8:]}" if unique_id else "Unknown")
         return {"contract": contract, "lifecycle": lifecycle,
                 "contributions": contributions, "interval_count": len(records)}
+
+    def recent_for_world(self, server_key, save_key, world_id, limit=25):
+        scope = {"server_key": str(server_key), "save_key": str(save_key),
+                 "world_id": str(world_id)}
+        records = list(self.db.native_contracts.find(scope).sort("updated_at", -1).limit(limit))
+        for row in records:
+            row.setdefault("contract_code", native_contract_code(row.get("mission_id")))
+        return records

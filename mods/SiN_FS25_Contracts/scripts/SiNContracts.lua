@@ -144,6 +144,45 @@ local function missionId(mission)
     return text(id)
 end
 
+local function contractCodeFromMissionId(id)
+    id = text(id)
+    if id == nil then return nil end
+    -- Native field-mission IDs are integers in FS25. Base 36 keeps the
+    -- reversible reference compact and collision-free inside the active
+    -- server/save/world scope. Preserve unfamiliar IDs exactly, never truncate.
+    if (id == "0" or string.match(id, "^[1-9]%d*$")) then
+        local value = tonumber(id)
+        if value ~= nil and value >= 0 and value <= 9007199254740991
+            and math.floor(value) == value then
+            local alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            local encoded = ""
+            repeat
+                local remainder = value % 36
+                encoded = string.sub(alphabet, remainder + 1, remainder + 1) .. encoded
+                value = math.floor(value / 36)
+            until value == 0
+            return "C" .. encoded
+        end
+    end
+    -- Current GIANTS offers use "mission" followed by a UUID-like hex ID.
+    -- Keep a stable 64-bit prefix as the player-facing SiN reference instead
+    -- of exposing the long native ID in the narrow contract details panel.
+    local missionHex = string.sub(string.lower(id), 1, 7) == "mission"
+        and string.sub(id, 8) or nil
+    if missionHex ~= nil and string.match(missionHex, "^%x+$") == nil then
+        missionHex = nil
+    end
+    if missionHex ~= nil and #missionHex >= 16 then
+        return "S" .. string.upper(string.sub(missionHex, 1, 16))
+    end
+    return "X" .. id
+end
+
+local function missionContractCode(mission)
+    return text(fieldValue(mission, {"sinContractReference"}))
+        or contractCodeFromMissionId(missionId(mission))
+end
+
 local function missionType(mission)
     local kind = fieldValue(mission, {"type", "missionType", "typeName"})
     if type(kind) == "table" then
@@ -257,6 +296,7 @@ local function emitNativeContractLifecycle(owner, mission, record, eventName, fi
             record.lifecycleLastDispatchMs[lifecycle] = current
             local payload = {
                 mission_id = id,
+                contract_code = record.contractCode or contractCodeFromMissionId(id),
                 mission_type = record.missionType,
                 field_id = record.field and record.field.id,
                 field_name = record.field and record.field.name,
@@ -628,6 +668,7 @@ function SiNContracts:observe(mission, eventName, finishState)
     local targetX, targetY, targetZ = callThree(mission, "getWorldPosition")
     local record = self.records[id] or {missionId = id, firstSeenMs = nowMs()}
     record.missionId = id
+    record.contractCode = record.contractCode or contractCodeFromMissionId(id)
     record.missionType = missionType(mission)
     record.status = statusName(mission)
     record.completion = completionValue(mission)
@@ -1604,21 +1645,73 @@ end
 
 function SiNContracts:appendNativeUiDetails(mission, details)
     if mission == nil or type(details) ~= "table" then return end
+    local code = missionContractCode(mission)
     local field = fieldData(mission)
+    local fieldNumber = field ~= nil and field.id or nil
+    local kindLabel = string.gsub(missionType(mission), "Mission$", "")
+    kindLabel = string.gsub(kindLabel, "([a-z])([A-Z])", "%1 %2")
+    kindLabel = string.upper(string.sub(kindLabel, 1, 1)) .. string.sub(kindLabel, 2)
+    local reportLookup = fieldNumber ~= nil
+        and string.format("Field %s · %s (select in Discord)", tostring(fieldNumber), kindLabel)
+        or "Select this contract in Discord"
     local equipment = equipmentData(mission, field)
     local estimatedHours = estimate(field, equipment)
     local reward = number(call(mission, "getReward")) or number(fieldValue(mission, {"reward", "money"}))
-    if estimatedHours == nil or reward == nil or estimatedHours <= 0 then return end
 
     -- getDetails may be called more than once by a frame refresh. Do not add
     -- duplicate rows if another wrapper has already passed this list through.
     for _, row in pairs(details) do
-        if type(row) == "table" and (row.title == "SiN estimated work time" or row.title == "SiN estimated gross $/hour") then
-            return
+        if type(row) == "table" then
+            if row.title == "SiN report lookup" then return end
+            if row.title == "SiN estimated work time" or row.title == "SiN estimated gross $/hour" then
+                if code ~= nil then
+                    table.insert(details, {title = "SiN report lookup", value = reportLookup})
+                end
+                return
+            end
         end
     end
-    table.insert(details, {title = "SiN estimated work time", value = formatEstimateHours(estimatedHours)})
-    table.insert(details, {title = "SiN estimated gross $/hour", value = formatEstimateMoney(reward / estimatedHours)})
+    if code ~= nil then
+        table.insert(details, {title = "SiN report lookup", value = reportLookup})
+    end
+    if estimatedHours ~= nil and reward ~= nil and estimatedHours > 0 then
+        table.insert(details, {title = "SiN estimated work time", value = formatEstimateHours(estimatedHours)})
+        table.insert(details, {title = "SiN estimated gross $/hour", value = formatEstimateMoney(reward / estimatedHours)})
+    end
+end
+
+-- Native mission unique IDs are authoritative on the server but are not
+-- available on client offer objects in every FS25 version/build. Carry the
+-- compact SiN reference in the same mission stream so the read-only offer UI
+-- can display the exact server-side ID before the player accepts it.
+function SiNContracts:installContractReferenceStreamHooks()
+    if self.contractReferenceStreamHooksInstalled == true then return true end
+    if AbstractMission == nil or type(AbstractMission.writeStream) ~= "function"
+        or type(AbstractMission.readStream) ~= "function"
+        or type(streamWriteString) ~= "function" or type(streamReadString) ~= "function" then
+        return false
+    end
+
+    local nativeWriteStream = AbstractMission.writeStream
+    local nativeReadStream = AbstractMission.readStream
+    AbstractMission.writeStream = function(mission, streamId, ...)
+        local values = {nativeWriteStream(mission, streamId, ...)}
+        local code = missionContractCode(mission)
+        mission.sinContractReference = code
+        -- Always write one string (empty when no native ID exists) to keep the
+        -- paired read stream aligned for every AbstractMission subclass.
+        streamWriteString(streamId, code or "")
+        return unpack(values)
+    end
+    AbstractMission.readStream = function(mission, streamId, ...)
+        local values = {nativeReadStream(mission, streamId, ...)}
+        local code = streamReadString(streamId)
+        mission.sinContractReference = code ~= nil and code ~= "" and code or nil
+        return unpack(values)
+    end
+    AbstractMission.__sinContractsContractReferenceStreamHook = true
+    self.contractReferenceStreamHooksInstalled = true
+    return true
 end
 
 function SiNContracts:installDetailsHook()
@@ -2129,6 +2222,7 @@ function SiNContracts:installHooks()
     -- frame before it sends the native start/borrow request. The only client
     -- hook retained here is the read-only details presentation below.
     self:installMoneyPolicyHooks()
+    self:installContractReferenceStreamHooks()
     if call(g_currentMission, "getIsServer") ~= true then
         self:installDetailsHook()
         return

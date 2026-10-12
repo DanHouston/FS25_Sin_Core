@@ -229,6 +229,7 @@ class ContractsLuaTests(unittest.TestCase):
             assert(#emitted == 3)
             assert(emitted[1].eventType == "native_contract_available")
             assert(emitted[1].payload.mission_id == "mission-7")
+            assert(emitted[1].payload.contract_code == "Xmission-7")
             assert(emitted[1].payload.field_id == 12)
             assert(emitted[2].eventType == "native_contract_accepted")
             assert(emitted[2].payload.accepting_farm_id == 2)
@@ -1009,6 +1010,25 @@ class ContractsLuaTests(unittest.TestCase):
             """
         )
 
+    def test_native_contract_details_show_compact_reversible_reference(self):
+        lua = self._runtime()
+        lua.execute(
+            """
+            AbstractFieldMission = {}
+            function AbstractFieldMission.getDetails(mission)
+                return {{title = "Native detail", value = "native"}}
+            end
+            SiNContracts:installDetailsHook()
+            local mission = {}
+            function mission:getUniqueId() return 1296 end
+            local details = AbstractFieldMission.getDetails(mission)
+            assert(details[2].title == "SiN report lookup")
+            assert(details[2].value == "Select this contract in Discord")
+            local again = AbstractFieldMission.getDetails(mission)
+            assert(#again == #details)
+            """
+        )
+
     def test_preacceptance_offer_uses_native_vehicle_group_descriptor_when_metrics_exist(self):
         lua = self._runtime()
         lua.execute(
@@ -1107,8 +1127,10 @@ class ContractsLuaTests(unittest.TestCase):
             assert(record.estimatedHours ~= nil)
             assert(math.abs(record.estimatedHours - 15.2 * 10 / (12 * 10 * 0.70)) < 0.000001)
             local details = AbstractFieldMission.getDetails(mission)
-            assert(#details == 2 and details[1].value == "1.8 h")
-            assert(details[2].title == "SiN estimated gross $/hour")
+            assert(#details == 3 and details[1].title == "SiN report lookup")
+            assert(details[1].value == "Field 24 · Fertilize (select in Discord)")
+            assert(details[2].value == "1.8 h")
+            assert(details[3].title == "SiN estimated gross $/hour")
             -- Contract inspection must never mutate the global descriptor
             -- that the vehicle showroom uses to render its preview/price.
             assert(canonicalStoreItem.specs == nil)
@@ -1140,3 +1162,65 @@ class ContractsLuaTests(unittest.TestCase):
             assert(record.estimatedHours == nil)
             """
         )
+
+    def test_contract_reference_is_streamed_to_clients_before_acceptance(self):
+        lua = self._runtime()
+        lua.execute("""
+            local server = true
+            g_currentMission.getIsServer = function() return server end
+            local stream = {}
+            streamWriteString = function(target, value)
+                table.insert(target, value)
+            end
+            streamReadString = function(target)
+                target.position = (target.position or 0) + 1
+                return target[target.position]
+            end
+            AbstractMission = {}
+            function AbstractMission:writeStream(target)
+                streamWriteString(target, "native-mission-payload")
+            end
+            function AbstractMission:readStream(source)
+                assert(streamReadString(source) == "native-mission-payload")
+            end
+            AbstractFieldMission = {}
+            setmetatable(AbstractFieldMission, {__index = AbstractMission})
+            function AbstractFieldMission:getDetails() return {} end
+            SiNContracts:installHooks()
+
+            local offered = setmetatable({uniqueId = 9001}, {__index = AbstractFieldMission})
+            AbstractMission.writeStream(offered, stream)
+            assert(stream[1] == "native-mission-payload")
+            assert(stream[2] == "C6Y1")
+
+            server = false
+            local clientOffer = setmetatable({}, {__index = AbstractFieldMission})
+            AbstractMission.readStream(clientOffer, stream)
+            assert(clientOffer.sinContractReference == "C6Y1")
+            local details = {}
+            SiNContracts:appendNativeUiDetails(clientOffer, details)
+            assert(details[1].title == "SiN report lookup")
+            assert(details[1].value == "Select this contract in Discord")
+        """)
+
+    def test_native_uuid_contract_id_uses_short_sin_reference_in_ui_and_lifecycle(self):
+        lua = self._runtime()
+        lua.execute("""
+            local emitted = {}
+            FS25SiNServer = {emitServerEvent = function(self, eventType, payload)
+                table.insert(emitted, {eventType = eventType, payload = payload})
+                return true
+            end}
+            AbstractFieldMission = {getDetails = function() return {} end}
+            SiNContracts:installDetailsHook()
+            local mission = {status = "CREATED", type = {name = "fertilizeMission"},
+                uniqueId = "mission0f55fa33df33af7807912d12345678", reward = 1000}
+            function mission:getReward() return self.reward end
+            function mission:getField() return {id = 26} end
+            local details = AbstractFieldMission.getDetails(mission)
+            assert(details[1].title == "SiN report lookup")
+            assert(details[1].value == "Field 26 · Fertilize (select in Discord)")
+            local record = SiNContracts:observe(mission, "available")
+            assert(record.contractCode == "S0F55FA33DF33AF78")
+            assert(emitted[1].payload.contract_code == "S0F55FA33DF33AF78")
+        """)

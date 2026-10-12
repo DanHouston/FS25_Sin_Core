@@ -1186,9 +1186,10 @@ class NetworkBot(discord.Client):
             return await server_choices(interaction, current)
 
         @self.tree.command(name="contract_report", description="Staff: report measured player/AI work on a native FS25 contract")
+        @app_commands.describe(contract_code="Choose the matching field and contract type; no code memorization needed")
         @app_commands.check(channel_check)
         @app_commands.default_permissions(administrator=True)
-        async def contract_report(interaction: discord.Interaction, server: str, mission_id: str):
+        async def contract_report(interaction: discord.Interaction, server: str, contract_code: str):
             staff_check(interaction)
             config = server_config(interaction, server)
             await interaction.response.defer(ephemeral=True)
@@ -1199,7 +1200,7 @@ class NetworkBot(discord.Client):
                         or not str(runtime.get("world_id") or "")):
                     raise ValueError("No active world generation is available for this server/save")
                 report = await asyncio.to_thread(self.contract_reports.for_contract,
-                    server, save_key, runtime["world_id"], mission_id)
+                    server, save_key, runtime["world_id"], contract_code)
                 message = format_contract_contribution_report(report)
             except ValueError as error:
                 await interaction.followup.send(str(error), ephemeral=True)
@@ -1216,6 +1217,40 @@ class NetworkBot(discord.Client):
         @contract_report.autocomplete("server")
         async def contract_report_server_autocomplete(interaction: discord.Interaction, current: str):
             return await server_choices(interaction, current, "reconcile")
+
+        @contract_report.autocomplete("contract_code")
+        async def contract_report_code_autocomplete(interaction: discord.Interaction, current: str):
+            server = str(getattr(interaction.namespace, "server", "") or "")
+            if not server or interaction.guild_id != self.guild.id:
+                return []
+            try:
+                config = server_config(interaction, server)
+                save_key = selected_save(config)
+                runtime = await asyncio.to_thread(self.server_registry.active_runtime, server)
+                if (not isinstance(runtime, dict) or str(runtime.get("save_key") or "") != str(save_key)
+                        or not str(runtime.get("world_id") or "")):
+                    return []
+                records = await asyncio.to_thread(self.contract_reports.recent_for_world,
+                    server, save_key, runtime["world_id"], 25)
+            except (ValueError, OSError, asyncio.TimeoutError):
+                return []
+            except Exception:
+                logging.exception("Native contract autocomplete unavailable")
+                return []
+            query = (current or "").lower()
+            choices = []
+            for record in records:
+                code = str(record.get("contract_code") or "")
+                mission = str(record.get("mission_type") or "Contract").replace("Mission", "").title()
+                field = str(record.get("field_id") or "?")
+                lifecycle = str(record.get("lifecycle") or "unknown")
+                updated = record.get("updated_at")
+                timestamp = (updated.strftime("%Y-%m-%d %H:%M UTC")
+                             if hasattr(updated, "strftime") else "recent")
+                label = f"Field {field} · {mission} · {lifecycle} · {timestamp}"
+                if query in code.lower() or query in label.lower():
+                    choices.append(app_commands.Choice(name=label[:100], value=code))
+            return choices[:25]
 
         @self.tree.command(name="vehicles", description="List your verified farm's live FS25 vehicles")
         @app_commands.check(channel_check)

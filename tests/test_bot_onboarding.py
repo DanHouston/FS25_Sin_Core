@@ -544,10 +544,10 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
                           "lifecycle": "completed", "actual_payout": None},
             "lifecycle": [], "contributions": [], "interval_count": 0})
 
-        await command.callback(interaction, "server", "m1")
+        await command.callback(interaction, "server", "C1")
 
         self.bot.contract_reports.for_contract.assert_called_once_with(
-            "server", "save", "world-a", "m1")
+            "server", "save", "world-a", "C1")
         self.assertIn("Native contract contribution", interaction.followup.send.await_args.args[0])
         self.assertTrue(interaction.followup.send.await_args.kwargs["ephemeral"])
 

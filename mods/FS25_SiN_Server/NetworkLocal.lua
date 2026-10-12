@@ -4,6 +4,12 @@ local SERVER_MAILBOX_NAME = "FS25_SiN_Server"
 -- Shared local engine-message channel with SiN_FS25_Contracts. Mod-local
 -- globals are isolated; both mods deliberately use this stable private ID.
 local SIN_NATIVE_CONTRACT_LIFECYCLE_MESSAGE = 0x53494E43
+local SIN_HARVEST_FARM_NAME_KEY = "sinharvest"
+
+local function normalizeFarmName(value)
+    local name = string.lower(tostring(value or ""))
+    return string.gsub(name, "[%s%p]", "")
+end
 
 local function nativeContractToken(value)
     return string.gsub(tostring(value or ""), "[^%w_%-]", "_")
@@ -272,8 +278,229 @@ function FS25SiNServer:shortIdentity(value)
     return string.len(text) > 8 and string.sub(text, 1, 8) .. "..." or text
 end
 
+-- The Field.nameIndicator scene node is the field-number marker shown on the
+-- in-game map. Hide only that node for fields whose farmland belongs to the
+-- SiN Harvest farm; retain the Field object, polygon, ownership and scenery.
+-- This runs on each client because map-marker visibility is local presentation.
+function FS25SiNServer:findSinHarvestFarmId(farmManager)
+	farmManager = farmManager or g_farmManager
+	if farmManager == nil or type(farmManager.getFarmById) ~= "function" then
+		return nil, "farmManagerUnavailable"
+	end
+	local farms = {}
+	for farmId = 1, 254 do
+		local ok, farm = pcall(farmManager.getFarmById, farmManager, farmId)
+		if ok and farm ~= nil then
+			local name = farm.name or farm.farmName or ""
+			table.insert(farms, tostring(farmId) .. ":" .. tostring(name))
+			if normalizeFarmName(name) == SIN_HARVEST_FARM_NAME_KEY then
+				return farmId, table.concat(farms, ",")
+			end
+		end
+	end
+	return nil, #farms > 0 and table.concat(farms, ",") or "noFarmsFound"
+end
+
+function FS25SiNServer:logOwnedFieldMarkerDiagnostic(summary)
+	if self.fieldMarkerDiagnosticSignature == summary then return end
+	self.fieldMarkerDiagnosticSignature = summary
+	Logging.info("[SiN Map] field marker suppression %s", summary)
+end
+
+function FS25SiNServer:restoreOwnedFieldMarkers()
+    if type(self.fieldMarkerOriginalVisibility) ~= "table" then return end
+    for marker, originalVisibility in pairs(self.fieldMarkerOriginalVisibility) do
+        self:setFieldHotspotVisible(marker, originalVisibility)
+    end
+    self.fieldMarkerOriginalVisibility = {}
+end
+
+function FS25SiNServer:getFieldHotspotVisibility(hotspot)
+    if hotspot == nil then return nil end
+    for _, methodName in ipairs({"getIsVisible", "getVisible"}) do
+        if type(hotspot[methodName]) == "function" then
+            local ok, value = pcall(hotspot[methodName], hotspot)
+            if ok and type(value) == "boolean" then return value end
+        end
+    end
+    if type(hotspot.visible) == "boolean" then return hotspot.visible end
+    return nil
+end
+
+function FS25SiNServer:setFieldHotspotVisible(hotspot, visible)
+    if hotspot == nil then return false end
+    for _, methodName in ipairs({"setIsVisible", "setVisible"}) do
+        if type(hotspot[methodName]) == "function" then
+            local ok = pcall(hotspot[methodName], hotspot, visible)
+            if ok then return true end
+        end
+    end
+    if type(hotspot.visible) == "boolean" then
+        hotspot.visible = visible
+        return true
+    end
+    return false
+end
+
+function FS25SiNServer:updateOwnedFieldMarkers(ingameMapOverride)
+    local mission = g_currentMission
+    if mission == nil or type(mission.getIsClient) ~= "function" or not mission:getIsClient() then return false end
+    local farmlandManager = mission.farmlandManager or g_farmlandManager
+	local fieldDefinitionBase = mission.fieldDefinitionBase or g_fieldDefinitionBase
+	local hasFieldDefinitions = fieldDefinitionBase ~= nil and type(fieldDefinitionBase.fieldDefs) == "table"
+	-- FS25 exposes the active PDA/minimap map through IngameMapElement.draw's
+	-- self.ingameMap argument, not g_currentMission.ingameMap.
+	local ingameMap = ingameMapOverride or mission.ingameMap
+	local mapHotspots = ingameMap ~= nil and ingameMap.hotspots or nil
+	local hasMapHotspots = type(mapHotspots) == "table"
+	local hasFarmlandOwner = farmlandManager ~= nil and type(farmlandManager.getFarmlandOwner) == "function"
+	local canReadFieldPositions = farmlandManager ~= nil
+		and type(farmlandManager.getFarmlandIdAtWorldPosition) == "function"
+		and type(getWorldTranslation) == "function"
+    if not hasFarmlandOwner or (not hasFieldDefinitions and not hasMapHotspots) then
+		self:logOwnedFieldMarkerDiagnostic(string.format(
+				"unavailable fieldDefinitionBase=%s ingameMapHotspots=%s farmlandManager=%s getWorldTranslation=%s",
+			tostring(hasFieldDefinitions), tostring(hasMapHotspots), tostring(hasFarmlandOwner),
+			tostring(type(getWorldTranslation) == "function")))
+        return false
+    end
+
+	local farmManager = mission.farmManager or g_farmManager
+	local targetFarmId, farmNames = self:findSinHarvestFarmId(farmManager)
+    if targetFarmId == nil then
+        -- Fail open if the farm cannot be identified; do not leave stale hidden labels.
+        self:restoreOwnedFieldMarkers()
+		self:logOwnedFieldMarkerDiagnostic(string.format("targetFarm=notFound farms=%s", tostring(farmNames)))
+        return false
+    end
+
+    self.fieldMarkerOriginalVisibility = self.fieldMarkerOriginalVisibility or {}
+	local fieldCount, hotspotCount, farmlandCount, ownerReadCount = 0, 0, 0, 0
+	local ownedCount, hiddenCount, ownerErrors, positionErrors = 0, 0, 0, 0
+	local function applyOwnerVisibility(hotspot, farmlandId, fieldNumber)
+		if farmlandId == nil or farmlandId <= 0 then return end
+		farmlandCount = farmlandCount + 1
+		local ownerOk, ownerFarmId = pcall(farmlandManager.getFarmlandOwner,
+			farmlandManager, farmlandId)
+		if ownerOk and ownerFarmId ~= nil then ownerReadCount = ownerReadCount + 1
+		else ownerErrors = ownerErrors + 1 end
+		if ownerOk and tonumber(ownerFarmId) == targetFarmId then
+			ownedCount = ownedCount + 1
+			if self.fieldMarkerOriginalVisibility[hotspot] == nil then
+				local wasVisible = self:getFieldHotspotVisibility(hotspot)
+				if type(wasVisible) == "boolean" and self:setFieldHotspotVisible(hotspot, false) then
+					self.fieldMarkerOriginalVisibility[hotspot] = wasVisible
+					hiddenCount = hiddenCount + 1
+					Logging.info("[SiN Map] hid owned field label field=%s farmland=%s farm=%s",
+						tostring(fieldNumber), tostring(farmlandId), tostring(targetFarmId))
+				end
+			end
+		elseif self.fieldMarkerOriginalVisibility[hotspot] ~= nil then
+			if self:setFieldHotspotVisible(hotspot, self.fieldMarkerOriginalVisibility[hotspot]) then
+				self.fieldMarkerOriginalVisibility[hotspot] = nil
+			end
+		end
+	end
+
+	if hasFieldDefinitions and canReadFieldPositions then
+		-- Prefer native field definitions when exposed by the current map.
+		for fieldNumber, fieldDef in pairs(fieldDefinitionBase.fieldDefs) do
+			fieldCount = fieldCount + 1
+			local hotspot = fieldDef ~= nil and fieldDef.fieldMapHotspot or nil
+			local indicator = fieldDef ~= nil and fieldDef.fieldMapIndicator or nil
+			if hotspot ~= nil then hotspotCount = hotspotCount + 1 end
+			if hotspot ~= nil and indicator ~= nil
+				and (type(hotspot.setIsVisible) == "function" or type(hotspot.setVisible) == "function"
+					or type(hotspot.visible) == "boolean") then
+				local positionOk, x, _, z = pcall(getWorldTranslation, indicator)
+				local farmlandId
+				if positionOk and x ~= nil and z ~= nil then
+					local farmlandOk, value = pcall(farmlandManager.getFarmlandIdAtWorldPosition,
+						farmlandManager, x, z)
+					if farmlandOk then farmlandId = tonumber(value) end
+				else
+					positionErrors = positionErrors + 1
+				end
+				applyOwnerVisibility(hotspot, farmlandId, fieldDef.fieldNumber or fieldNumber)
+			end
+		end
+	else
+		-- On clients where fieldDefinitionBase is not exposed, FS25's PDA
+		-- contains FarmlandHotspots in IngameMap.hotspots. Reading getFarmland()
+		-- covers labeled plots omitted from FieldManager:getFields(), including
+		-- wooded/non-crop areas, without touching terrain or other map objects.
+		for _, hotspot in pairs(mapHotspots) do
+			local isFarmlandHotspot = hotspot ~= nil and type(FarmlandHotspot) == "table"
+				and type(hotspot.isa) == "function"
+			if isFarmlandHotspot then
+				local classOk, classMatch = pcall(hotspot.isa, hotspot, FarmlandHotspot)
+				isFarmlandHotspot = classOk and classMatch == true
+			end
+			if isFarmlandHotspot and type(hotspot.getFarmland) == "function"
+				and (type(hotspot.setIsVisible) == "function" or type(hotspot.setVisible) == "function"
+					or type(hotspot.visible) == "boolean") then
+				hotspotCount = hotspotCount + 1
+				local farmlandOk, farmland = pcall(hotspot.getFarmland, hotspot)
+				if farmlandOk and farmland ~= nil then
+					fieldCount = fieldCount + 1
+					local farmlandId = tonumber(farmland.id)
+					applyOwnerVisibility(hotspot, farmlandId,
+						farmland.name or farmland.fieldNumber or farmlandId)
+				else
+					ownerErrors = ownerErrors + 1
+				end
+			end
+		end
+	end
+	self:logOwnedFieldMarkerDiagnostic(string.format(
+		"source=%s targetFarm=%s farms=%s fieldDefinitions=%d hotspots=%d farmlandIds=%d ownerReads=%d ownerErrors=%d positionErrors=%d owned=%d hidden=%d",
+		hasFieldDefinitions and canReadFieldPositions and "fieldDefinitions" or "ingameMap.hotspots",
+		tostring(targetFarmId), tostring(farmNames), fieldCount, hotspotCount, farmlandCount,
+		ownerReadCount, ownerErrors, positionErrors, ownedCount, hiddenCount))
+    return true
+end
+
+-- The PDA's IngameMapElement owns the actual IngameMap and calls drawHotspotsOnly
+-- immediately after its pre-draw callback. Hook that boundary so ownership
+-- filtering is applied before field-number hotspots are drawn. The 1-second
+-- throttle keeps the hook cheap while still responding to farm ownership edits.
+function FS25SiNServer:installIngameMapHotspotHook()
+	if self.ingameMapHotspotHookInstalled == true then return true end
+	if Utils == nil or type(Utils.prependedFunction) ~= "function"
+		or IngameMapElement == nil or type(IngameMapElement.draw) ~= "function" then return false end
+	local original = IngameMapElement.draw
+	local wrapper = Utils.prependedFunction(original, function(element)
+		if g_currentMission == nil or type(g_currentMission.getIsClient) ~= "function"
+			or not g_currentMission:getIsClient() or element == nil or element.ingameMap == nil then return end
+		local now = type(g_time) == "number" and g_time or g_currentMission.time
+		if type(now) ~= "number" then now = 0 end
+		if FS25SiNServer.fieldMarkerLastRefreshTime == nil
+			or now - FS25SiNServer.fieldMarkerLastRefreshTime >= 1000 then
+			FS25SiNServer.fieldMarkerLastRefreshTime = now
+			local ok, err = pcall(FS25SiNServer.updateOwnedFieldMarkers,
+				FS25SiNServer, element.ingameMap)
+			if not ok and not FS25SiNServer.fieldMarkerUpdateErrorLogged then
+				FS25SiNServer.fieldMarkerUpdateErrorLogged = true
+				Logging.warning("[SiN Map] PDA hotspot refresh failed: %s", tostring(err))
+			elseif ok then
+				FS25SiNServer.fieldMarkerUpdateErrorLogged = false
+			end
+		end
+	end)
+	IngameMapElement.draw = wrapper
+	self.ingameMapHotspotHookOriginal = original
+	self.ingameMapHotspotHookWrapper = wrapper
+	self.ingameMapHotspotHookInstalled = true
+	Logging.info("[SiN Map] installed IngameMapElement.draw farmland hotspot hook")
+	return true
+end
+
 function FS25SiNServer:loadMap()
     self.elapsed = 0
+    self.fieldMarkerElapsed = 0
+    self.fieldMarkerRefreshInterval = 1000
+    self.fieldMarkerOriginalVisibility = {}
+	self.fieldMarkerDiagnosticSignature = nil
     self.sequence = 0
     self.eventSequence = 0
     self.financeSequence = 0
@@ -545,7 +772,7 @@ function FS25SiNServer:onNativeContractLifecycle(envelope)
 
     -- Copy only the established event schema to XML; the in-process envelope
     -- also contains an acknowledgment callback and must never enter the file.
-    local fields = {"mission_id", "mission_type", "field_id", "field_name", "area_ha",
+    local fields = {"mission_id", "contract_code", "mission_type", "field_id", "field_name", "area_ha",
         "farmland_id", "reward", "estimated_hours", "estimated_dollars_per_hour",
         "accepting_farm_id", "accepting_farm_name", "accepting_player",
         "game_runtime_ms", "game_year", "game_period", "game_day", "game_time_ms",
@@ -1979,6 +2206,24 @@ function FS25SiNServer:consoleCommandSelfTest()
 end
 
 function FS25SiNServer:update(dt)
+	if g_currentMission ~= nil and type(g_currentMission.getIsClient) == "function"
+        and g_currentMission:getIsClient() then
+        self:installIngameMapHotspotHook()
+        local fieldDefinitionBase = g_currentMission.fieldDefinitionBase or g_fieldDefinitionBase
+        if fieldDefinitionBase ~= nil and type(fieldDefinitionBase.fieldDefs) == "table" then
+            self.fieldMarkerElapsed = (self.fieldMarkerElapsed or 0) + dt
+            if self.fieldMarkerElapsed >= (self.fieldMarkerRefreshInterval or 1000) then
+                self.fieldMarkerElapsed = 0
+                local markerOk, markerError = pcall(self.updateOwnedFieldMarkers, self)
+                if not markerOk and not self.fieldMarkerUpdateErrorLogged then
+                    self.fieldMarkerUpdateErrorLogged = true
+                    Logging.warning("[SiN Map] owned field marker refresh failed: %s", tostring(markerError))
+                elseif markerOk then
+                    self.fieldMarkerUpdateErrorLogged = false
+                end
+            end
+        end
+    end
     if g_currentMission ~= nil and g_currentMission:getIsClient() then
         self:updateClientRegistrationWarning(dt)
     end
@@ -3780,6 +4025,7 @@ function FS25SiNServer:exportSnapshot()
 end
 
 function FS25SiNServer:deleteMap()
+    self:restoreOwnedFieldMarkers()
     self:shutdownFarmOperations()
     if type(self.financePending) == "table" then
         for _ = 1, 16 do

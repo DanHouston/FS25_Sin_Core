@@ -4,7 +4,28 @@ from unittest.mock import MagicMock
 from fs25_network_core.contract_contribution import (
     ContractContributionReportService, format_contract_contribution_report,
 )
-from fs25_network_core.native_contracts import NativeContractService, contract_key
+from fs25_network_core.native_contracts import (
+    NativeContractService, contract_key, mission_id_from_contract_code, native_contract_code,
+)
+
+
+class NativeContractCodeTests(unittest.TestCase):
+    def test_numeric_ids_have_compact_reversible_codes(self):
+        self.assertEqual(native_contract_code("0"), "C0")
+        self.assertEqual(native_contract_code("1296"), "C100")
+        self.assertEqual(native_contract_code("001296"), "X001296")
+        self.assertEqual(mission_id_from_contract_code("c100"), "1296")
+
+    def test_non_numeric_ids_are_exact_and_do_not_collide_with_numeric_namespace(self):
+        self.assertEqual(native_contract_code("ABC"), "XABC")
+        self.assertEqual(native_contract_code("13368"), "CABC")
+        self.assertEqual(mission_id_from_contract_code("XABC"), "ABC")
+        self.assertNotEqual(native_contract_code("ABC"), native_contract_code("13368"))
+
+    def test_giants_uuid_mission_ids_get_stable_compact_sin_codes(self):
+        mission_id = "mission0f55fa33df33af7807912d12345678"
+        self.assertEqual(native_contract_code(mission_id), "S0F55FA33DF33AF78")
+        self.assertEqual(native_contract_code(mission_id.upper()), "S0F55FA33DF33AF78")
 
 
 class NativeContractHistoryTests(unittest.TestCase):
@@ -24,10 +45,51 @@ class NativeContractHistoryTests(unittest.TestCase):
         self.assertNotEqual(calls[0].args[0], calls[3].args[0])
         stored = calls[0].args[1]["$setOnInsert"]
         self.assertEqual(stored["game_runtime_ms"], 81234)
+        self.assertEqual(stored["contract_code"], "Xm-42")
         self.assertEqual(stored["field_id"], "40")
         self.assertIsNone(stored["actual_payout"])
         self.assertEqual(stored["finish_state"], "SUCCESS")
         self.assertEqual(calls[2].args[1]["$setOnInsert"]["outcome"], "cancelled")
+
+    def test_supplied_contract_code_must_match_native_id(self):
+        database = MagicMock()
+        service = NativeContractService(database)
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            service.ingest("server", "save", "world", "event", "available",
+                           {"mission_id": "37", "contract_code": "CZZ"})
+
+    def test_numeric_public_code_resolves_to_scoped_contract_record(self):
+        database = MagicMock()
+        service = ContractContributionReportService(database)
+        contract = {"mission_id": "1296", "contract_code": "C100", "mission_type": "fertilizeMission",
+                    "field_id": "37", "area_ha": 1, "accepting_farm_id": "2", "lifecycle": "accepted"}
+        database.db.native_contracts.find_one.return_value = contract
+        database.db.native_contract_lifecycle_events.find.return_value.sort.return_value = []
+        database.db.farm_operational_events.find.return_value.sort.return_value.limit.return_value = []
+
+        service.for_contract("server", "save", "world", "C100")
+
+        self.assertEqual(database.db.native_contracts.find_one.call_args.args[0], {
+            "server_key": "server", "save_key": "save", "world_id": "world", "contract_code": "C100"})
+        contribution_scope = database.db.farm_operational_events.find.call_args.args[0]
+        self.assertEqual(contribution_scope["mission_id"], "1296")
+
+    def test_compact_sin_reference_resolves_without_decoding_native_id(self):
+        database = MagicMock()
+        service = ContractContributionReportService(database)
+        mission_id = "mission0f55fa33df33af7807912d12345678"
+        code = native_contract_code(mission_id)
+        database.db.native_contracts.find_one.return_value = {
+            "mission_id": mission_id, "contract_code": code,
+            "mission_type": "fertilizeMission"}
+        database.db.native_contract_lifecycle_events.find.return_value.sort.return_value = []
+        database.db.farm_operational_events.find.return_value.sort.return_value.limit.return_value = []
+
+        service.for_contract("server", "save", "world", code.lower())
+
+        self.assertEqual(database.db.native_contracts.find_one.call_args.args[0], {
+            "server_key": "server", "save_key": "save", "world_id": "world",
+            "contract_code": code})
 
 
 class ContractContributionReportTests(unittest.TestCase):
@@ -37,6 +99,7 @@ class ContractContributionReportTests(unittest.TestCase):
             self.database, lambda *_: {"canonical_name": "Player One"})
         self.mission_id = "m-42"
         self.contract = {"_id": contract_key("server", "save", "world-a", self.mission_id),
+                         "contract_code": "Xm-42",
                          "mission_id": self.mission_id, "mission_type": "fertilizeMission",
                          "field_id": "40", "area_ha": 7.25, "accepting_farm_id": "2",
                          "lifecycle": "completed", "actual_payout": None}
@@ -64,6 +127,7 @@ class ContractContributionReportTests(unittest.TestCase):
                                  "world_id": "world-a", "mission_id": self.mission_id,
                                  "kind": "contract_work"})
         message = format_contract_contribution_report(report)
+        self.assertIn("SiN reference `Xm-42`", message)
         self.assertIn("Player One", message)
         self.assertIn("vehicle …tor-0001 / implement …yer-0002", message)
         self.assertIn("AI:", message)
