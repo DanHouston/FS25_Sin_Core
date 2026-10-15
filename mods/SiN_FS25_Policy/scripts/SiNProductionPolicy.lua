@@ -8,7 +8,8 @@ SiNProductionPolicy = {
     registry = {},
     hiddenSellingPoints = {},
     diagnosticCount = 0,
-    hooksInstalled = false
+    hooksInstalled = false,
+    mixedRecipePoliciesVersion = 1
 }
 
 local MOD_DIRECTORY = g_currentModDirectory or ""
@@ -113,13 +114,13 @@ function SiNProductionPolicy:loadPolicy()
             xmlFile:iterate(recipeKey .. ".input", function(_, amountKey)
                 local fillType = xmlFile:getString(amountKey .. "#fillType")
                 local amount = validPositiveNumber(xmlFile:getString(amountKey .. "#amount"))
-                if type(fillType) ~= "string" or string.match(fillType, "^[A-Z0-9_]+$") == nil or amount == nil then invalid = true
+                if type(fillType) ~= "string" or string.match(fillType, "^[%w_]+$") == nil or amount == nil then invalid = true
                 else recipe.inputs[fillType] = amount end
             end)
             xmlFile:iterate(recipeKey .. ".output", function(_, amountKey)
                 local fillType = xmlFile:getString(amountKey .. "#fillType")
                 local amount = validPositiveNumber(xmlFile:getString(amountKey .. "#amount"))
-                if type(fillType) ~= "string" or string.match(fillType, "^[A-Z0-9_]+$") == nil or amount == nil then invalid = true
+                if type(fillType) ~= "string" or string.match(fillType, "^[%w_]+$") == nil or amount == nil then invalid = true
                 else recipe.outputs[fillType] = amount end
             end)
             if invalid then warning("invalid recipe amount policy skipped production=" .. tostring(id))
@@ -218,7 +219,6 @@ local function canStageNativeRecipePolicy(policy)
     if policy == nil or type(policy.recipes) ~= "table" then return false end
     local hasChange = policy.cyclesScale ~= nil
     for _, recipe in pairs(policy.recipes) do
-        if recipe.enabled == false then return false end
         if recipe.cyclesPerHour ~= nil or recipe.cyclesScale ~= nil
             or next(recipe.inputs) ~= nil or next(recipe.outputs) ~= nil then
             hasChange = true
@@ -255,6 +255,9 @@ function SiNProductionPolicy:loadWithNativeRecipePolicy(productionPoint, superFu
                 return
             end
             seen[recipeId] = true
+            -- Disabled recipes retain their policy settings for later review,
+            -- but only enabled recipes stage financial/throughput changes.
+            if recipe.enabled == false then return end
             local function addChange(path, effective)
                 local previous = xmlFile:getValue(path)
                 if type(previous) ~= "number" or previous <= 0
@@ -305,11 +308,20 @@ function SiNProductionPolicy:loadWithNativeRecipePolicy(productionPoint, superFu
         return loadUnchanged(false)
     end
 
-    local staged, attempted = 0, 0
+    local function valuesMatch(actual, expected)
+        return type(actual) == "number" and type(expected) == "number"
+            and math.abs(actual - expected) <= math.max(1, math.abs(expected)) * 0.000001
+    end
+    local staged, attempted, failedChange, failedValue = 0, 0, nil, nil
     for index, change in ipairs(changes) do
         attempted = index
         local ok = pcall(xmlFile.setValue, xmlFile, change.path, change.effective)
-        if not ok or xmlFile:getValue(change.path) ~= change.effective then break end
+        local actual = xmlFile:getValue(change.path)
+        if not ok or not valuesMatch(actual, change.effective) then
+            failedChange = change
+            failedValue = actual
+            break
+        end
         staged = staged + 1
     end
     if staged ~= #changes then
@@ -317,7 +329,10 @@ function SiNProductionPolicy:loadWithNativeRecipePolicy(productionPoint, superFu
             local change = changes[index]
             xmlFile:setValue(change.path, change.previous)
         end
-        warning("native recipe policy unavailable id=" .. id .. " reason=xml-override-failed")
+        warning("native recipe policy unavailable id=" .. id .. " reason=xml-override-failed path="
+            .. tostring(failedChange ~= nil and failedChange.path or "unknown") .. " expected="
+            .. tostring(failedChange ~= nil and failedChange.effective or "unknown") .. " actual="
+            .. tostring(failedValue))
         return loadUnchanged(false)
     end
 
@@ -327,6 +342,9 @@ function SiNProductionPolicy:loadWithNativeRecipePolicy(productionPoint, superFu
         xmlFile:setValue(change.path, change.previous)
     end
     if not ok then error(success) end
+    -- XML fields have been restored; remove disabled native indexes before
+    -- saved production state or multiplayer streams are read.
+    if success ~= false then self:applyRuntimeRecipePolicy(productionPoint, xmlFile) end
     if success ~= false then info("native recipe policy applied id=" .. id .. " recipes=" .. tostring(matched)
         .. " fields=" .. tostring(#changes)) end
     return success
@@ -480,16 +498,12 @@ function SiNProductionPolicy:applyRuntimeRecipePolicy(productionPoint, xmlFile)
     end
     local toRemove, seen, expected = {}, {}, 0
     for recipeId, recipe in pairs(policy.recipes) do
-        if recipe.enabled ~= false then
-            warning("runtime recipe policy unavailable id=" .. id .. " reason=unsupported-post-load-policy")
-            return false
-        end
-        expected = expected + 1
+        if recipe.enabled == false then expected = expected + 1 end
     end
     for index, production in ipairs(productionPoint.productions) do
         local recipeId = production ~= nil and production.id or nil
         local recipe = recipeId ~= nil and policy.recipes[recipeId] or nil
-        if recipe ~= nil then
+        if recipe ~= nil and recipe.enabled == false then
             if seen[recipeId] or productionPoint.productionsIdToObj[recipeId] ~= production
                 or production.index ~= index then
                 warning("runtime recipe policy unavailable id=" .. id .. " reason=unmatched-native-recipe")
@@ -499,12 +513,13 @@ function SiNProductionPolicy:applyRuntimeRecipePolicy(productionPoint, xmlFile)
             table.insert(toRemove, index)
         end
     end
+    if expected == 0 then return false end
     if #toRemove ~= expected then
         warning("runtime recipe policy unavailable id=" .. id .. " reason=unmatched-native-recipe")
         return false
     end
     for _, active in ipairs(productionPoint.activeProductions or {}) do
-        if policy.recipes[active.id] ~= nil then
+        if policy.recipes[active.id] ~= nil and policy.recipes[active.id].enabled == false then
             warning("runtime recipe policy unavailable id=" .. id .. " reason=recipe-already-active")
             return false
         end

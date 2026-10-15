@@ -3,9 +3,72 @@
 -- FruitTypeManager:loadMapData and only mutates explicitly configured fruits.
 
 local SiNCropSettings = {}
+SiNCropFieldGrowthRequestEvent = {}
+local SiNCropFieldGrowthRequestEvent_mt = Class(SiNCropFieldGrowthRequestEvent, Event)
+InitEventClass(SiNCropFieldGrowthRequestEvent, "SiNCropFieldGrowthRequestEvent")
+
+function SiNCropFieldGrowthRequestEvent.emptyNew()
+    return Event.new(SiNCropFieldGrowthRequestEvent_mt)
+end
+
+function SiNCropFieldGrowthRequestEvent.new(fieldId)
+    local self = SiNCropFieldGrowthRequestEvent.emptyNew()
+    self.fieldId = fieldId
+    return self
+end
+
+function SiNCropFieldGrowthRequestEvent:readStream(streamId, connection)
+    self.fieldId = streamReadUIntN(streamId, 16)
+    self:run(connection)
+end
+
+function SiNCropFieldGrowthRequestEvent:writeStream(streamId, connection)
+    streamWriteUIntN(streamId, self.fieldId, 16)
+end
+
+function SiNCropFieldGrowthRequestEvent:run(connection)
+    if g_currentMission == nil or not g_currentMission:getIsServer() then return end
+    if connection == nil or (connection.getIsServer ~= nil and connection:getIsServer()) then return end
+    if SiNCropSettings.onFieldGrowthRequest ~= nil then
+        SiNCropSettings:onFieldGrowthRequest(connection, self.fieldId)
+    end
+end
+
+SiNCropFieldGrowthResponseEvent = {}
+local SiNCropFieldGrowthResponseEvent_mt = Class(SiNCropFieldGrowthResponseEvent, Event)
+InitEventClass(SiNCropFieldGrowthResponseEvent, "SiNCropFieldGrowthResponseEvent")
+
+function SiNCropFieldGrowthResponseEvent.emptyNew()
+    return Event.new(SiNCropFieldGrowthResponseEvent_mt)
+end
+
+function SiNCropFieldGrowthResponseEvent.new(message)
+    local self = SiNCropFieldGrowthResponseEvent.emptyNew()
+    self.message = tostring(message or "")
+    return self
+end
+
+function SiNCropFieldGrowthResponseEvent:readStream(streamId, connection)
+    self.message = streamReadString(streamId)
+    self:run(connection)
+end
+
+function SiNCropFieldGrowthResponseEvent:writeStream(streamId, connection)
+    streamWriteString(streamId, self.message)
+end
+
+function SiNCropFieldGrowthResponseEvent:run(connection)
+    if g_currentMission == nil or not g_currentMission:getIsClient() then return end
+    if connection ~= nil and connection.getIsServer ~= nil and not connection:getIsServer() then return end
+    for line in string.gmatch(self.message or "", "[^\n]+") do Logging.info("%s", line) end
+end
+
 local MOD_DIRECTORY = g_currentModDirectory or ""
 local CONFIG_PATH = MOD_DIRECTORY .. "config/fruit-policy.xml"
 local MAX_DIAGNOSTICS = 8
+local LAST_SPRING_TO_AUTUMN_PERIOD = 10 -- FS25 periods 1-10 are March-December
+local SNOW_CLEAR_TILE_SIZE = 128
+local SNOW_CLEAR_TILES_PER_UPDATE = 24
 local PERIOD_NAMES = {
     EARLY_SPRING = 1, MID_SPRING = 2, LATE_SPRING = 3,
     EARLY_SUMMER = 4, MID_SUMMER = 5, LATE_SUMMER = 6,
@@ -675,6 +738,12 @@ local function buildAnnualLifecycle(fruitType, entry, seasonal, state)
         end
         if planting[period] then
             replacement[invisible] = states[1]
+        elseif harvest[period] then
+            -- Existing NPC/preplanted fields can still be at INVISIBLE when
+            -- their harvest window arrives. They are already registered as
+            -- this fruit, so catch them up instead of stranding them until
+            -- the next planting window.
+            replacement[invisible] = states[#states]
         end
         if offset <= lastHarvestOffset then
             -- Maintain one state of separation between sowing cohorts. Long
@@ -945,12 +1014,20 @@ local function describeGrowth(fruitName, source)
     local seasonal = seasonalData(fruit)
     local periods = type(seasonal) == "table" and seasonal.periods or nil
     if type(periods) ~= "table" then return "Seasonal data unavailable: " .. fruitName end
-    local states = nativeHarvestStateIds(fruit, collectStateIds(fruit, periods))
+    -- Include every numeric native state, not just harvest-ready foliage. This
+    -- lets live diagnostics show whether the map's intermediate stages advance.
+    local stateIds = collectStateIds(fruit, periods)
     local ready = resolveGrowthState(fruit, "HARVESTREADY")
-    if ready ~= nil then states[ready] = true end
+    if ready ~= nil then table.insert(stateIds, ready) end
+    table.sort(stateIds)
     local ordered = {}
-    for id in pairs(states) do table.insert(ordered, id) end
-    table.sort(ordered)
+    local previous = nil
+    for _, id in ipairs(stateIds) do
+        if id ~= previous then
+            table.insert(ordered, id)
+            previous = id
+        end
+    end
     local summaries = {}
     for period = 1, 12 do
         local data = periods[period]
@@ -963,8 +1040,8 @@ local function describeGrowth(fruitName, source)
         table.insert(summaries, tostring(period) .. ":" .. tostring(type(data) == "table" and data.isHarvestable)
             .. "[" .. table.concat(mappings, ",") .. "]")
     end
-    logInfo(string.format("growth-probe source=%s fruit=%s nativeWithered=%s namedDead=%s periods=%s",
-        source, fruitName, tostring(fruit.witheredState), tostring(resolveGrowthState(fruit, "DEAD")),
+    logInfo(string.format("growth-probe source=%s fruit=%s states=%s nativeWithered=%s namedDead=%s periods=%s",
+        source, fruitName, table.concat(ordered, ","), tostring(fruit.witheredState), tostring(resolveGrowthState(fruit, "DEAD")),
         table.concat(summaries, ";")))
     return nil
 end
@@ -1003,6 +1080,89 @@ function SiNCropSettings:consoleGrowth(fruitName)
     return "Read-only growth probe armed for " .. fruitName .. "; next four native engine-state calls"
 end
 
+function SiNCropSettings:consoleFieldGrowth(fieldIdValue)
+    local fieldId = tonumber(fieldIdValue)
+    if fieldId == nil or fieldId < 0 or fieldId > 65535 or fieldId % 1 ~= 0 then
+        return "Usage: sinFieldGrowth <fieldId>"
+    end
+    if g_client == nil then return "sinFieldGrowth must be run from a connected client" end
+    local connection = type(g_client.getServerConnection) == "function"
+        and g_client:getServerConnection() or g_client.serverConnection
+    if connection == nil or connection.sendEvent == nil then
+        return "sinFieldGrowth: server connection unavailable"
+    end
+    local ok = pcall(connection.sendEvent, connection,
+        SiNCropFieldGrowthRequestEvent.new(fieldId))
+    if not ok then return "sinFieldGrowth: could not send request" end
+    return "sinFieldGrowth: request sent; result will appear in this client log (server checks admin access)"
+end
+
+function SiNCropSettings:onFieldGrowthRequest(connection, fieldId)
+    local mission = g_currentMission
+    local userManager = mission ~= nil and mission.userManager or nil
+    local requesterId = nil
+    if userManager ~= nil and type(userManager.getUserIdByConnection) == "function" then
+        local ok, value = pcall(userManager.getUserIdByConnection, userManager, connection)
+        if ok then requesterId = value end
+    end
+    local requester = nil
+    if requesterId ~= nil and type(userManager.getUserByUserId) == "function" then
+        local ok, value = pcall(userManager.getUserByUserId, userManager, requesterId)
+        if ok then requester = value end
+    end
+    local isAdmin = false
+    if requester ~= nil and type(requester.getIsMasterUser) == "function" then
+        local ok, value = pcall(requester.getIsMasterUser, requester)
+        isAdmin = ok and value == true
+    end
+    local message
+    if not isAdmin then
+        message = "[SiN Crop Settings] field-growth denied: server admin required"
+    else
+        local fieldManager = g_fieldManager or (mission ~= nil and mission.fieldManager)
+        local field = fieldManager ~= nil and fieldManager.farmlandIdFieldMapping ~= nil
+            and fieldManager.farmlandIdFieldMapping[fieldId] or nil
+        if field == nil and fieldManager ~= nil and type(fieldManager.getFieldById) == "function" then
+            local ok, value = pcall(fieldManager.getFieldById, fieldManager, fieldId)
+            if ok and value ~= nil then
+                local mappedFarmlandId = value.farmland ~= nil and value.farmland.id or nil
+                if mappedFarmlandId == fieldId then field = value end
+            end
+        end
+        if field == nil or type(field.getFieldState) ~= "function" then
+            message = string.format("[SiN Crop Settings] field-growth fieldId=%d unavailable", fieldId)
+        else
+            local ok, state = pcall(field.getFieldState, field)
+            if not ok or type(state) ~= "table" then
+                message = string.format("[SiN Crop Settings] field-growth fieldId=%d state-unavailable", fieldId)
+            else
+                local fruit = g_fruitTypeManager ~= nil and
+                    g_fruitTypeManager:getFruitTypeByIndex(state.fruitTypeIndex) or nil
+                local fruitName = fruit ~= nil and (fruit.name or fruit.indexName) or "UNKNOWN"
+                local growthState = tonumber(state.growthState) or 0
+                local stateName = "unknown"
+                if fruit ~= nil then
+                    for name, id in pairs(fruit.growthStateIds or fruit.nameToGrowthState or {}) do
+                        if tonumber(id) == growthState then stateName = tostring(name); break end
+                    end
+                end
+                local ready = fruit ~= nil and growthState >= (fruit.minHarvestingGrowthState or math.huge)
+                    and growthState <= (fruit.maxHarvestingGrowthState or -1)
+                local nativeFieldId = type(field.getId) == "function" and field:getId() or field.id
+                local farmlandId = field.farmland ~= nil and field.farmland.id or fieldId
+                message = string.format(
+                    "[SiN Crop Settings] field-growth farmlandId=%d fieldId=%s valid=%s fruit=%s growthState=%d stateName=%s lastGrowthState=%s harvestRange=%s-%s harvestReady=%s",
+                    fieldId, tostring(nativeFieldId or "unknown"), tostring(state.isValid == true), tostring(fruitName), growthState, stateName,
+                    tostring(state.lastGrowthState), tostring(fruit ~= nil and fruit.minHarvestingGrowthState or "unavailable"),
+                    tostring(fruit ~= nil and fruit.maxHarvestingGrowthState or "unavailable"), tostring(ready == true))
+            end
+        end
+    end
+    if connection ~= nil and connection.sendEvent ~= nil then
+        pcall(connection.sendEvent, connection, SiNCropFieldGrowthResponseEvent.new(message))
+    end
+end
+
 local function installHook()
     if FruitTypeManager == nil or FruitTypeManager.loadMapData == nil then
         logWarning("FruitTypeManager:loadMapData unavailable; policy hook disabled")
@@ -1028,7 +1188,103 @@ local function installHook()
     logInfo("hook installed FruitTypeManager:loadMapData")
 end
 
+-- Winter snow is native weather state, separate from the fruit calendar above.
+-- On the authoritative server, sweep the map through SnowSystem's public area
+-- removal API when loading in March or later and at each later period change.
+local function removeSnowTriangle(snowSystem, x0, z0, x1, z1, x2, z2)
+    local minimumLayer = SnowSystem ~= nil and tonumber(SnowSystem.MIN_LAYER_HEIGHT) or nil
+    if minimumLayer == nil or minimumLayer <= 0 then return end
+    local ok, height = pcall(snowSystem.getSnowHeightAtArea, snowSystem,
+        x0, z0, x1, z1, x2, z2)
+    height = ok and tonumber(height) or nil
+    if height == nil or height <= 0 then return end
+    local layers = math.ceil(height / minimumLayer)
+    pcall(snowSystem.removeSnow, snowSystem, x0, z0, x1, z1, x2, z2, layers)
+end
+
+function SiNCropSettings:queueSpringSnowClear(period, reason)
+    local mission = g_currentMission
+    if g_server == nil or mission == nil or period < 1 or period > LAST_SPRING_TO_AUTUMN_PERIOD then
+        return false
+    end
+    local snowSystem = mission.snowSystem
+    local terrainSize = tonumber(mission.terrainSize)
+    if snowSystem == nil or type(snowSystem.getSnowHeightAtArea) ~= "function"
+        or type(snowSystem.removeSnow) ~= "function" or terrainSize == nil or terrainSize <= 0 then
+        if not self.snowClearUnavailableLogged then
+            logWarning("spring snow clear unavailable: native snow or terrain API missing")
+            self.snowClearUnavailableLogged = true
+        end
+        return false
+    end
+    self.snowClearUnavailableLogged = false
+    local half = terrainSize * 0.5
+    self.snowClear = {snowSystem=snowSystem, minX=-half, minZ=-half,
+        maxX=half, maxZ=half, x=-half, z=-half, removed=0}
+    logInfo(string.format("spring snow clear queued period=%d reason=%s terrainSize=%.0f",
+        period, tostring(reason), terrainSize))
+    return true
+end
+
+function SiNCropSettings:loadMap()
+    self.lastSnowClearPeriod = nil
+    self.snowClear = nil
+end
+
+function SiNCropSettings:update()
+    local mission = g_currentMission
+    local environment = mission ~= nil and mission.environment or nil
+    local period = environment ~= nil and tonumber(environment.currentPeriod) or nil
+    if g_server == nil or period == nil then return end
+
+    if self.lastSnowClearPeriod == nil then
+        if period <= LAST_SPRING_TO_AUTUMN_PERIOD then
+            if self:queueSpringSnowClear(period, "load") then
+                self.lastSnowClearPeriod = period
+            end
+        else
+            self.lastSnowClearPeriod = period
+        end
+    elseif period ~= self.lastSnowClearPeriod then
+        if period <= LAST_SPRING_TO_AUTUMN_PERIOD then
+            if self:queueSpringSnowClear(period, "period-change") then
+                self.lastSnowClearPeriod = period
+            end
+        else
+            self.lastSnowClearPeriod = period
+        end
+    end
+
+    local work = self.snowClear
+    if work == nil then return end
+    for _ = 1, SNOW_CLEAR_TILES_PER_UPDATE do
+        if work.z >= work.maxZ then
+            self.snowClear = nil
+            logInfo(string.format("spring snow clear complete triangles=%d", work.removed))
+            return
+        end
+        local x0, z0 = work.x, work.z
+        local x1 = math.min(x0 + SNOW_CLEAR_TILE_SIZE, work.maxX)
+        local z1 = math.min(z0 + SNOW_CLEAR_TILE_SIZE, work.maxZ)
+        removeSnowTriangle(work.snowSystem, x0, z0, x1, z0, x0, z1)
+        removeSnowTriangle(work.snowSystem, x1, z0, x1, z1, x0, z1)
+        work.removed = work.removed + 2
+        work.x = x1
+        if work.x >= work.maxX then
+            work.x = work.minX
+            work.z = z1
+        end
+    end
+end
+
+function SiNCropSettings:deleteMap()
+    self.snowClear = nil
+    self.lastSnowClearPeriod = nil
+end
+
 installHook()
 if type(addConsoleCommand) == "function" then
     addConsoleCommand("sinCropGrowth", "Read-only crop withering diagnostics", "consoleGrowth", SiNCropSettings)
+    addConsoleCommand("sinFieldGrowth", "Admin: read authoritative crop growth state for a field", "consoleFieldGrowth", SiNCropSettings)
 end
+addModEventListener(SiNCropSettings)

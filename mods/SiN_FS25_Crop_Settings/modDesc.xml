@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="utf-8" standalone="no"?>
 <modDesc descVersion="92">
     <author>SiN (SimNet)</author>
-    <version>0.2.6.0</version>
+    <version>0.2.7.3</version>
     <iconFilename>icon_crop.dds</iconFilename>
     <title>
         <en>SiN FS25 Crop Settings</en>
     </title>
     <description>
-        <en>SiN crop policy runtime layer.</en>
+        <en>SiN crop policy runtime layer with spring snow clearing.</en>
     </description>
     <multiplayer supported="true"/>
     <extraSourceFiles>

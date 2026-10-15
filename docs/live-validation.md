@@ -139,6 +139,11 @@ Deploy the same `FS25_SiN_Server.zip` to the dedicated server and client. Keep
 the Agent pointed at the canonical `FS25_SiN_Server` mailbox. Restart the
 dedicated server and reconnect the client once. Use the read-only commands
 `sinSelfTest` and `sinPermissions` during the session.
+From an in-game server-admin client's console, run
+`sinFarmUserPermissions <userId> <farmId>`. The server verifies the requesting
+connection is the master/admin user, reads the live user and farm permission
+state, and returns the result only to that admin client's log. For example,
+`sinFarmUserPermissions 3 4` checks user 3 on farm 4.
 
 ### Farm Manager synchronization
 

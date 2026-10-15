@@ -30,6 +30,13 @@ entries deliberately leave their native mappings unchanged.
 
 ## Canonical calendar
 
+The crop policy also clears native snow on the authoritative server when a save
+loads in March through December, and on each subsequent period change in that
+range. It sweeps the map incrementally using `SnowSystem` area queries
+and `removeSnow`, so a March save with stranded winter snow is cleaned after
+the updated mod loads. This is a direct seasonal clear; it does not depend on
+spring temperatures or disable future snow events within the current period.
+
 FS25's twelve seasonal periods map to months as follows: `EARLY_SPRING` = March,
 `MID_SPRING` = April, `LATE_SPRING` = May, `EARLY_SUMMER` = June,
 `MID_SUMMER` = July, `LATE_SUMMER` = August, `EARLY_AUTUMN` = September,
@@ -111,6 +118,10 @@ path merely because the state names exist. Intermediate states follow the map's
 ordered native path, but some may be skipped to meet the target month. The
 generated schedule does not preserve the map's original monthly timing or
 winter pauses: those timings are replaced by the configured SiN annual cycle.
+If an already-present annual crop is still `invisible` during its harvest
+window, the outgoing mapping catches it up to the native harvest-ready state.
+This covers NPC/preplanted field states that persisted outside the simulated
+sowing cohorts.
 
 ### Executable lifecycle verification
 
@@ -221,10 +232,10 @@ XML bytes when rebuilding; do not shift calendar month names in that file.
 Descriptor tests do not prove density-map execution or NPC field behavior.
 No field state is forcibly rewritten by this diagnostic.
 
-Run `sinCropGrowth OAT` in the local single-player console (substitute the
+Run `sinCropGrowth OAT` in the local game console (substitute the
 affected registered fruit name). It records all twelve runtime seasonal
-harvest flags and harvest-state successors, plus native `witheredState` and
-the named `DEAD` state. Period 1 is March; period 9 is November. For oats the
+harvest flags and successors for every registered numeric growth state, plus
+native `witheredState` and the named `DEAD` state. Period 1 is March; period 9 is November. For oats the
 configured July–October window now yields a withering successor in outgoing
 period 8, which executes on entering November (period 9).
 The command also arms four observations immediately before native
@@ -234,6 +245,12 @@ field number and player/NPC ownership. This establishes whether the mapping
 is still present at the native boundary; it does not claim the engine has
 changed a field. The wrapper forwards all arguments and return values and
 does not invoke growth itself. No polling or continuous logging is added.
+
+For a field-specific authoritative read, a connected server admin can run
+`sinFieldGrowth <fieldId>` from the in-game client console. The server reads
+the native field state and returns the field's fruit type, numeric growth
+state, resolved state name, harvest-ready range, and readiness flag only to
+that admin client's log. This is read-only.
 
 Sorghum uses the same annual `stateChain` policy as the other annual crops.
 Its active map descriptor supplies the native `greenSmall -> greenMiddle ->

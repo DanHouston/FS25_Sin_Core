@@ -697,21 +697,36 @@ class NetworkBot(discord.Client):
                     choices.append(app_commands.Choice(name=label[:100], value=player_id))
             return choices[:25]
 
-        async def observed_farms(interaction: discord.Interaction, current: str):
-            server = getattr(interaction.namespace, "server", None)
-            if not server or server not in self.servers:
+        async def observed_farms(interaction: discord.Interaction, current: str,
+                                 server_option: str = "server", value_as_int: bool = False):
+            server = getattr(interaction.namespace, server_option, None)
+            if not server:
                 return []
             try:
-                snapshot = await asyncio.to_thread(ServerScraper(self.servers).snapshot, server)
-            except ValueError:
+                config = await asyncio.to_thread(server_config, interaction, server)
+                save_key = selected_save(config)
+                runtime = await asyncio.to_thread(self.server_registry.active_runtime, server)
+                if (not isinstance(runtime, dict) or str(runtime.get("save_key") or "") != str(save_key)
+                        or not str(runtime.get("world_id") or "")):
+                    return []
+                snapshot = await asyncio.to_thread(
+                    self.farm_reports.db.server_snapshots.find_one,
+                    {"server_key": server, "save_key": save_key, "world_id": runtime["world_id"],
+                     "source": "game"}, sort=[("received_at", -1)])
+            except (ValueError, PyMongoError):
+                return []
+            farms = snapshot.get("farms") if isinstance(snapshot, dict) else None
+            if not isinstance(farms, dict):
                 return []
             choices = []
-            for farm_id, name in snapshot["farms"].items():
-                if not name.strip():
+            for farm_id, name in farms.items():
+                name = str(name or "").strip()
+                if not name:
                     continue
-                label = f"Farm {farm_id} ? {name}"
+                label = f"Farm {farm_id} - {name}"
                 if current.lower() in label.lower():
-                    choices.append(app_commands.Choice(name=label[:100], value=str(farm_id)))
+                    value = int(farm_id) if value_as_int else str(farm_id)
+                    choices.append(app_commands.Choice(name=label[:100], value=value))
             return choices[:25]
 
         async def pending_requesters(interaction: discord.Interaction, current: str):
@@ -1186,7 +1201,7 @@ class NetworkBot(discord.Client):
             return await server_choices(interaction, current)
 
         @self.tree.command(name="farm_report_admin", description="Staff: view a farm's finance, activity, and contract work")
-        @app_commands.describe(farm_id="Farm ID from the current server snapshot")
+        @app_commands.describe(farm_id="Select a farm by name from the chosen server")
         @app_commands.check(channel_check)
         @app_commands.default_permissions(administrator=True)
         async def farm_report_admin(interaction: discord.Interaction, server: str,
@@ -1219,6 +1234,10 @@ class NetworkBot(discord.Client):
         @farm_report_admin.autocomplete("server")
         async def farm_report_admin_server_autocomplete(interaction: discord.Interaction, current: str):
             return await server_choices(interaction, current, "reconcile")
+
+        @farm_report_admin.autocomplete("farm_id")
+        async def farm_report_admin_farm_autocomplete(interaction: discord.Interaction, current: str):
+            return await observed_farms(interaction, current, "server", value_as_int=True)
 
         @self.tree.command(name="contract_report", description="Staff: report measured player/AI work on a native FS25 contract")
         @app_commands.describe(contract_code="Choose the matching field and contract type; no code memorization needed")
@@ -1684,13 +1703,13 @@ class NetworkBot(discord.Client):
         async def event_complete_autocomplete(interaction: discord.Interaction, current: str):
             return await event_choices(interaction, current)
 
-        @self.tree.command(name="transfer_vehicle", description="Transfer a farm vehicle to a farm on its current server")
+        @self.tree.command(name="vehicle_transfer", description="Transfer a farm vehicle to a farm on its current server")
         @app_commands.check(channel_check)
         @app_commands.describe(destination_server="Server where the vehicle should arrive (currently must be its current server)",
-                               destination_farm="FS25 destination farm ID on that server",
+                               destination_farm="Destination farm on that server; select by farm name",
                                vehicle_code="Short SiN code shown by /vehicles")
-        async def transfer_vehicle(interaction: discord.Interaction,
-                                   destination_server: str, destination_farm: app_commands.Range[int, 1],
+        async def vehicle_transfer(interaction: discord.Interaction,
+                                   destination_server: str, destination_farm: str,
                                    vehicle_code: str):
             record = await asyncio.to_thread(
                 self.transfers.create_vehicle_by_code, str(interaction.user.id), destination_farm, vehicle_code,
@@ -1711,19 +1730,23 @@ class NetworkBot(discord.Client):
                     "confirms the destination owner. If sent to the wrong farm, that farm can transfer "
                     "it back with a new request.", ephemeral=True)
 
-        @transfer_vehicle.autocomplete("destination_server")
-        async def transfer_vehicle_destination_server_autocomplete(interaction: discord.Interaction, current: str):
+        @vehicle_transfer.autocomplete("destination_server")
+        async def vehicle_transfer_destination_server_autocomplete(interaction: discord.Interaction, current: str):
             return await server_choices(interaction, current, "reconcile")
 
-        @self.tree.command(name="admin_transfer_vehicle", description="Staff: transfer a vehicle to a farm on its current server")
+        @vehicle_transfer.autocomplete("destination_farm")
+        async def vehicle_transfer_destination_farm_autocomplete(interaction: discord.Interaction, current: str):
+            return await observed_farms(interaction, current, "destination_server")
+
+        @self.tree.command(name="vehicle_transfer_admin", description="Staff: transfer a vehicle to a farm on its current server")
         @app_commands.check(channel_check)
         @app_commands.default_permissions(administrator=True)
         @app_commands.describe(destination_server="Server where the vehicle should arrive (currently must be its current server)",
-                               destination_farm="FS25 destination farm ID on that server",
+                               destination_farm="Destination farm on that server; select by farm name",
                                vehicle_code="Short SiN code shown by /vehicles",
                                reason="Audit note explaining this admin-initiated transfer")
-        async def admin_transfer_vehicle(interaction: discord.Interaction,
-                                         destination_server: str, destination_farm: app_commands.Range[int, 1],
+        async def vehicle_transfer_admin(interaction: discord.Interaction,
+                                         destination_server: str, destination_farm: str,
                                          vehicle_code: str, reason: str):
             staff_check(interaction)
             record = await asyncio.to_thread(
@@ -1745,9 +1768,13 @@ class NetworkBot(discord.Client):
                     "FS25 must confirm the destination owner before this is marked complete. "
                     f"Audit reason: {record['admin_reason']}", ephemeral=True)
 
-        @admin_transfer_vehicle.autocomplete("destination_server")
-        async def admin_transfer_vehicle_destination_server_autocomplete(interaction: discord.Interaction, current: str):
+        @vehicle_transfer_admin.autocomplete("destination_server")
+        async def vehicle_transfer_admin_destination_server_autocomplete(interaction: discord.Interaction, current: str):
             return await server_choices(interaction, current, "reconcile")
+
+        @vehicle_transfer_admin.autocomplete("destination_farm")
+        async def vehicle_transfer_admin_destination_farm_autocomplete(interaction: discord.Interaction, current: str):
+            return await observed_farms(interaction, current, "destination_server")
 
         @self.tree.command(name="transfer_list", description="Staff: list durable farm transfers")
         @app_commands.check(channel_check)

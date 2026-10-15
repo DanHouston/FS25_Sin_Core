@@ -28,7 +28,7 @@ destination farm with its own verified manager authority.
 
 ## Live farm-to-farm transfers
 
-`/transfer_vehicle destination_server destination_farm vehicle_code` is
+`/vehicle_transfer destination_server destination_farm vehicle_code` is
 initiated by a confirmed manager of the source farm and queues the operation
 immediately; the destination farm does not approve it. The vehicle code
 identifies its source server, save, world, and native vehicle, so the member
@@ -36,13 +36,15 @@ does not have to repeat the source farm ID. `destination_server` is included
 for the multi-server workflow, but today it must be the same server identified
 by the vehicle code. Selecting another server is rejected: cross-server
 movement is not implemented. The destination farm is selected on that same
-active FS25 world. Dispatch is allowed only when the latest game snapshot is
-complete and no older than two minutes. A staff-only `/transfer_dispatch`
-remains available for retry after a stale snapshot or temporary dispatch
-problem.
+active FS25 world using a name-filtered farm autocomplete; the selected label
+includes the farm ID and name while the command submits the corresponding ID.
+Staff `/vehicle_transfer_admin` uses the same farm picker. Dispatch is allowed
+only when the latest game snapshot is complete and no older than two minutes.
+A staff-only `/transfer_dispatch` remains available for retry after a stale
+snapshot or temporary dispatch problem.
 
 Staff can use
-`/admin_transfer_vehicle destination_server destination_farm vehicle_code reason`
+`/vehicle_transfer_admin destination_server destination_farm vehicle_code reason`
 for a directly authorized correction or relocation when the source-farm
 manager cannot initiate it. The destination fields match the member command;
 the staff command adds a required audit reason. The source server and farm are

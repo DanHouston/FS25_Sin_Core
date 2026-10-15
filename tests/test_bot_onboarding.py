@@ -419,8 +419,8 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([option["name"] for option in options], ["amount"])
 
     async def test_vehicle_transfer_commands_use_short_codes_and_omit_redundant_source_fields(self):
-        member = self.bot.tree.get_command("transfer_vehicle")
-        admin = self.bot.tree.get_command("admin_transfer_vehicle")
+        member = self.bot.tree.get_command("vehicle_transfer")
+        admin = self.bot.tree.get_command("vehicle_transfer_admin")
         self.assertIsNone(self.bot.tree.get_command("transfer_request"))
         self.assertIsNone(self.bot.tree.get_command("admin_vehicle_transfer"))
         self.assertEqual([option["name"] for option in member.to_dict(self.bot.tree)["options"]],

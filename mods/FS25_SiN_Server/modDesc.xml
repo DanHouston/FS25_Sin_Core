@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8" standalone="no"?>
 <modDesc descVersion="92">
     <author>SiN (SimNet)</author>
-    <version>0.2.2.17</version>
+    <version>0.2.2.19</version>
     <title><en>SiN (SimNet) Server</en></title>
     <description><en>SiN server-side runtime for authenticated mailbox transport, identity, activity, and farm integration.</en></description>
     <iconFilename>icon_network.dds</iconFilename>
@@ -9,6 +9,8 @@
     <extraSourceFiles>
         <sourceFile filename="events/SiNRegistrationWarningEvent.lua"/>
         <sourceFile filename="events/SiNChatCaptureEvent.lua"/>
+        <sourceFile filename="events/SiNFarmUserPermissionsRequestEvent.lua"/>
+        <sourceFile filename="events/SiNFarmUserPermissionsResponseEvent.lua"/>
         <sourceFile filename="NetworkLocal.lua"/>
         <sourceFile filename="FarmTelemetry.lua"/>
     </extraSourceFiles>

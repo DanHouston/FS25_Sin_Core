@@ -142,7 +142,9 @@ history or claim storage movement is harvest yield. Current bank checking is
 not a farm-owned asset and is deliberately omitted.
 
 `/farm_report_admin [server] [farm_id] [days]` gives staff the same ephemeral
-report for any farm in the current authoritative snapshot. It includes native
+report for any farm in the current authoritative snapshot. After choosing the
+server, staff can type a farm name and select its `Farm ID - name` autocomplete
+entry. It includes native
 contracts observed completed in the selected window and the player/AI split by
 measured contract-work area. Unknown work is excluded from the percentage
 denominator and its hectares are shown separately.
@@ -256,8 +258,9 @@ REQUIRED` until a verified GIANTS runtime API and replication path is proven.
   `/invoice_pay`, `/invoice_cancel`.
 - Community events: `/event_create`, `/event_list`, `/event_view`,
   `/event_join`, `/event_leave`, `/event_cancel`, `/event_complete`.
-- Transfers: manager `/transfer_vehicle destination_server destination_farm vehicle_code`;
-  staff `/admin_transfer_vehicle destination_server destination_farm vehicle_code reason` for
+- Transfers: manager `/vehicle_transfer destination_server destination_farm vehicle_code`
+  with destination farm name autocomplete;
+  staff `/vehicle_transfer_admin destination_server destination_farm vehicle_code reason` for
   audited admin-initiated moves, `/transfer_list` for review, and
   `/transfer_dispatch` for retry.
 - Diagnostics: `/activity_status` is self-service anywhere in the configured

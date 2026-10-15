@@ -586,6 +586,7 @@ function FS25SiNServer:loadMap()
         self:initializeFarmOperations()
     end
     addConsoleCommand("sinPermissions", "Report local FS25 farm permission state", "consoleCommandPermissions", self)
+    addConsoleCommand("sinFarmUserPermissions", "Admin: report authoritative permissions for a farm user", "consoleCommandFarmUserPermissions", self)
     addConsoleCommand("sinSelfTest", "Report read-only SiN runtime integration checks", "consoleCommandSelfTest", self)
     addConsoleCommand("sinFarmland", "Report authoritative owner for a farmland ID", "consoleCommandFarmland", self)
     addConsoleCommand("sinEconomy", "Read-only FS25 farm money, loan, and farmland-price capability probe", "consoleCommandEconomy", self)
@@ -2024,6 +2025,87 @@ function FS25SiNServer:consoleCommandPermissions()
             value == nil and "nil" or tostring(value == true)))
     end
     return table.concat(lines, "\n")
+end
+
+function FS25SiNServer:consoleCommandFarmUserPermissions(userIdValue, farmIdValue)
+    local userId, farmId = tonumber(userIdValue), tonumber(farmIdValue)
+    if userId == nil or userId < 0 or userId % 1 ~= 0
+        or farmId == nil or farmId < 1 or farmId > 254 or farmId % 1 ~= 0 then
+        return "Usage: sinFarmUserPermissions <userId> <farmId>"
+    end
+    if SiNFarmUserPermissionsRequestEvent == nil then return "sinFarmUserPermissions unavailable: request event missing" end
+    local sent = SiNFarmUserPermissionsRequestEvent.sendEvent(userId, farmId)
+    if not sent then return "sinFarmUserPermissions: could not send request to server" end
+    return "sinFarmUserPermissions: request sent; result will appear in this client log (server checks admin access)"
+end
+
+function FS25SiNServer:onFarmUserPermissionsRequest(connection, userId, farmId)
+    if g_currentMission == nil or not g_currentMission:getIsServer() then return end
+    local userManager = g_currentMission.userManager
+    local requesterId = nil
+    if userManager ~= nil and type(userManager.getUserIdByConnection) == "function" then
+        local ok, value = pcall(userManager.getUserIdByConnection, userManager, connection)
+        if ok then requesterId = value end
+    end
+    local requester = nil
+    if requesterId ~= nil and type(userManager.getUserByUserId) == "function" then
+        local ok, value = pcall(userManager.getUserByUserId, userManager, requesterId)
+        if ok then requester = value end
+    end
+    local isAdmin = false
+    if requester ~= nil and type(requester.getIsMasterUser) == "function" then
+        local ok, value = pcall(requester.getIsMasterUser, requester)
+        isAdmin = ok and value == true
+    end
+    local result
+    if not isAdmin then
+        result = "[SiN Diagnostic] denied: sinFarmUserPermissions requires a server admin client"
+        Logging.warning("[SiN Diagnostic] farm user permissions request denied requesterUserId=%s",
+            tostring(requesterId or "unknown"))
+    else
+        result = self:readAuthoritativeFarmUserPermissions(userId, farmId)
+    end
+    if connection ~= nil and connection.sendEvent ~= nil and SiNFarmUserPermissionsResponseEvent ~= nil then
+        pcall(connection.sendEvent, connection, SiNFarmUserPermissionsResponseEvent.new(result))
+    end
+end
+
+function FS25SiNServer:readAuthoritativeFarmUserPermissions(userId, farmId)
+    userId, farmId = tonumber(userId), tonumber(farmId)
+
+    local userManager = g_currentMission.userManager
+    local farmManager = g_currentMission.farmManager or g_farmManager
+    if userManager == nil or type(userManager.getUserByUserId) ~= "function"
+        or farmManager == nil or type(farmManager.getFarmById) ~= "function" then
+        return "sinFarmUserPermissions unavailable: user or farm manager API missing"
+    end
+    local userOk, user = pcall(userManager.getUserByUserId, userManager, userId)
+    local farmOk, farm = pcall(farmManager.getFarmById, farmManager, farmId)
+    if not userOk or user == nil then return "No live user found for userId=" .. tostring(userId) end
+    if not farmOk or farm == nil then return "No farm found for farmId=" .. tostring(farmId) end
+
+    local manager, permissions = self:readFarmManagerState(farm, userId)
+    local masterUser = "unavailable"
+    if type(user.getIsMasterUser) == "function" then
+        local masterOk, value = pcall(user.getIsMasterUser, user)
+        if masterOk then masterUser = tostring(value == true) end
+    end
+    local uniqueId = self:getDiagnosticUniqueUserId(user, userId)
+    local permissionCount, grantedCount = self:countFarmPermissions(permissions)
+    local lines = {string.format(
+        "[SiN Diagnostic] server userId=%d uniqueUserId=%s farmId=%d farm=\"%s\" masterUser=%s farmManager=%s permissionCount=%d grantedPermissions=%d",
+        userId, uniqueId ~= nil and self:shortIdentity(uniqueId) or "unavailable",
+        farmId, tostring(farm.name or ""), masterUser, tostring(manager), permissionCount, grantedCount)}
+    local permissionKeys = self:getFarmPermissionKeys(farm, permissions)
+    local sortedPermissions = {}
+    for permission in pairs(permissionKeys) do table.insert(sortedPermissions, tostring(permission)) end
+    table.sort(sortedPermissions)
+    for _, permission in ipairs(sortedPermissions) do
+        table.insert(lines, string.format("[SiN Diagnostic] permission %s=%s", permission,
+            tostring(permissions[permission] == true)))
+    end
+    local result = table.concat(lines, "\n")
+    return result
 end
 
 -- Read-only map probe.  This intentionally reports metadata and geometry
@@ -4040,6 +4122,7 @@ function FS25SiNServer:deleteMap()
     end
     self.failed = true
     removeConsoleCommand("sinPermissions")
+    removeConsoleCommand("sinFarmUserPermissions")
     removeConsoleCommand("sinSelfTest")
     removeConsoleCommand("sinFarmland")
     removeConsoleCommand("sinEconomy")
