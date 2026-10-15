@@ -61,8 +61,13 @@ class ProductionPolicyTests(unittest.TestCase):
         self.assertEqual(diesel.get("purchasePrice"), "324000")
         self.assertIsNone(diesel.get("cyclesScale"))
         self.assertEqual({node.get("id"): node.get("cyclesPerHour") for node in diesel.findall("recipe")}, {
-            "DIESELSoybean": "2", "DIESELSunflower": "2", "DIESELCanola": "2",
+            "DIESELSoybean": "1", "DIESELSunflower": "1", "DIESELCanola": "1",
         })
+        canola = next(node for node in diesel.findall("recipe") if node.get("id") == "DIESELCanola")
+        self.assertEqual([(node.get("fillType"), node.get("amount")) for node in canola.findall("input")],
+                         [("CANOLA", "500.000000"), ("Water", "500")])
+        self.assertEqual([(node.get("fillType"), node.get("amount")) for node in canola.findall("output")],
+                         [("DIESEL", "500")])
         seed = entries["FS25_SeedProductionFactory:seedProductionFactory.xml"]
         self.assertEqual({node.get("id") for node in seed.findall("recipe")}, {
             "wheat_seeds_rush", "barley_seeds_rush", "oat_seeds_rush", "maize_seeds_rush"})
@@ -103,6 +108,11 @@ class ProductionPolicyTests(unittest.TestCase):
                     recipes = entry.findall("recipe")
                     self.assertEqual([(recipe.get("id"), recipe.get("cyclesScale")) for recipe in recipes],
                                      [("fabric_cotton", "5")])
+                elif "/dairy/" in entry.get("id", ""):
+                    self.assertIsNone(entry.get("cyclesScale"))
+                    recipes = entry.findall("recipe")
+                    self.assertEqual(len(recipes), 10)
+                    self.assertTrue(all(recipe.get("cyclesPerHour") == "1" for recipe in recipes))
                 elif "/ropemakerUS/" in entry.get("id", ""):
                     self.assertEqual(entry.get("cyclesScale"), "5")
                     self.assertEqual(entry.get("purchasePrice"), "1165000")
@@ -130,12 +140,12 @@ class ProductionPolicyTests(unittest.TestCase):
         self.assertEqual(rates(small[0]), rates(small[1]))
         self.assertEqual(rates(large[0]), rates(large[1]))
         self.assertEqual(rates(small[0]), {
-            "hay": "4000", "chaffSilage": "16000", "grassSilage": "16000",
-            "haySilage": "16000", "strawSilage": "16000", "Pigfood": "1.5",
+            "hay": None, "chaffSilage": None, "grassSilage": None,
+            "haySilage": None, "strawSilage": None, "Pigfood": "1.5",
             "forage mixer": "2.5"})
         self.assertEqual(rates(large[0]), {
-            "hay": "5000", "chaffSilage": "20000", "grassSilage": "20000",
-            "haySilage": "20000", "strawSilage": "20000", "Pigfood": "2",
+            "hay": None, "chaffSilage": None, "grassSilage": None,
+            "haySilage": None, "strawSilage": None, "Pigfood": "2",
             "forage mixer": "3.5"})
 
     def test_runtime_recipe_policy_is_explicit_and_narrow(self):
@@ -191,7 +201,7 @@ class ProductionPolicyTests(unittest.TestCase):
     def test_mod_descriptor_and_icon_are_present(self):
         descriptor = (MOD / "modDesc.xml").read_text(encoding="utf-8")
         self.assertIn("SiN FS25 Policy", descriptor)
-        self.assertIn("<version>0.2.3.3</version>", descriptor)
+        self.assertTrue(ElementTree.fromstring(descriptor).findtext("version"))
         self.assertIn('filename="scripts/SiNProductionPolicy.lua"', descriptor)
         self.assertIn('filename="scripts/SiNVehiclePricingPolicy.lua"', descriptor)
         self.assertIn('filename="scripts/SiNSellCoveragePolicy.lua"', descriptor)

@@ -84,8 +84,18 @@ class Harness:
             g.fixtures[desc["name"]] = self.lua.table_from(data, recursive=True)
         self.lua.execute('''
             Logging = { info = record_log, warning = record_log }
+            Event = { new = function(mt) return setmetatable({}, mt) end }
+            Class = function(class, super)
+                local mt = { __index = class }
+                if super ~= nil then setmetatable(class, { __index = super }) end
+                return mt
+            end
+            InitEventClass = function() end
+            addModEventListener = function() end
             addConsoleCommand = function(name, help, callback, target)
-                probeCommand = function(fruit) return target[callback](target, fruit) end
+                if name == "sinCropGrowth" then
+                    probeCommand = function(fruit) return target[callback](target, fruit) end
+                end
             end
             local xml = {}
             function xml:getString(key) return read_value(key) end

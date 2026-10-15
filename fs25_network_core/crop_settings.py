@@ -379,6 +379,11 @@ def _annual_lifecycle_plan(entry: FruitPolicy, period_map: dict[str, dict[str, A
         }
         if period_name in planting:
             replacement[invisible] = states[0]
+        elif period_name in harvest:
+            # NPC/preplanted crops may still be invisible when their harvest
+            # window arrives. Bring them to maturity rather than stranding
+            # them until a later planting window.
+            replacement[invisible] = states[-1]
         if offset <= last_harvest_offset:
             # One state of separation is retained between sowing cohorts.
             # Long paths skip visual stages at harvest; short paths hold the

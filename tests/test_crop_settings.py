@@ -322,7 +322,8 @@ class CropSettingsTests(unittest.TestCase):
         self.assertEqual(mapping[3], 4)
         self.assertEqual(mapping[4], 5)
         self.assertEqual(mapping[5], 5)
-        self.assertEqual(mapping[0], 0)
+        # Preplanted crops still invisible at harvest are advanced to ready.
+        self.assertEqual(mapping[0], 5)
         self.assertEqual(mapping[6], 6)
 
     def test_annual_lifecycle_fails_closed_before_partial_mapping_mutation(self):

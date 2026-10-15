@@ -264,11 +264,11 @@ class ProductionPolicyLuaTests(unittest.TestCase):
     def test_native_load_receives_policy_rates_and_source_xml_is_restored(self):
         root = ElementTree.parse(MOD / "config/production-policy.xml").getroot()
         entries = {entry.get("id"): entry for entry in root.findall("production")}
-        for name, native_rates, silage_rate in (
-            ("staveSiloSmall", (4000, 1.5, 2.5), 16000),
-            ("steelSiloSmall", (4500, 2, 3), 16000),
-            ("staveSiloLarge", (5000, 2, 3.5), 20000),
-            ("steelSiloLarge", (5000, 2, 3.5), 20000),
+        for name, native_rates in (
+            ("staveSiloSmall", (4000, 1.5, 2.5)),
+            ("steelSiloSmall", (4500, 2, 3)),
+            ("staveSiloLarge", (5000, 2, 3.5)),
+            ("steelSiloLarge", (5000, 2, 3.5)),
         ):
             with self.subTest(silo=name):
                 lua = LuaRuntime(unpack_returned_tuples=True)
@@ -310,13 +310,19 @@ class ProductionPolicyLuaTests(unittest.TestCase):
                 canonical_id = f"FS25_AmericanSilosProductionPack:silos/{name}.xml"
                 recipes = lua.table()
                 expected = {}
+                disabled = set()
                 for node in entries[canonical_id].findall("recipe"):
                     recipe_id = node.get("id")
-                    rate = float(node.get("cyclesPerHour"))
+                    is_disabled = node.get("enabled") == "false"
+                    rate = float(node.get("cyclesPerHour")) if node.get("cyclesPerHour") is not None else None
                     recipes[recipe_id] = lua.table_from({
+                        "enabled": False if is_disabled else None,
                         "cyclesPerHour": rate, "inputs": lua.table(), "outputs": lua.table()
                     })
-                    expected[recipe_id] = rate
+                    if is_disabled:
+                        disabled.add(recipe_id)
+                    else:
+                        expected[recipe_id] = rate
                 lua.globals().SiNProductionPolicy.policies[canonical_id] = lua.table_from({"recipes": recipes})
 
                 filename = f"C:/mods/FS25_AmericanSilosProductionPack/silos/{name}.xml"
@@ -326,6 +332,8 @@ class ProductionPolicyLuaTests(unittest.TestCase):
                     path = f"placeable.productionPoint.productions.production({index})"
                     xml_file["values"][path + "#id"] = recipe_id
                     xml_file["values"][path + "#cyclesPerHour"] = native_rate
+                    if recipe_id in disabled:
+                        expected[recipe_id] = native_rate
                 production_point = lua.table_from({"owningPlaceable": lua.table_from({"configFileName": filename})})
                 success = lua.globals().ProductionPoint.load(
                     production_point, None, xml_file, "placeable.productionPoint", None, None
@@ -336,9 +344,6 @@ class ProductionPolicyLuaTests(unittest.TestCase):
                     native_rate = (native_rates[0] if index < 5 else native_rates[1] if index == 5 else native_rates[2])
                     self.assertEqual(production_point.loadedRates[recipe_id], expected[recipe_id])
                     self.assertEqual(xml_file["values"][path], native_rate)
-                for recipe_id in SILO_RECIPES[1:5]:
-                    self.assertEqual(production_point.loadedRates[recipe_id], silage_rate)
-
                 # A changed source recipe list must fail closed, not partially raise rates.
                 xml_file["values"]["placeable.productionPoint.productions.production(6)#id"] = "other"
                 unchanged = lua.table_from({"owningPlaceable": lua.table_from({"configFileName": filename})})
