@@ -40,10 +40,12 @@ end
 function SiNVehicleCodesEvent:run(connection)
     if g_currentMission == nil or not g_currentMission:getIsClient() then return end
     if connection ~= nil and not connection:getIsServer() then return end
-    local expectedWorld = FS25SiNServer ~= nil and tostring(FS25SiNServer.worldId or "") or ""
-    if expectedWorld ~= "" and self.worldId ~= expectedWorld then return end
     if FS25SiNVehicleCodes == nil then FS25SiNVehicleCodes = {} end
     FS25SiNVehicleCodes = self.vehicles or {}
+    local count = 0
+    for _ in pairs(FS25SiNVehicleCodes) do count = count + 1 end
+    Logging.info("[SiN Vehicle Codes] received server projection world=%s vehicles=%d",
+        tostring(self.worldId), count)
 end
 
 function SiNVehicleCodesEvent.sendToClient(connection, worldId, vehicles)
