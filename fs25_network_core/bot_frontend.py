@@ -718,12 +718,28 @@ class NetworkBot(discord.Client):
             farms = snapshot.get("farms") if isinstance(snapshot, dict) else None
             if not isinstance(farms, dict):
                 return []
+            players = snapshot.get("players") if isinstance(snapshot, dict) else None
+            owners_by_farm = {}
+            if isinstance(players, dict):
+                for player in players.values():
+                    if not isinstance(player, dict):
+                        continue
+                    player_name = str(player.get("name") or "").strip()
+                    try:
+                        player_farm_id = str(int(player.get("farm_id", 0) or 0))
+                    except (TypeError, ValueError):
+                        continue
+                    if player_name and player_farm_id != "0":
+                        owners_by_farm.setdefault(player_farm_id, set()).add(player_name)
             choices = []
             for farm_id, name in farms.items():
                 name = str(name or "").strip()
                 if not name:
                     continue
-                label = f"Farm {farm_id} - {name}"
+                farm_key = str(farm_id)
+                owners = owners_by_farm.get(farm_key, set())
+                owner = next(iter(owners)) if len(owners) == 1 else None
+                label = f"{owner} | {name}" if owner else name
                 if current.lower() in label.lower():
                     value = int(farm_id) if value_as_int else str(farm_id)
                     choices.append(app_commands.Choice(name=label[:100], value=value))
@@ -1782,7 +1798,10 @@ class NetworkBot(discord.Client):
         async def transfer_list(interaction: discord.Interaction):
             staff_check(interaction)
             records = await asyncio.to_thread(lambda: list(self.transfers.db.transfers.find({}).sort("created_at", -1).limit(50)))
-            text = "\n".join(f"`{r['transfer_id']}` {r['kind']} {r['item']} — {r['status']}" for r in records)
+            text = "\n".join(
+                f"`{r.get('transfer_id', 'unknown')}` {r.get('kind', 'unknown')} "
+                f"{r.get('item', '(item unavailable)')} — {r.get('status', 'unknown')}"
+                for r in records)
             await interaction.response.send_message(text or "No transfers.", ephemeral=True)
 
         @self.tree.command(name="transfer_dispatch", description="Staff: retry a vehicle transfer not yet queued")
