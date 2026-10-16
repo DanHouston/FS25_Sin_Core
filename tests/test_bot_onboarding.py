@@ -12,7 +12,7 @@ from discord import app_commands
 
 from fs25_network_core.bot_frontend import (CommunityEventView, ContractView, FarmRequestView,
                                             NetworkBot, format_compensation, format_farm_roster,
-                                            player_choice_label)
+                                            format_transfer_list, player_choice_label)
 from fs25_network_core.channel_policy import COMMAND_CHANNELS
 from fs25_network_core.map_service import MapUnavailable
 from tests.test_map_service import rgba_base, synthetic_model
@@ -869,3 +869,13 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Farm 14 — ⚠ Unnamed / cannot approve", page)
         self.assertIn("Repton | Repton Does\nFarm: 2 — Repton Does\nFS25 ID: hiIe5r-st…", page)
         self.assertNotIn("{'name'", page)
+
+    async def test_transfer_list_omits_deposits_and_shows_native_failure_reason(self):
+        text = format_transfer_list([
+            {"transfer_id": "bank-1", "kind": "deposit", "amount": 100},
+            {"transfer_id": "vehicle-1", "kind": "vehicle", "item": "PJT7H",
+             "status": "failed", "receipt": {"receipt": "vehicle is currently occupied"}},
+        ])
+        self.assertIn("`vehicle-1` vehicle PJT7H", text)
+        self.assertIn("vehicle is currently occupied", text)
+        self.assertNotIn("bank-1", text)

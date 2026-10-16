@@ -71,6 +71,28 @@ def player_choice_label(player_id, nickname):
     return f"Nickname: {nickname or 'Unnamed player'} | FS25 player ID: {player_id}"
 
 
+def format_transfer_list(records, page_limit=1900):
+    """Format only farm transfers, including native failure details when present."""
+    lines = []
+    for record in records:
+        if not isinstance(record, dict) or record.get("kind") not in {"vehicle", "product"}:
+            continue
+        transfer_id = str(record.get("transfer_id") or "unknown")
+        kind = str(record.get("kind") or "unknown")
+        item = str(record.get("item") or "(item unavailable)")
+        status = str(record.get("status") or "unknown")
+        line = f"`{transfer_id}` {kind} {item} — {status}"
+        receipt = record.get("receipt")
+        reason = receipt.get("receipt") if isinstance(receipt, dict) else None
+        if reason and status in {"failed", "reconciliation_required"}:
+            line += f" ({str(reason)[:120]})"
+        if sum(len(existing) + 1 for existing in lines) + len(line) > page_limit:
+            lines.append("More transfers omitted; narrow the list or check the latest records.")
+            break
+        lines.append(line)
+    return "\n".join(lines) or "No vehicle or product transfers."
+
+
 def format_farm_roster(server_key, save_key, snapshot, page_limit=1900):
     """Render one human-readable, bounded staff roster from a game snapshot.
 
@@ -1797,12 +1819,10 @@ class NetworkBot(discord.Client):
         @app_commands.default_permissions(administrator=True)
         async def transfer_list(interaction: discord.Interaction):
             staff_check(interaction)
-            records = await asyncio.to_thread(lambda: list(self.transfers.db.transfers.find({}).sort("created_at", -1).limit(50)))
-            text = "\n".join(
-                f"`{r.get('transfer_id', 'unknown')}` {r.get('kind', 'unknown')} "
-                f"{r.get('item', '(item unavailable)')} — {r.get('status', 'unknown')}"
-                for r in records)
-            await interaction.response.send_message(text or "No transfers.", ephemeral=True)
+            records = await asyncio.to_thread(lambda: list(
+                self.transfers.db.transfers.find({"kind": {"$in": ["vehicle", "product"]}})
+                .sort("created_at", -1).limit(50)))
+            await interaction.response.send_message(format_transfer_list(records), ephemeral=True)
 
         @self.tree.command(name="transfer_dispatch", description="Staff: retry a vehicle transfer not yet queued")
         @app_commands.check(channel_check)
