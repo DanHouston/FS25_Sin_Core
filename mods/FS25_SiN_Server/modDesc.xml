@@ -11,6 +11,7 @@
         <sourceFile filename="events/SiNChatCaptureEvent.lua"/>
         <sourceFile filename="events/SiNFarmUserPermissionsRequestEvent.lua"/>
         <sourceFile filename="events/SiNFarmUserPermissionsResponseEvent.lua"/>
+        <sourceFile filename="events/SiNVehicleCodesEvent.lua"/>
         <sourceFile filename="NetworkLocal.lua"/>
         <sourceFile filename="FarmTelemetry.lua"/>
     </extraSourceFiles>

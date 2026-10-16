@@ -76,6 +76,7 @@ class PairingAgent:
         self.receipts_url = self.backend_root + "/api/server/operation-receipts"
         self.snapshot_url = self.backend_root + "/api/server/snapshot"
         self.manager_authority_url = self.backend_root + "/api/server/manager-authority"
+        self.vehicle_codes_url = self.backend_root + "/api/server/vehicle-codes"
         self.opener = opener or urlopen
         self._event_cache = {}
         self._last_authority_projection = None
@@ -616,6 +617,46 @@ class PairingAgent:
                         str(detail if detail is not None else error)[:200])
             return False
 
+    def process_vehicle_codes_once(self):
+        try:
+            server_key, credential = self._binding()
+            fs25_save_id = self._runtime_save_id()
+            world_id = self._runtime_world_id()
+            url = (self.vehicle_codes_url + "?fs25_save_id=" + quote(str(fs25_save_id), safe="")
+                   + "&world_id=" + quote(str(world_id), safe=""))
+            request = Request(url, headers={"X-SiN-Server-Key": server_key,
+                                            "Authorization": "Bearer " + credential}, method="GET")
+            with self.opener(request, timeout=10) as response:
+                if response.status != 200:
+                    raise RuntimeError("vehicle codes API rejected request")
+                payload = json.loads(response.read().decode("utf-8"))
+            vehicles = payload.get("vehicles") if isinstance(payload, dict) else None
+            if (not isinstance(payload, dict) or payload.get("world_id") != str(world_id)
+                    or not isinstance(vehicles, list) or len(vehicles) > 5000):
+                raise ValueError("vehicle codes API returned an invalid response")
+            root = ElementTree.Element("vehicleCodes", schemaVersion="1", worldId=str(world_id))
+            seen = set()
+            for vehicle in vehicles:
+                unique_id = vehicle.get("unique_id") if isinstance(vehicle, dict) else None
+                code = vehicle.get("code") if isinstance(vehicle, dict) else None
+                if (not isinstance(unique_id, str) or not unique_id or len(unique_id) > 160
+                        or unique_id in seen or not isinstance(code, str)
+                        or not 5 <= len(code) <= 12 or not code.isascii()
+                        or not code.isalnum() or code != code.upper()):
+                    raise ValueError("vehicle codes API returned an invalid entry")
+                seen.add(unique_id)
+                ElementTree.SubElement(root, "vehicle", uniqueId=unique_id, code=code)
+            destination = self.directory / "vehicle-codes.xml"
+            temporary = destination.with_suffix(".tmp")
+            ElementTree.ElementTree(root).write(temporary, encoding="utf-8", xml_declaration=True)
+            _atomic_replace(temporary, destination)
+            return True
+        except (ElementTree.ParseError, ValueError, OSError, HTTPError, URLError, TimeoutError,
+                RuntimeError, json.JSONDecodeError) as error:
+            LOG.warning("vehicle code refresh unavailable; retaining last known projection reason=%s",
+                        str(error)[:200])
+            return False
+
     def process_snapshot_once(self):
         try:
             server_key, credential = self._binding()
@@ -1085,6 +1126,7 @@ class PairingAgent:
         next_clock_refresh = 0
         next_snapshot = 0
         next_authority = 0
+        next_vehicle_codes = 0
         while not stop or not stop():
             # Control-plane work is deliberately ahead of the event batch.
             # A historical event backlog must not delay pairing, registration,
@@ -1099,6 +1141,9 @@ class PairingAgent:
             if time.monotonic() >= next_authority:
                 self.process_manager_authority_once()
                 next_authority = time.monotonic() + 20
+            if time.monotonic() >= next_vehicle_codes:
+                self.process_vehicle_codes_once()
+                next_vehicle_codes = time.monotonic() + 20
             if time.monotonic() >= next_snapshot:
                 self.process_snapshot_once()
                 next_snapshot = time.monotonic() + 20

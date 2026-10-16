@@ -5,6 +5,7 @@ import unittest
 from datetime import datetime, timezone
 from http.client import HTTPConnection
 from unittest.mock import MagicMock
+from unittest.mock import patch
 
 from fs25_network_core.farm_lifecycle import FarmLifecycle
 from fs25_network_core.event_processing import EventRetryableError
@@ -347,6 +348,28 @@ class ServerApiTests(unittest.TestCase):
         query = handler.event_processor.authorization.db.memberships.find.call_args.args[0]
         self.assertEqual(query["state"], {"$in": ["pending", "active"]})
         self.assertEqual(query["desired_role"], {"$in": ["farm_manager", "contractor"]})
+
+    def test_vehicle_codes_endpoint_returns_active_world_projection(self):
+        handler = self.server.RequestHandlerClass
+        handler.event_processor.registry.authenticate.return_value = {"server_key": "sin-fs25-01"}
+        handler.event_processor.registry.resolve_save.return_value = "sin-fs25-main"
+        handler.farm_lifecycle = MagicMock()
+        handler.farm_lifecycle.latest_snapshot.return_value = {
+            "vehicle_inventory_ready": True, "farms": {"2": "Farm"},
+            "vehicles": [{"unique_id": "native-1", "farm_id": 2, "filename": "tractor.xml"}]}
+        connection = HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
+        with patch("fs25_network_core.vehicle_inventory.VehicleCodeRegistry.codes_for",
+                   return_value=[{"unique_id": "native-1", "code": "PJT7H"}]) as codes_for:
+            connection.request("GET", "/api/server/vehicle-codes?fs25_save_id=1&world_id=test-world", headers={
+                "X-SiN-Server-Key": "sin-fs25-01", "Authorization": "Bearer secret"})
+            response = connection.getresponse()
+            body = json.loads(response.read())
+        connection.close()
+        self.assertEqual((response.status, body), (200, {"world_id": "test-world", "vehicles": [
+            {"unique_id": "native-1", "code": "PJT7H"}]}))
+        handler.farm_lifecycle.require_current_world.assert_called_once_with(
+            "sin-fs25-01", "sin-fs25-main", "test-world")
+        codes_for.assert_called_once()
 
     def test_manager_authority_endpoint_returns_unavailable_when_durable_repair_fails(self):
         handler = self.server.RequestHandlerClass

@@ -292,6 +292,8 @@ class BoundaryCentral(OfflineCentral):
                               "fs25_unique_user_id": payload["fs25_unique_user_id"]})
         if path.endswith("/api/server/manager-authority"):
             return _Response({"managers": [{"game_player_id": "stable-player", "farm_id": 2}]})
+        if path.endswith("/api/server/vehicle-codes"):
+            return _Response({"world_id": "campaign-world-a", "vehicles": []})
         if path.endswith("/api/server/snapshot"):
             return _Response()
         if path.endswith("/api/server/clock"):
@@ -981,7 +983,7 @@ def _authoritative_control_plane_backlog(root: Path) -> Mapping[str, object]:
     paths = [call["path"] for call in central.calls]
     event_index = paths.index("/api/server/events")
     control_paths = ["/api/server/pair", "/api/server/operations",
-                     "/api/server/manager-authority", "/api/server/snapshot",
+                     "/api/server/manager-authority", "/api/server/vehicle-codes", "/api/server/snapshot",
                      "/api/server/clock"]
     remaining = list((root / "events").glob("*.xml"))
     if any(paths.index(path) > event_index for path in control_paths) or processed_count != backlog_size or len(central.events) != backlog_size or remaining:

@@ -496,6 +496,7 @@ function FS25SiNServer:installIngameMapHotspotHook()
 end
 
 function FS25SiNServer:loadMap()
+    FS25SiNVehicleCodes = {}
     self.elapsed = 0
     self.fieldMarkerElapsed = 0
     self.fieldMarkerRefreshInterval = 1000
@@ -530,6 +531,11 @@ function FS25SiNServer:loadMap()
     createFolder(self.registrationRequestDirectory)
     createFolder(self.registrationResponseDirectory)
     self:initializeRuntimeGeneration()
+    self.vehicleCodesElapsed = 0
+    self.vehicleCodesSignature = nil
+    self.vehicleCodesProjection = nil
+    self.vehicleCodesWorldId = nil
+    self:installVehicleCodeNameHook()
     self.worldIdentityReady = false
     self.worldIdentityRetryable = true
     self.worldIdentityRetryElapsed = 0
@@ -1045,6 +1051,72 @@ function FS25SiNServer:loadManagerAuthority()
     end
     authority:delete()
     return authorized, contractors, true
+end
+
+function FS25SiNServer:installVehicleCodeNameHook()
+    if Vehicle == nil or type(Vehicle.getName) ~= "function" then return false end
+    if self.vehicleNameOriginal ~= nil and Vehicle.getName == self.vehicleNameWrapper then return true end
+    local original = Vehicle.getName
+    local wrapper = function(vehicle, ...)
+        local name = original(vehicle, ...)
+        local uniqueId = nil
+        if vehicle ~= nil and type(vehicle.getUniqueId) == "function" then
+            local ok, value = pcall(vehicle.getUniqueId, vehicle)
+            if ok and value ~= nil then uniqueId = tostring(value) end
+        end
+        local code = uniqueId ~= nil and FS25SiNVehicleCodes ~= nil
+            and FS25SiNVehicleCodes[uniqueId] or nil
+        if type(name) == "string" and type(code) == "string"
+            and not string.match(name, "^%[" .. code .. "%]") then
+            return "[" .. code .. "] " .. name
+        end
+        return name
+    end
+    Vehicle.getName = wrapper
+    self.vehicleNameOriginal, self.vehicleNameWrapper = original, wrapper
+    Logging.info("[SiN Vehicle Codes] installed display-name prefix hook")
+    return true
+end
+
+function FS25SiNServer:loadVehicleCodes()
+    local path = self.directory .. "vehicle-codes.xml"
+    local xml = fileExists(path) and XMLFile.load("networkLocalVehicleCodes", path) or nil
+    if xml == nil then return false end
+    local worldId = tostring(xml:getString("vehicleCodes#worldId") or "")
+    if self.worldIdentityReady ~= true or worldId == "" or worldId ~= tostring(self.worldId) then
+        xml:delete()
+        return false
+    end
+    local vehicles, index = {}, 0
+    while index < 5000 do
+        local key = string.format("vehicleCodes.vehicle(%d)", index)
+        local uniqueId = xml:getString(key .. "#uniqueId")
+        if uniqueId == nil then break end
+        local code = xml:getString(key .. "#code")
+        if uniqueId ~= "" and type(code) == "string" and string.match(code, "^[A-Z0-9][A-Z0-9]+$") then
+            table.insert(vehicles, {uniqueId=uniqueId, code=code})
+        end
+        index = index + 1
+    end
+    xml:delete()
+    local signatureParts = {worldId}
+    for _, row in ipairs(vehicles) do
+        table.insert(signatureParts, row.uniqueId .. "=" .. row.code)
+    end
+    local signature = table.concat(signatureParts, "\n")
+    if signature == self.vehicleCodesSignature then return false end
+    self.vehicleCodesSignature = signature
+    self.vehicleCodesWorldId = worldId
+    self.vehicleCodesProjection = vehicles
+    if g_server ~= nil then SiNVehicleCodesEvent.broadcast(worldId, vehicles) end
+    return true
+end
+
+function FS25SiNServer:sendVehicleCodes(connection)
+    if connection == nil or type(self.vehicleCodesProjection) ~= "table"
+        or self.vehicleCodesWorldId ~= tostring(self.worldId or "") then return false end
+    return SiNVehicleCodesEvent.sendToClient(connection, self.vehicleCodesWorldId,
+        self.vehicleCodesProjection)
 end
 
 function FS25SiNServer:readFarmManagerState(farm, userId)
@@ -1711,6 +1783,7 @@ function FS25SiNServer:onPlayerConnected(user, connection, farmId)
         if ok then resolvedConnection = value end
     end
     if resolvedConnection == nil then resolvedConnection = user.connection end
+    self:sendVehicleCodes(resolvedConnection)
     local record = {name=user:getNickname() or "", user_id=user:getId(),
         farm_id=farm ~= nil and farm.farmId or 0, connection=resolvedConnection, user=user}
     local wasTracked = self.connectedPlayers[uniqueId] ~= nil
@@ -2288,6 +2361,7 @@ function FS25SiNServer:consoleCommandSelfTest()
 end
 
 function FS25SiNServer:update(dt)
+    if g_currentMission ~= nil then self:installVehicleCodeNameHook() end
 	if g_currentMission ~= nil and type(g_currentMission.getIsClient) == "function"
         and g_currentMission:getIsClient() then
         self:installIngameMapHotspotHook()
@@ -2334,6 +2408,11 @@ function FS25SiNServer:update(dt)
         self:installFinanceObservationHook()
     end
     self:updateFarmOperations(dt)
+    self.vehicleCodesElapsed = (self.vehicleCodesElapsed or 0) + dt
+    if self.vehicleCodesElapsed >= 5000 then
+        self.vehicleCodesElapsed = 0
+        self:loadVehicleCodes()
+    end
     self:restorePendingPlayerPositions(dt)
     self.elapsed = self.elapsed + dt
     self.heartbeatElapsed = self.heartbeatElapsed + dt

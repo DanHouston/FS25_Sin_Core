@@ -64,7 +64,8 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):  # noqa: N802 - required by BaseHTTPRequestHandler
         path = urlsplit(self.path).path
-        if path not in {"/api/server/clock", OPERATIONS_PATH, "/api/server/manager-authority"}:
+        if path not in {"/api/server/clock", OPERATIONS_PATH, "/api/server/manager-authority",
+                        "/api/server/vehicle-codes"}:
             _json_response(self, 404, {"error": "not_found"})
             return
         query = parse_qs(urlsplit(self.path).query)
@@ -185,6 +186,18 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
                     contractor_payload.append(value)
                 _json_response(self, 200, {"save_key": save_key, "managers": manager_payload,
                                            "contractors": contractor_payload})
+                return
+            if path == "/api/server/vehicle-codes":
+                self.farm_lifecycle.require_current_world(record["server_key"], save_key, world_id)
+                snapshot = self.farm_lifecycle.latest_snapshot(record["server_key"], save_key, world_id)
+                from .vehicle_inventory import VehicleCodeRegistry, validate_vehicle_inventory
+                rows = validate_vehicle_inventory(snapshot) if isinstance(snapshot, dict) else None
+                if rows is None:
+                    _json_response(self, 200, {"world_id": str(world_id), "vehicles": []})
+                    return
+                codes = VehicleCodeRegistry(self.event_processor.authorization).codes_for(
+                    record["server_key"], save_key, str(world_id), rows)
+                _json_response(self, 200, {"world_id": str(world_id), "vehicles": codes})
                 return
             policy = self.event_processor.registry.clock_policy(record["server_key"], save_key)
             local = datetime.now(timezone.utc).astimezone(ZoneInfo(policy["timezone"]))

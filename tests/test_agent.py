@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from urllib.error import HTTPError
 from pathlib import Path
+from xml.etree import ElementTree
 from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import MagicMock, patch
 
@@ -871,6 +872,25 @@ class AgentTests(unittest.TestCase):
             self.assertIn('manager gamePlayerId="stable-player" farmId="2"', authority)
             self.assertIn('contractor gamePlayerId="stable-player" farmId="99" sourceFarmId="2"', authority)
 
+    def test_vehicle_code_projection_is_world_scoped_and_atomically_written(self):
+        response = MagicMock()
+        response.status = 200
+        response.read.return_value = json.dumps({"world_id": "test-world", "vehicles": [
+            {"unique_id": "native-vehicle-1", "code": "PJT7H"}]}).encode("utf-8")
+        response.__enter__.return_value = response
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "serverBinding.xml").write_text(
+                '<serverBinding serverKey="server" credential="secret"/>', encoding="utf-8")
+            (root / "snapshot.xml").write_text(
+                '<networkLocal savegameIndex="1" worldId="test-world"/>', encoding="utf-8")
+            agent = PairingAgent(root, "https://central", MagicMock(return_value=response))
+            self.assertTrue(agent.process_vehicle_codes_once())
+            projection = ElementTree.parse(root / "vehicle-codes.xml").getroot()
+            self.assertEqual(projection.get("worldId"), "test-world")
+            self.assertEqual(projection.find("vehicle").attrib,
+                             {"uniqueId": "native-vehicle-1", "code": "PJT7H"})
+
     def test_manager_authority_snapshot_preserves_canonical_name(self):
         response = MagicMock()
         response.status = 200
@@ -962,7 +982,7 @@ class AgentTests(unittest.TestCase):
             agent = PairingAgent(folder, "https://central", event_batch_size=7)
             calls = []
             for name in ("process_once", "process_registration_once", "process_operations_once",
-                         "process_receipts_once", "process_manager_authority_once",
+                         "process_receipts_once", "process_manager_authority_once", "process_vehicle_codes_once",
                          "process_snapshot_once", "process_clock_once"):
                 method = MagicMock(side_effect=lambda name=name: calls.append(name) or 60)
                 setattr(agent, name, method)

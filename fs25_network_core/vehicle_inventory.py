@@ -80,6 +80,12 @@ class VehicleCodeRegistry:
             return code
         raise ValueError("no unique short vehicle code is available")
 
+    def codes_for(self, server_key, save_key, world_id, rows):
+        """Return the complete native-ID to display-code projection."""
+        return [{"unique_id": row["unique_id"],
+                 "code": self.get_or_create(server_key, save_key, world_id, row["unique_id"])}
+                for row in rows]
+
     def resolve_current(self, server_key, save_key, world_id, farm_rows, code):
         """Exact-code lookup followed by fresh native-ID/farm verification."""
         if (not isinstance(code, str) or not MIN_VEHICLE_CODE_LENGTH <= len(code.strip())
