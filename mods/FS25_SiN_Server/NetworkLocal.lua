@@ -3216,13 +3216,34 @@ function FS25SiNServer:processVehicleTransferCommand(command, operationId)
     else
         local canTransfer = true
         local rejection = nil
-        if type(vehicle.getIsEntered) ~= "function" then
+        local enterableSpec = vehicle.spec_enterable
+        local occupancyKnown = enterableSpec == nil
+        local occupied = false
+        for _, stateName in ipairs({"getIsEntered", "getIsControlled"}) do
+            local getter = vehicle[stateName]
+            if type(getter) == "function" then
+                local ok, value = pcall(getter, vehicle)
+                if ok and type(value) == "boolean" then
+                    occupancyKnown = true
+                    occupied = occupied or value
+                end
+            end
+        end
+        if type(enterableSpec) == "table" then
+            for _, stateName in ipairs({"isEntered", "isControlled"}) do
+                local value = enterableSpec[stateName]
+                if type(value) == "boolean" then
+                    occupancyKnown = true
+                    occupied = occupied or value
+                end
+            end
+        end
+        if occupied then
+            canTransfer = false
+            rejection = "vehicle is currently occupied"
+        elseif not occupancyKnown then
             canTransfer = false
             rejection = "vehicle occupancy state is unavailable"
-        else
-            local ok, entered = pcall(vehicle.getIsEntered, vehicle)
-            if not ok then canTransfer = false; rejection = "vehicle occupancy state is unavailable"
-            elseif entered == true then canTransfer = false; rejection = "vehicle is currently occupied" end
         end
         if canTransfer and type(vehicle.getIsAIActive) ~= "function" then
             canTransfer = false

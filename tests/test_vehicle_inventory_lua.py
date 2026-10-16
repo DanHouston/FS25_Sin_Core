@@ -56,7 +56,8 @@ class VehicleInventoryLuaTests(unittest.TestCase):
         self.assertIsNone(lua.eval("duplicate"))
         self.assertIsNone(lua.eval("unidentified"))
 
-    def _transfer_runtime(self, *, owner=2, entered=False, ai=False, attached=False, is_server=True):
+    def _transfer_runtime(self, *, owner=2, entered=False, controlled=False, ai=False,
+                          attached=False, is_server=True, enterable=True, getters=True):
         lua = runtime()
         lua.execute(f'''
         receiptAttrs = {{}}
@@ -74,13 +75,20 @@ class VehicleInventoryLuaTests(unittest.TestCase):
             getUniqueId=function() return "native-vehicle-1" end,
             getOwnerFarmId=function() return vehicleOwner end,
             setOwnerFarmId=function(_, farmId) vehicleOwner = farmId end,
-            getIsEntered=function() return {str(entered).lower()} end,
             getIsAIActive=function() return {str(ai).lower()} end,
             getChildVehicles=function(self)
                 if {str(attached).lower()} then return {{self, {{}}}} end
                 return {{self}}
             end
         }}
+        if {str(enterable).lower()} then
+            vehicle.spec_enterable = {{isEntered={str(entered).lower()},
+                isControlled={str(controlled).lower()}}}
+            if {str(getters).lower()} then
+                vehicle.getIsEntered = function() return {str(entered).lower()} end
+                vehicle.getIsControlled = function() return {str(controlled).lower()} end
+            end
+        end
         g_currentMission = {{getIsServer=function() return {str(is_server).lower()} end,
             vehicleSystem={{vehicles={{vehicle}}}}}}
         g_farmManager = {{getFarmById=function(_, farmId)
@@ -113,12 +121,25 @@ class VehicleInventoryLuaTests(unittest.TestCase):
         self.assertEqual(lua.eval('savedReceipt["networkLocalReceipt#vehicle_unique_id"]'), "native-vehicle-1")
 
     def test_vehicle_transfer_rejects_occupied_ai_attached_and_wrong_owner(self):
-        for options in ({"entered": True}, {"ai": True}, {"attached": True}, {"owner": 3}):
+        for options in ({"entered": True}, {"controlled": True}, {"ai": True},
+                        {"attached": True}, {"owner": 3}):
             with self.subTest(options=options):
                 lua = self._transfer_runtime(**options)
                 self.assertNotEqual(lua.eval("finalOwner"), 4)
                 self.assertEqual(lua.eval('savedReceipt["networkLocalReceipt#status"]'),
                                  "definitively_not_applied")
+
+    def test_vehicle_transfer_allows_non_enterable_vehicles_and_reads_spec_state(self):
+        for options in ({"enterable": False}, {"getters": False}):
+            with self.subTest(options=options):
+                lua = self._transfer_runtime(**options)
+                self.assertEqual(lua.eval("finalOwner"), 4)
+                self.assertEqual(lua.eval('savedReceipt["networkLocalReceipt#status"]'), "applied")
+
+        lua = self._transfer_runtime(getters=False, controlled=True)
+        self.assertEqual(lua.eval("finalOwner"), 2)
+        self.assertEqual(lua.eval('savedReceipt["networkLocalReceipt#receipt"]'),
+                         "vehicle is currently occupied")
 
     def test_vehicle_transfer_refuses_to_mutate_on_client_runtime(self):
         lua = self._transfer_runtime(is_server=False)
