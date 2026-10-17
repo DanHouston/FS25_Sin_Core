@@ -84,7 +84,25 @@ class ActivityPublisher:
     async def publish(self, record):
         permanent = False
         try:
-            if record.get("destination") == "staff":
+            if record.get("destination") == "user":
+                metadata = record.get("metadata") or {}
+                try:
+                    user_id = int(metadata.get("discord_user_id"))
+                except (TypeError, ValueError):
+                    permanent = True
+                    raise ValueError("invalid Discord user ID for direct notification")
+                user = self.bot.get_user(user_id)
+                if user is None:
+                    user = await self.bot.fetch_user(user_id)
+                await user.send(record["message"], allowed_mentions=discord.AllowedMentions.none())
+                self.outbox.db.activity_outbox.update_one(
+                    {"_id": record["_id"], "status": "pending"},
+                    {"$set": {"status": "published", "published_at": datetime.now(timezone.utc)},
+                     "$inc": {"attempts": 1}})
+                LOG.info("[SiN Activity] direct notification sent type=%s serverKey=%s userId=%s",
+                         record.get("activity_type"), record.get("server_key"), user_id)
+                return
+            elif record.get("destination") == "staff":
                 try:
                     channel_id = int(self.bot.channels.get("staff"))
                 except (AttributeError, TypeError, ValueError):

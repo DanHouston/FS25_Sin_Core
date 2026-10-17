@@ -742,6 +742,19 @@ class NetworkBot(discord.Client):
                 return []
             players = snapshot.get("players") if isinstance(snapshot, dict) else None
             owners_by_farm = {}
+            manager_names_by_farm = {}
+
+            def owner_part(display_name, farm_name):
+                """Return just the person part of '<person> | <farm>' names."""
+                display_name = str(display_name or "").strip()
+                farm_name = str(farm_name or "").strip()
+                suffix = f" | {farm_name}"
+                if farm_name and display_name.lower().endswith(suffix.lower()):
+                    display_name = display_name[:-len(suffix)].strip()
+                if farm_name and display_name.casefold() == farm_name.casefold():
+                    return None
+                return display_name or None
+
             if isinstance(players, dict):
                 for player in players.values():
                     if not isinstance(player, dict):
@@ -752,14 +765,46 @@ class NetworkBot(discord.Client):
                     except (TypeError, ValueError):
                         continue
                     if player_name and player_farm_id != "0":
-                        owners_by_farm.setdefault(player_farm_id, set()).add(player_name)
+                        farm_name = farms.get(player_farm_id, farms.get(int(player_farm_id), ""))
+                        person_name = owner_part(player_name, farm_name)
+                        if person_name:
+                            owners_by_farm.setdefault(player_farm_id, set()).add(person_name)
+
+            # A farm manager may be offline, so supplement the live player
+            # list with the active, game-confirmed manager identity and its
+            # approved SiN display name.
+            database = self.bank.database.db
+            try:
+                manager_rows = await asyncio.to_thread(lambda: list(database.memberships.find({
+                    "server_id": server, "save_id": save_key, "world_id": runtime["world_id"],
+                    "desired_role": "farm_manager", "state": "active",
+                    "applied_role": "farm_manager"})))
+                manager_ids = sorted({str(row.get("discord_id") or "") for row in manager_rows
+                                      if row.get("discord_id")})
+                applications = await asyncio.to_thread(lambda: list(database.community_applications.find({
+                    "_id": {"$in": manager_ids}, "state": "approved"}))) if manager_ids else []
+                application_by_id = {str(row.get("_id")): row for row in applications}
+                for manager in manager_rows:
+                    farm_key = str(manager.get("farm_id") or "")
+                    farm_name = farms.get(farm_key, farms.get(int(farm_key), "")) if farm_key.isdigit() else ""
+                    application = application_by_id.get(str(manager.get("discord_id") or ""), {})
+                    canonical = str(application.get("server_nickname") or "").strip()
+                    if not canonical:
+                        nickname = str(application.get("nickname") or "").strip()
+                        canonical = nickname or str(application.get("farm_name") or "").strip()
+                    person_name = owner_part(canonical, farm_name)
+                    if farm_key and person_name:
+                        manager_names_by_farm.setdefault(farm_key, set()).add(person_name)
+            except (AttributeError, PyMongoError):
+                logging.exception("vehicle transfer farm owner lookup failed server=%s", server)
+
             choices = []
             for farm_id, name in farms.items():
                 name = str(name or "").strip()
                 if not name:
                     continue
                 farm_key = str(farm_id)
-                owners = owners_by_farm.get(farm_key, set())
+                owners = manager_names_by_farm.get(farm_key) or owners_by_farm.get(farm_key, set())
                 owner = next(iter(owners)) if len(owners) == 1 else None
                 label = f"{owner} | {name}" if owner else name
                 if current.lower() in label.lower():
@@ -1765,7 +1810,8 @@ class NetworkBot(discord.Client):
                     f"Transfer `{record['transfer_id']}` is queued as `{operation_id}` on "
                     f"{record['server_key']} from farm {record['source_farm_id']} "
                     f"to farm {record['destination_farm_id']}. It completes only after FS25 "
-                    "confirms the destination owner. If sent to the wrong farm, that farm can transfer "
+                    "confirms the destination owner and relocation to the shop; the initiator will get a DM. "
+                    "If sent to the wrong farm, that farm can transfer "
                     "it back with a new request.", ephemeral=True)
 
         @vehicle_transfer.autocomplete("destination_server")
@@ -1803,7 +1849,8 @@ class NetworkBot(discord.Client):
                     f"Admin transfer `{record['transfer_id']}` is queued as `{operation_id}`: "
                     f"vehicle `{record['item']}` on {record['server_key']} from farm "
                     f"{record['source_farm_id']} to farm {record['destination_farm_id']}. "
-                    "FS25 must confirm the destination owner before this is marked complete. "
+                    "FS25 must confirm the destination owner and relocation to the shop before this is marked complete; "
+                    "the initiator will get a DM. "
                     f"Audit reason: {record['admin_reason']}", ephemeral=True)
 
         @vehicle_transfer_admin.autocomplete("destination_server")

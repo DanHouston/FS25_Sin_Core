@@ -481,7 +481,7 @@ class TransferService:
     """Auditable vehicle/product transfer state; game mutation is receipt-gated."""
 
     def __init__(self, database, authorization=None):
-        self.db, self.authorization = database.db, authorization
+        self.db, self._database, self.authorization = database.db, database, authorization
         self.worlds = WorldGenerationRegistry(database)
 
     def create_vehicle_by_code(self, requester_id, destination_farm_id, vehicle_code,
@@ -670,8 +670,13 @@ class TransferService:
                 raise ValueError("Vehicle transfer receipt does not match its queued asset and farms")
             if outcome in {"applied", "already_applied"} and (
                     str(payload.get("owner_farm_id") or "") != str(record["destination_farm_id"])
-                    or not self._receipt_bool(payload.get("authoritative_readback"))):
-                raise ValueError("Vehicle transfer success requires destination-owner readback")
+                    or not self._receipt_bool(payload.get("authoritative_readback"))
+                    or not self._receipt_bool(payload.get("shop_position_readback"))
+                    or not self._receipt_bool(payload.get("moved_to_shop"))):
+                # Older agents or incomplete receipts may report an owner
+                # change without proving shop relocation. Preserve the game
+                # receipt for staff reconciliation; never mark it complete.
+                outcome = "pending_validation"
             if outcome in {"failed", "definitively_not_applied"} and (
                     str(payload.get("owner_farm_id") or "") != str(record["source_farm_id"])
                     or not self._receipt_bool(payload.get("authoritative_readback"))):
@@ -686,8 +691,10 @@ class TransferService:
         if current_status == "completed":
             if target_status != "completed":
                 raise ValueError("Transfer has a conflicting terminal receipt")
+            self._queue_vehicle_receipt_notice(record, target_status, receipt)
             return record
         if current_status == "reconciliation_required" and target_status == "reconciliation_required":
+            self._queue_vehicle_receipt_notice(record, target_status, receipt)
             return record
         if current_status not in {"pending_game", "reconciliation_required"}:
             raise ValueError("Transfer is not awaiting a game receipt")
@@ -705,7 +712,31 @@ class TransferService:
             {"$set": {"state": operation_state, "receipt": receipt, "updated_at": _now()}})
         if operation_result.modified_count != 1:
             raise ValueError("Transfer operation changed before its receipt could be committed")
-        return self.get(transfer_id)
+        updated = self.get(transfer_id)
+        self._queue_vehicle_receipt_notice(updated or record, target_status, receipt)
+        return updated
+
+    def _queue_vehicle_receipt_notice(self, record, status, receipt):
+        if record.get("kind") != "vehicle" or not record.get("requester_discord_id"):
+            return
+        from .activity import ActivityOutbox
+        status_text = {
+            "completed": "completed: FS25 confirmed the new owner and relocated the vehicle to the shop",
+            "failed": "failed: FS25 confirmed the transfer was not applied",
+            "reconciliation_required": "needs review: FS25 could not confirm both the new owner and shop relocation",
+        }.get(status, "received an unrecognized game result")
+        payload = receipt.get("result") if isinstance(receipt.get("result"), dict) else receipt
+        reason = str(payload.get("receipt") or receipt.get("receipt") or "").strip()
+        message = (f"Vehicle transfer `{record.get('transfer_id')}` for `{record.get('item')}` "
+                   f"on {record.get('server_key')} {status_text}. "
+                   f"Destination farm: {record.get('destination_farm_id')}. ")
+        if reason:
+            message += f"FS25: {reason}"
+        ActivityOutbox(self._database).enqueue(
+            f"vehicle-transfer-receipt:{record.get('transfer_id')}:{status}",
+            record.get("server_key"), "vehicle_transfer_receipt", message,
+            save_key=record.get("save_key"), world_id=record.get("world_id"),
+            destination="user", metadata={"discord_user_id": str(record["requester_discord_id"])})
 
     @staticmethod
     def _receipt_bool(value):

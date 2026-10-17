@@ -54,17 +54,19 @@ live ownership, safety, and native readback checks. Staff authority does not
 permit guessing an asset or bypassing FS25 validation.
 
 The server resolves the exact native ID again and checks current ownership,
-owned-property state, occupancy, AI control, and attachment state before
-calling the native owner-farm setter. The vehicle stays in the world, and the
-code stays attached to the same server/save/world/native ID. Central marks the
-transfer complete only after the mailbox receipt identifies the same transfer
-and asset and reports an authoritative destination-owner readback. Unclear
-outcomes remain in reconciliation rather than being retried as a second
-ownership mutation. A failed or rejected mutation leaves ownership with the
-source farm. If the source manager chose the wrong destination and the transfer
-completed, the destination farm must initiate a new transfer back. This first
-transfer path is limited to two farms in the same active FS25 world; it does
-not move vehicles between servers or saves.
+owned-property state, occupancy, AI control, and attachment state. It selects
+an available slot from the map's native shop spawn locations, relocates the
+vehicle there, and then changes its owner farm. The code stays attached to the
+same server/save/world/native ID. Central marks the transfer complete only
+after the mailbox receipt identifies the same transfer and asset and confirms
+both destination ownership and shop-position readback. Unclear outcomes remain
+in reconciliation rather than being retried as a second mutation. The
+initiating Discord user receives a direct message after FS25 reports a final
+result; uncertain results are labeled as needing review. If the source manager
+chose the wrong destination and the transfer completed, the destination farm
+must initiate a new transfer back. This first transfer path is limited to two
+farms in the same active FS25 world; it does not move vehicles between servers
+or saves.
 
 ## Garage status
 

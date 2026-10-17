@@ -3271,6 +3271,9 @@ function FS25SiNServer:processVehicleTransferCommand(command, operationId)
     local mutationPerformed = false
     local ownerAfter = ownerBefore
     local authoritativeReadback = ownerBefore ~= nil
+    local shopPositionReadback = false
+    local movedToShop = false
+    local shopPositionError = nil
 
     if g_currentMission == nil or not g_currentMission:getIsServer() then
         reason = "vehicle transfers may only be applied by the authoritative server"
@@ -3355,7 +3358,60 @@ function FS25SiNServer:processVehicleTransferCommand(command, operationId)
             status = "pending_validation"
             reason = "native vehicle ownership mutation API is unavailable"
         else
-            local mutationOk, mutationError = pcall(vehicle.setOwnerFarmId, vehicle, tonumber(destinationFarmId))
+            -- Use the same loading-place selection as a normal FS25 shop
+            -- delivery, so each transferred vehicle is sent to an available
+            -- shop spawn slot on this server/map.
+            local mission = g_currentMission
+            local storeItem = g_storeManager ~= nil and vehicle.configFileName ~= nil
+                and g_storeManager:getItemByXMLFilename(string.lower(vehicle.configFileName)) or nil
+            local loadingData = VehicleLoadingData ~= nil and VehicleLoadingData.new() or nil
+            local positionOk = false
+            local shopPositionTarget = nil
+            local positionError = "native shop loading-place API is unavailable"
+            if storeItem ~= nil and loadingData ~= nil
+                and type(loadingData.setStoreItem) == "function"
+                and type(loadingData.setLoadingPlace) == "function"
+                and type(loadingData.getPositionAndRotation) == "function"
+                and type(vehicle.setAbsolutePosition) == "function"
+                and vehicle.rootNode ~= nil and type(getWorldTranslation) == "function"
+                and type(mission.storeSpawnPlaces) == "table"
+                and type(mission.usedStorePlaces) == "table" then
+                local prepared, prepareError = pcall(function()
+                    loadingData:setStoreItem(storeItem)
+                    loadingData:setConfigurations(vehicle.configurations or {})
+                    loadingData:setLoadingPlace(mission.storeSpawnPlaces, mission.usedStorePlaces)
+                    if loadingData.validLocation ~= true then
+                        error("no available vehicle shop spawn slot")
+                    end
+                    local x, y, z, rx, ry, rz = loadingData:getPositionAndRotation(vehicle)
+                    if x == nil or y == nil or z == nil or rx == nil or ry == nil or rz == nil then
+                        error("vehicle shop spawn position is unavailable")
+                    end
+                    shopPositionTarget = {x, y, z}
+                    vehicle:setAbsolutePosition(x, y, z, rx, ry, rz)
+                end)
+                positionOk = prepared
+                if not prepared then positionError = tostring(prepareError) end
+            end
+            if positionOk then
+                local readOk, x, y, z = pcall(getWorldTranslation, vehicle.rootNode)
+                if readOk and type(x) == "number" and type(y) == "number" and type(z) == "number" then
+                    local target = shopPositionTarget
+                    shopPositionReadback = math.abs(x - target[1]) <= 0.5
+                        and math.abs(y - target[2]) <= 0.5 and math.abs(z - target[3]) <= 0.5
+                    movedToShop = shopPositionReadback
+                end
+                if not shopPositionReadback then
+                    shopPositionError = "vehicle shop position readback did not match the selected spawn slot"
+                end
+            else
+                shopPositionError = positionError
+            end
+
+            local mutationOk, mutationError = false, "vehicle was not moved to a verified shop spawn slot"
+            if shopPositionReadback then
+                mutationOk, mutationError = pcall(vehicle.setOwnerFarmId, vehicle, tonumber(destinationFarmId))
+            end
             if type(vehicle.getOwnerFarmId) == "function" then
                 local readOk, value = pcall(vehicle.getOwnerFarmId, vehicle)
                 if readOk then
@@ -3363,14 +3419,18 @@ function FS25SiNServer:processVehicleTransferCommand(command, operationId)
                     authoritativeReadback = ownerAfter ~= nil
                 end
             end
-            mutationPerformed = ownerAfter ~= ownerBefore
-            if authoritativeReadback and ownerAfter == tonumber(destinationFarmId) then
+            mutationPerformed = movedToShop or ownerAfter ~= ownerBefore
+            if authoritativeReadback and ownerAfter == tonumber(destinationFarmId) and shopPositionReadback then
                 status = "applied"
-                reason = "vehicle ownership changed and destination owner was verified"
+                reason = "vehicle was relocated to the server shop and destination owner was verified"
             else
                 status = "pending_validation"
-                reason = mutationOk and "vehicle owner readback did not match destination"
-                    or ("native ownership mutation failed: " .. tostring(mutationError))
+                if not shopPositionReadback then
+                    reason = "vehicle shop relocation could not be verified: " .. tostring(shopPositionError)
+                else
+                    reason = mutationOk and "vehicle owner readback did not match destination"
+                        or ("native ownership mutation failed: " .. tostring(mutationError))
+                end
             end
         end
     end
@@ -3388,6 +3448,8 @@ function FS25SiNServer:processVehicleTransferCommand(command, operationId)
     receipt:setInt("networkLocalReceipt#owner_farm_id", ownerAfter or 0)
     receipt:setBool("networkLocalReceipt#mutation_performed", mutationPerformed)
     receipt:setBool("networkLocalReceipt#authoritative_readback", authoritativeReadback)
+    receipt:setBool("networkLocalReceipt#shop_position_readback", shopPositionReadback)
+    receipt:setBool("networkLocalReceipt#moved_to_shop", movedToShop)
     receipt:setString("networkLocalReceipt#status", status)
     receipt:setString("networkLocalReceipt#receipt", reason)
     self:setReceiptWorldId(receipt, "networkLocalReceipt")
