@@ -10,6 +10,8 @@ requires neither Discord nor MongoDB.
 
 See [Discord channels and authorization](docs/discord-and-authorization.md) for
 the channel layout, account linking, farm role workflow, and custom mod contract.
+See the [MongoDB structure guide](docs/database-structure.md) for the collection
+catalog, identity scopes, and retention behavior.
 See [deterministic FS25 modpack distribution](docs/modpack-distribution.md) for
 the explicit capture, validation, publication, and client synchronization flow.
 See the [deployment runbook](docs/deploy-runbook.md) for copy/paste release,
