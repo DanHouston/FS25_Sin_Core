@@ -19,6 +19,19 @@ def runtime():
 
 
 class VehicleInventoryLuaTests(unittest.TestCase):
+    def test_vehicle_display_name_hook_prefixes_name_from_unique_id_code_map(self):
+        lua = runtime()
+        lua.execute(r'''
+        Vehicle = {getName=function(vehicle) return vehicle.baseName end}
+        Logging = {info=function() end}
+        FS25SiNVehicleCodes = {['vehicle-1']='PJT7H'}
+        FS25SiNServer:installVehicleCodeNameHook()
+        testVehicle = {baseName='Condor Endurance II',
+            getUniqueId=function() return 'vehicle-1' end}
+        prefixedName = Vehicle.getName(testVehicle)
+        ''')
+        self.assertEqual(lua.eval("prefixedName"), "[PJT7H] Condor Endurance II")
+
     def test_owned_vehicles_are_farm_scoped_sorted_and_exclude_inventory(self):
         lua = runtime()
         lua.execute(r'''

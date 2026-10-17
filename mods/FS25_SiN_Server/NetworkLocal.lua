@@ -1087,7 +1087,7 @@ function FS25SiNServer:loadVehicleCodes()
         xml:delete()
         return false
     end
-    local vehicles, index = {}, 0
+    local vehicles, codesByUniqueId, index = {}, {}, 0
     while index < 5000 do
         local key = string.format("vehicleCodes.vehicle(%d)", index)
         local uniqueId = xml:getString(key .. "#uniqueId")
@@ -1095,6 +1095,7 @@ function FS25SiNServer:loadVehicleCodes()
         local code = xml:getString(key .. "#code")
         if uniqueId ~= "" and type(code) == "string" and string.match(code, "^[A-Z0-9][A-Z0-9]+$") then
             table.insert(vehicles, {uniqueId=uniqueId, code=code})
+            codesByUniqueId[uniqueId] = code
         end
         index = index + 1
     end
@@ -1108,6 +1109,7 @@ function FS25SiNServer:loadVehicleCodes()
     self.vehicleCodesSignature = signature
     self.vehicleCodesWorldId = worldId
     self.vehicleCodesProjection = vehicles
+    FS25SiNVehicleCodes = codesByUniqueId
     if g_server ~= nil then SiNVehicleCodesEvent.broadcast(worldId, vehicles) end
     return true
 end

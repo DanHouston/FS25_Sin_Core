@@ -26,9 +26,11 @@ class VehicleCodeEventLuaTests(unittest.TestCase):
             """)
         lua.execute(EVENT.read_text(encoding="utf-8"))
         lua.execute("""
-            local event = {worldId = "server-world-id", vehicles = {PJT7H = "vehicle-1"}}
+            local event = {worldId = "server-world-id", vehicles = {
+                {uniqueId = "vehicle-1", code = "PJT7H"}
+            }}
             SiNVehicleCodesEvent.run(event, connection)
-            assert(FS25SiNVehicleCodes.PJT7H == "vehicle-1")
+            assert(FS25SiNVehicleCodes["vehicle-1"] == "PJT7H")
             assert(string.find(receivedLog, "server-world-id", 1, true) ~= nil)
             assert(string.find(receivedLog, "vehicles=1", 1, true) ~= nil)
         """)
