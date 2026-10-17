@@ -61,6 +61,14 @@ class VehicleInventoryLuaTests(unittest.TestCase):
         lua = runtime()
         lua.execute(f'''
         receiptAttrs = {{}}
+        local loadingData = {{validLocation=true}}
+        function loadingData:setStoreItem(item) self.item = item end
+        function loadingData:setConfigurations(configurations) end
+        function loadingData:setLoadingPlace(spawnPlaces, usedPlaces) end
+        function loadingData:getPositionAndRotation(vehicle) return 1, 2, 3, 0, 0, 0 end
+        VehicleLoadingData = {{new=function() return loadingData end}}
+        g_storeManager = {{getItemByXMLFilename=function(_, filename) return {{filename=filename}} end}}
+        getWorldTranslation = function(node) return node.x, node.y, node.z end
         XMLFile = {{create=function(_, path, rootName)
             return {{
                 setString=function(_, key, value) receiptAttrs[key] = tostring(value) end,
@@ -76,6 +84,10 @@ class VehicleInventoryLuaTests(unittest.TestCase):
             getOwnerFarmId=function() return vehicleOwner end,
             setOwnerFarmId=function(_, farmId) vehicleOwner = farmId end,
             getIsAIActive=function() return {str(ai).lower()} end,
+            configFileName="vehicle.xml", configurations={{}}, rootNode={{x=0, y=0, z=0}},
+            setAbsolutePosition=function(self, x, y, z, rx, ry, rz)
+                self.rootNode.x, self.rootNode.y, self.rootNode.z = x, y, z
+            end,
             getChildVehicles=function(self)
                 if {str(attached).lower()} then return {{self, {{}}}} end
                 return {{self}}
@@ -90,7 +102,7 @@ class VehicleInventoryLuaTests(unittest.TestCase):
             end
         end
         g_currentMission = {{getIsServer=function() return {str(is_server).lower()} end,
-            vehicleSystem={{vehicles={{vehicle}}}}}}
+            vehicleSystem={{vehicles={{vehicle}}}}, storeSpawnPlaces={{}}, usedStorePlaces={{}}}}
         g_farmManager = {{getFarmById=function(_, farmId)
             if farmId == 2 or farmId == 4 then return {{farmId=farmId}} end
             return nil

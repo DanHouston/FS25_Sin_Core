@@ -309,7 +309,8 @@ class BusinessWorkflowTests(unittest.TestCase):
             "operation_id": "operation-1", "operation_type": "vehicle_transfer", "status": "applied",
             "result": {"transfer_id": "transfer-1", "vehicle_unique_id": "native-1",
                        "source_farm_id": "2", "destination_farm_id": "4",
-                       "owner_farm_id": "4", "authoritative_readback": "true"}}
+                       "owner_farm_id": "4", "authoritative_readback": "true",
+                       "shop_position_readback": "true", "moved_to_shop": "true"}}
         result = service.accept_receipt("transfer-1", receipt, "server", "save", "world-a")
         self.assertEqual(result["status"], "completed")
         self.assertEqual(self.db.farm_operations.update_one.call_args.args[1]["$set"]["state"], "succeeded")
@@ -329,9 +330,12 @@ class BusinessWorkflowTests(unittest.TestCase):
             "result": {"transfer_id": "transfer-1", "vehicle_unique_id": "native-1",
                        "source_farm_id": "2", "destination_farm_id": "4",
                        "owner_farm_id": "4", "authoritative_readback": "false"}}
-        with self.assertRaisesRegex(ValueError, "readback"):
-            service.accept_receipt("transfer-1", receipt, "server", "save", "world-a")
-        self.db.transfers.update_one.assert_not_called()
+        self.db.transfers.update_one.return_value.modified_count = 1
+        self.db.farm_operations.update_one.return_value.modified_count = 1
+        self.db.transfers.find_one.side_effect = [pending, dict(pending, status="reconciliation_required")]
+        result = service.accept_receipt("transfer-1", receipt, "server", "save", "world-a")
+        self.assertEqual(result["status"], "reconciliation_required")
+        self.assertEqual(self.db.transfers.update_one.call_args.args[1]["$set"]["receipt"], receipt)
 
     def test_vehicle_transfer_failure_requires_source_owner_readback(self):
         service = TransferService(self.database)
