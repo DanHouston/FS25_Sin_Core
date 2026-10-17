@@ -428,6 +428,23 @@ class BotOnboardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([option["name"] for option in admin.to_dict(self.bot.tree)["options"]],
                          ["destination_server", "destination_farm", "vehicle_code", "reason"])
 
+    async def test_vehicle_transfer_result_edits_original_ephemeral_response(self):
+        interaction = MagicMock()
+        interaction.edit_original_response = AsyncMock()
+        self.bot.remember_transfer_interaction("transfer-1", interaction)
+
+        delivered = await self.bot.update_transfer_interaction(
+            "transfer-1", "Vehicle transfer for PJT7H failed: detach this vehicle before transferring it")
+
+        self.assertTrue(delivered)
+        interaction.edit_original_response.assert_awaited_once()
+        edit = interaction.edit_original_response.await_args.kwargs
+        self.assertEqual(edit["content"],
+                         "Vehicle transfer for PJT7H failed: detach this vehicle before transferring it")
+        self.assertEqual(edit["allowed_mentions"].to_dict(),
+                         discord.AllowedMentions.none().to_dict())
+        self.assertFalse(await self.bot.update_transfer_interaction("transfer-1", "duplicate"))
+
     async def test_bank_context_carries_active_world_generation(self):
         database = self.bot.bank.database.db
         database.game_identities.find.return_value.limit.return_value = [{

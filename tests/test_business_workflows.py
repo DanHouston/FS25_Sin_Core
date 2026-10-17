@@ -298,7 +298,8 @@ class BusinessWorkflowTests(unittest.TestCase):
         service.worlds.require_active = MagicMock(return_value="world-a")
         pending = {"transfer_id": "transfer-1", "kind": "vehicle", "status": "pending_game",
                    "operation_id": "operation-1", "server_key": "server", "save_key": "save",
-                   "world_id": "world-a", "source_farm_id": 2, "destination_farm_id": 4}
+                   "world_id": "world-a", "source_farm_id": 2, "destination_farm_id": 4,
+                   "requester_discord_id": "42", "initiator_type": "admin", "item": "PJT7H"}
         completed = dict(pending, status="completed")
         self.db.transfers.find_one.side_effect = [pending, completed]
         self.db.farm_operations.find_one.return_value = {
@@ -314,6 +315,10 @@ class BusinessWorkflowTests(unittest.TestCase):
         result = service.accept_receipt("transfer-1", receipt, "server", "save", "world-a")
         self.assertEqual(result["status"], "completed")
         self.assertEqual(self.db.farm_operations.update_one.call_args.args[1]["$set"]["state"], "succeeded")
+        notice = self.db.activity_outbox.insert_one.call_args.args[0]
+        self.assertEqual(notice["destination"], "interaction")
+        self.assertEqual(notice["metadata"]["transfer_id"], "transfer-1")
+        self.assertEqual(notice["message"], "Vehicle transfer for PJT7H completed.")
 
     def test_vehicle_transfer_receipt_rejects_success_without_readback(self):
         service = TransferService(self.database)

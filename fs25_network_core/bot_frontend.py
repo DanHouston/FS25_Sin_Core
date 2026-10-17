@@ -453,6 +453,7 @@ class NetworkBot(discord.Client):
         self.community_timezone = str(community_timezone or "UTC")
         self.tree = app_commands.CommandTree(self)
         self._command_sync_lock = asyncio.Lock()
+        self._pending_transfer_interactions = {}
         self.authorization = AuthorizationManager(bank.database)
         self.authorizations = authorizations or {}
         self.community = CommunityApplications(bank.database)
@@ -1810,9 +1811,10 @@ class NetworkBot(discord.Client):
                     f"Transfer `{record['transfer_id']}` is queued as `{operation_id}` on "
                     f"{record['server_key']} from farm {record['source_farm_id']} "
                     f"to farm {record['destination_farm_id']}. It completes only after FS25 "
-                    "confirms the destination owner and relocation to the shop; the initiator will get a DM. "
+                    "confirms the transfer. This private response will update with the result. "
                     "If sent to the wrong farm, that farm can transfer "
                     "it back with a new request.", ephemeral=True)
+                self.remember_transfer_interaction(record["transfer_id"], interaction)
 
         @vehicle_transfer.autocomplete("destination_server")
         async def vehicle_transfer_destination_server_autocomplete(interaction: discord.Interaction, current: str):
@@ -1849,9 +1851,9 @@ class NetworkBot(discord.Client):
                     f"Admin transfer `{record['transfer_id']}` is queued as `{operation_id}`: "
                     f"vehicle `{record['item']}` on {record['server_key']} from farm "
                     f"{record['source_farm_id']} to farm {record['destination_farm_id']}. "
-                    "FS25 must confirm the destination owner and relocation to the shop before this is marked complete; "
-                    "the initiator will get a DM. "
+                    "FS25 must confirm the transfer before this private response updates with the result. "
                     f"Audit reason: {record['admin_reason']}", ephemeral=True)
+                self.remember_transfer_interaction(record["transfer_id"], interaction)
 
         @vehicle_transfer_admin.autocomplete("destination_server")
         async def vehicle_transfer_admin_destination_server_autocomplete(interaction: discord.Interaction, current: str):
@@ -2447,6 +2449,22 @@ class NetworkBot(discord.Client):
         await self.server_status_publisher.stop()
         await self.market_finance_publisher.stop()
         await super().close()
+
+    def remember_transfer_interaction(self, transfer_id, interaction):
+        self._pending_transfer_interactions[str(transfer_id)] = (interaction, time.monotonic() + 14 * 60)
+
+    async def update_transfer_interaction(self, transfer_id, message):
+        pending = self._pending_transfer_interactions.get(str(transfer_id))
+        if pending is None:
+            return False
+        interaction, expires_at = pending
+        if time.monotonic() >= expires_at:
+            self._pending_transfer_interactions.pop(str(transfer_id), None)
+            return False
+        await interaction.edit_original_response(
+            content=message, allowed_mentions=discord.AllowedMentions.none())
+        self._pending_transfer_interactions.pop(str(transfer_id), None)
+        return True
 
 
 def main():

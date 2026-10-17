@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -38,6 +39,39 @@ class ActivityNotificationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(channel.send.await_args.args[0], "Farm complete")
         update = database.db.activity_outbox.update_one.call_args.args[1]
         self.assertEqual(update["$set"]["status"], "published")
+
+    async def test_vehicle_transfer_receipt_updates_private_interaction_without_sending_dm(self):
+        database = MagicMock()
+        bot = MagicMock()
+        bot.update_transfer_interaction = AsyncMock(return_value=True)
+        publisher = ActivityPublisher(bot, database)
+        record = {"_id": "transfer-result", "server_key": "server", "destination": "interaction",
+                  "activity_type": "vehicle_transfer_receipt", "message": "Vehicle transfer for PJT7H failed: detach it",
+                  "status": "pending", "attempts": 0, "created_at": datetime.now(timezone.utc),
+                  "metadata": {"transfer_id": "transfer-1"}}
+
+        await publisher.publish(record)
+
+        bot.update_transfer_interaction.assert_awaited_once_with("transfer-1", record["message"])
+        bot.get_user.assert_not_called()
+        update = database.db.activity_outbox.update_one.call_args.args[1]
+        self.assertEqual(update["$set"]["status"], "published")
+
+    async def test_legacy_vehicle_transfer_dm_record_is_routed_to_private_interaction(self):
+        database = MagicMock()
+        bot = MagicMock()
+        bot.update_transfer_interaction = AsyncMock(return_value=True)
+        publisher = ActivityPublisher(bot, database)
+        record = {"_id": "legacy-transfer-result", "server_key": "server", "destination": "user",
+                  "activity_type": "vehicle_transfer_receipt", "message": "Vehicle transfer for PJT7H completed.",
+                  "status": "pending", "attempts": 0, "created_at": datetime.now(timezone.utc),
+                  "source_event_id": "vehicle-transfer-receipt:transfer-1:completed",
+                  "metadata": {"discord_user_id": "42"}}
+
+        await publisher.publish(record)
+
+        bot.update_transfer_interaction.assert_awaited_once_with("transfer-1", record["message"])
+        bot.get_user.assert_not_called()
 
     async def test_native_contract_available_creates_parent_card_and_thread(self):
         database = MagicMock()

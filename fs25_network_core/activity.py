@@ -84,7 +84,44 @@ class ActivityPublisher:
     async def publish(self, record):
         permanent = False
         try:
-            if record.get("destination") == "user":
+            # Legacy transfer notices used DMs. Never send those after this
+            # change; route them through the originating ephemeral response.
+            if (record.get("activity_type") == "vehicle_transfer_receipt"
+                    and record.get("destination") == "user"):
+                record = dict(record)
+                record["destination"] = "interaction"
+                metadata = dict(record.get("metadata") or {})
+                source_event_id = str(record.get("source_event_id") or "")
+                if not metadata.get("transfer_id") and source_event_id.startswith("vehicle-transfer-receipt:"):
+                    metadata["transfer_id"] = source_event_id.split(":", 2)[1]
+                record["metadata"] = metadata
+            if record.get("destination") == "interaction":
+                transfer_id = str((record.get("metadata") or {}).get("transfer_id") or "")
+                update_response = getattr(self.bot, "update_transfer_interaction", None)
+                delivered = (await update_response(transfer_id, record["message"])
+                             if transfer_id and callable(update_response) else False)
+                if not delivered:
+                    created_at = record.get("created_at")
+                    if isinstance(created_at, datetime):
+                        created = created_at if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc)
+                        age = (datetime.now(timezone.utc) - created).total_seconds()
+                    else:
+                        age = 15 * 60
+                    if age < 14 * 60:
+                        # The initial slash-command response may not have been
+                        # registered yet, or the receipt arrived just ahead of
+                        # the command callback's acknowledgment.
+                        return
+                    permanent = True
+                    raise ValueError("originating ephemeral interaction expired before FS25 confirmed transfer")
+                self.outbox.db.activity_outbox.update_one(
+                    {"_id": record["_id"], "status": "pending"},
+                    {"$set": {"status": "published", "published_at": datetime.now(timezone.utc)},
+                     "$inc": {"attempts": 1}})
+                LOG.info("[SiN Activity] ephemeral transfer result updated transfer=%s serverKey=%s",
+                         transfer_id, record.get("server_key"))
+                return
+            elif record.get("destination") == "user":
                 metadata = record.get("metadata") or {}
                 try:
                     user_id = int(metadata.get("discord_user_id"))

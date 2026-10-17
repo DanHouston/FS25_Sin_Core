@@ -720,23 +720,24 @@ class TransferService:
         if record.get("kind") != "vehicle" or not record.get("requester_discord_id"):
             return
         from .activity import ActivityOutbox
-        status_text = {
-            "completed": "completed: FS25 confirmed the new owner and relocated the vehicle to the shop",
-            "failed": "failed: FS25 confirmed the transfer was not applied",
-            "reconciliation_required": "needs review: FS25 could not confirm both the new owner and shop relocation",
-        }.get(status, "received an unrecognized game result")
         payload = receipt.get("result") if isinstance(receipt.get("result"), dict) else receipt
         reason = str(payload.get("receipt") or receipt.get("receipt") or "").strip()
-        message = (f"Vehicle transfer `{record.get('transfer_id')}` for `{record.get('item')}` "
-                   f"on {record.get('server_key')} {status_text}. "
-                   f"Destination farm: {record.get('destination_farm_id')}. ")
-        if reason:
-            message += f"FS25: {reason}"
+        transfer_kind = "Vehicle transfer"
+        if status == "completed":
+            message = f"{transfer_kind} for {record.get('item')} completed."
+        elif status == "failed":
+            message = f"{transfer_kind} for {record.get('item')} failed"
+            message += f": {reason}" if reason else "."
+        else:
+            message = f"{transfer_kind} for {record.get('item')} needs review"
+            message += f": {reason}" if reason else "."
         ActivityOutbox(self._database).enqueue(
-            f"vehicle-transfer-receipt:{record.get('transfer_id')}:{status}",
+            f"vehicle-transfer-interaction-receipt:{record.get('transfer_id')}:{status}",
             record.get("server_key"), "vehicle_transfer_receipt", message,
             save_key=record.get("save_key"), world_id=record.get("world_id"),
-            destination="user", metadata={"discord_user_id": str(record["requester_discord_id"])})
+            destination="interaction",
+            metadata={"transfer_id": str(record.get("transfer_id")),
+                      "discord_user_id": str(record["requester_discord_id"])})
 
     @staticmethod
     def _receipt_bool(value):
