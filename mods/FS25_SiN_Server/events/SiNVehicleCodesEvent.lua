@@ -41,10 +41,14 @@ function SiNVehicleCodesEvent:run(connection)
     if g_currentMission == nil or not g_currentMission:getIsClient() then return end
     if connection ~= nil and not connection:getIsServer() then return end
     local codesByUniqueId = {}
-    for _, vehicle in ipairs(self.vehicles or {}) do
-        if type(vehicle) == "table" and type(vehicle.uniqueId) == "string"
-            and vehicle.uniqueId ~= "" and type(vehicle.code) == "string" and vehicle.code ~= "" then
-            codesByUniqueId[vehicle.uniqueId] = vehicle.code
+    -- readStream has already converted the wire rows to uniqueId -> code.
+    -- Also accept the row array used by the server-side projection/tests.
+    for key, value in pairs(self.vehicles or {}) do
+        if type(key) == "string" and type(value) == "string" and key ~= "" and value ~= "" then
+            codesByUniqueId[key] = value
+        elseif type(value) == "table" and type(value.uniqueId) == "string"
+            and value.uniqueId ~= "" and type(value.code) == "string" and value.code ~= "" then
+            codesByUniqueId[value.uniqueId] = value.code
         end
     end
     FS25SiNVehicleCodes = codesByUniqueId

@@ -26,9 +26,8 @@ class VehicleCodeEventLuaTests(unittest.TestCase):
             """)
         lua.execute(EVENT.read_text(encoding="utf-8"))
         lua.execute("""
-            local event = {worldId = "server-world-id", vehicles = {
-                {uniqueId = "vehicle-1", code = "PJT7H"}
-            }}
+            -- This is the shape produced by SiNVehicleCodesEvent:readStream.
+            local event = {worldId = "server-world-id", vehicles = {['vehicle-1'] = "PJT7H"}}
             SiNVehicleCodesEvent.run(event, connection)
             assert(FS25SiNVehicleCodes["vehicle-1"] == "PJT7H")
             assert(string.find(receivedLog, "server-world-id", 1, true) ~= nil)
