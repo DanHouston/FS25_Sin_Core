@@ -222,6 +222,9 @@ class OfflineCentral:
         if path.endswith("/api/server/operation-receipts"):
             self.receipts.append(json.loads(request.data.decode("utf-8")))
             return _Response()
+        if path.endswith("/api/server/garage/pending"):
+            # These scenarios have no garage operations awaiting a native save.
+            return _Response({"items": []})
         if path.endswith("/api/server/events"):
             self.events.append(json.loads(request.data.decode("utf-8")))
             return _Response()
