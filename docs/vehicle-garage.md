@@ -13,13 +13,22 @@ They declare Administrator as their default Discord command permission.
 | Command | Use |
 | --- | --- |
 | `/vehicle_garage_store_admin server:<server> vehicle_code:<code> reason:<text>` | Queue storage of one live owned vehicle. The source farm and its canonical account owner are resolved automatically. |
-| `/vehicle_garage_admin member:<Discord user> [page:1]` | Inspect that account's retained vehicles and pending/review operations. Failed stores and completed retrievals are excluded. Ten rows per page, up to 100 recent records; pages 1-10. |
+| `/vehicle_garage_admin member:<Discord user> [page:1]` | Inspect that account's retained vehicles and pending/review operations. Failed stores and completed retrievals are excluded. Ten rows per page, plus an attached CSV containing the full current list. Choose any existing page, starting at 1. |
 | `/vehicle_garage_retrieve_admin destination_server:<server> destination_farm:<farm picker> vehicle_code:<code> reason:<text>` | Restore a stored vehicle to an owned farm on the original server/world, at the shop. The destination farm must belong to the same account holder. |
 
 Reasons are required, 1-200 characters. Codes retain their permanent SiN
 identity. Source farm numbers are not personal garage owners, and storing a
 vehicle as an administrator does not put it in the administrator's garage.
 Destination farms use the existing name autocomplete.
+
+Every valid garage list response attaches `vehicle-garage-<Discord user ID>.csv`
+once, including when the garage is empty. The CSV contains all current records
+for that account across servers/worlds, using the same snapshot as the selected
+page, with no 100-record cap. It includes vehicle codes, names, states,
+server/save/world, farm IDs, UTC timestamps, reasons, receipts and vehicle
+identifiers. Failed stores and completed retrievals remain excluded. The report
+and attachment are private and read-only. CSV uses UTF-8 with a BOM for spreadsheet
+compatibility and escapes text that could be interpreted as a spreadsheet formula.
 
 Examples (select the farm/user with Discord's controls):
 

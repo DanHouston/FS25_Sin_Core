@@ -1,6 +1,8 @@
 """Account-owned native vehicle archives. Game mutation is receipt/checkpoint gated."""
 import base64
+import csv
 import hashlib
+import io
 import re
 import uuid
 from datetime import datetime, timezone
@@ -28,6 +30,40 @@ def garage_receipt_reason(value, limit=200):
     text = re.sub(r"^(?:.*?\.lua:\d+:\s*)+", "", str(value or ""))
     text = " ".join(text.split())
     return text if len(text) <= limit else text[:limit-1] + "…"
+
+
+def garage_csv(records, owner_id, owner_name):
+    """Export the complete current garage snapshot supplied by list_for."""
+    stream = io.StringIO(newline="")
+    writer = csv.writer(stream)
+
+    def write(*values):
+        safe = []
+        for value in values:
+            if isinstance(value, datetime):
+                value = value.replace(tzinfo=value.tzinfo or timezone.utc).astimezone(timezone.utc).isoformat()
+            text = "" if value is None else str(value)
+            if not isinstance(value, int) and text.lstrip().startswith(("=", "+", "-", "@", "\t")):
+                text = "'" + text
+            safe.append(text)
+        writer.writerow(safe)
+
+    write("Personal vehicle garage", owner_name, "Owner Discord ID", owner_id)
+    write("Exported at UTC", now(), "Records", len(records))
+    write("Scope", "Retained vehicles and pending/review operations; failed stores and completed retrievals excluded")
+    write("Stored vehicles are retained assets and earn no farm sale credit.")
+    write()
+    write("Vehicle code", "Vehicle", "State", "Server", "Save", "World", "Source farm ID",
+          "Destination farm ID", "Created at UTC", "Updated at UTC", "Store reason", "Retrieve reason",
+          "Last receipt status", "Last receipt", "Garage ID", "Native vehicle ID", "Vehicle filename")
+    for item in records:
+        receipt = item.get("last_receipt") or {}
+        write(item.get("vehicle_code"), item.get("name"), item.get("state"), item.get("server_key"),
+              item.get("save_key"), item.get("world_id"), item.get("source_farm_id"),
+              item.get("destination_farm_id"), item.get("created_at"), item.get("updated_at"),
+              item.get("reason"), item.get("retrieve_reason"), receipt.get("status"), receipt.get("receipt"),
+              item.get("_id"), item.get("native_unique_id"), item.get("source_filename"))
+    return stream.getvalue().encode("utf-8-sig")
 
 
 class VehicleGarageService:
@@ -316,7 +352,7 @@ class VehicleGarageService:
         # The garage is retained inventory and unresolved custody, not an
         # attempt history. Failed stores remain available in the audit data.
         return list(self.db.vehicle_garage.find({"owner_discord_id": str(owner),
-                    "state": {"$nin": ["failed", "retrieved"]}}).sort("created_at", -1).limit(100))
+                    "state": {"$nin": ["failed", "retrieved"]}}).sort("created_at", -1))
 
     def _notice(self, item, text, session=None):
         ActivityOutbox(self.database).enqueue("garage:" + item["_id"] + ":" + text,

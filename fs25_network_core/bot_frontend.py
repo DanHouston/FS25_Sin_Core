@@ -28,7 +28,7 @@ from .business_workflows import (ChatService, ContractService, InvoiceService,
                                   CommunityEventService, TransferService)
 from .farm_lifecycle import FarmLifecycle, SYSTEM_FARM_NAME, FIRST_FIELD_MAX_PRICE
 from .vehicle_inventory import VehicleInventoryService
-from .vehicle_garage import VehicleGarageService, garage_receipt_reason
+from .vehicle_garage import VehicleGarageService, garage_csv, garage_receipt_reason
 from .farm_report import FarmReportService, format_farm_report
 from .farm_assessment import FarmAssessmentService, format_farm_assessment, assessment_csv
 from .contract_contribution import (ContractContributionReportService,
@@ -1940,7 +1940,7 @@ class NetworkBot(discord.Client):
         @app_commands.check(channel_check)
         @app_commands.default_permissions(administrator=True)
         async def vehicle_garage_admin(interaction: discord.Interaction, member: discord.User,
-                                       page: app_commands.Range[int, 1, 10] = 1):
+                                       page: app_commands.Range[int, 1] = 1):
             staff_check(interaction)
             await interaction.response.defer(ephemeral=True)
             records = await asyncio.to_thread(self.vehicle_garage.list_for, str(member.id))
@@ -1948,7 +1948,8 @@ class NetworkBot(discord.Client):
             if page > pages:
                 raise ValueError(f"This garage has {pages} page(s)")
             header = (f"**Personal vehicle garage — {discord.utils.escape_markdown(str(member))}**\n"
-                      f"Page {page}/{pages}. Stored vehicles are retained assets and earn no farm sale credit.")
+                      f"Page {page}/{pages}. Stored vehicles are retained assets and earn no farm sale credit.\n"
+                      "Full garage list attached as CSV.")
             messages, message = [], header
             for item in records[(page-1)*10:page*10]:
                 name = discord.utils.escape_markdown(str(item.get("name") or "Vehicle")[:65])
@@ -1963,9 +1964,12 @@ class NetworkBot(discord.Client):
             if not records:
                 message += "\nNo retained vehicles or pending garage operations."
             messages.append(message)
-            for message in messages:
+            attachment = discord.File(io.BytesIO(garage_csv(records, str(member.id), str(member))),
+                                      filename=f"vehicle-garage-{member.id}.csv")
+            for index, message in enumerate(messages):
                 await interaction.followup.send(message, ephemeral=True,
-                                                allowed_mentions=discord.AllowedMentions.none())
+                                                allowed_mentions=discord.AllowedMentions.none(),
+                                                **({"file": attachment} if index == 0 else {}))
 
         @self.tree.command(name="vehicle_garage_retrieve_admin", description="Staff: restore a garaged vehicle to its owner's farm at the shop")
         @app_commands.check(channel_check)
