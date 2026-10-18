@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import asyncio
+import io
 import json
 import struct
 import tempfile
@@ -43,6 +44,7 @@ class _Response:
         self.status = status
         self.headers = {}
         self.payload = payload or {"status": "accepted"}
+        self._body = io.BytesIO(json.dumps(self.payload).encode("utf-8"))
 
     def __enter__(self):
         return self
@@ -50,8 +52,8 @@ class _Response:
     def __exit__(self, *_args):
         return False
 
-    def read(self):
-        return json.dumps(self.payload).encode("utf-8")
+    def read(self, size=-1):
+        return self._body.read(size)
 
 
 class _CaptureChannel:
