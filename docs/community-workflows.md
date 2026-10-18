@@ -1,5 +1,9 @@
 # Community workflow boundaries
 
+For every registered slash command, its arguments, permissions, channel and
+examples, use the [JiN command guide](bot-commands.md). This page explains the
+related feature workflows.
+
 ## Mod suggestions forum
 
 Members can run `/suggest_mod` in any ordinary channel in the configured
@@ -143,8 +147,9 @@ not a farm-owned asset and is deliberately omitted.
 
 `/farm_report_admin [server] [farm_id] [days]` gives staff the same ephemeral
 report for any farm in the current authoritative snapshot. After choosing the
-server, staff can type a farm name and select its `Farm ID - name` autocomplete
-entry. It includes native
+server, staff can type an owner/farm name and select its autocomplete result.
+The parameter remains named `farm_id`, but displays a friendly owner/farm label
+when the canonical owner is known. It includes native
 contracts observed completed in the selected window and the player/AI split by
 measured contract-work area. Unknown work is excluded from the percentage
 denominator and its hectares are shown separately.
@@ -217,7 +222,10 @@ not approve it. The server rechecks the exact vehicle and both farms before
 changing ownership. A failure leaves the vehicle with the source farm. If the
 owner selected the wrong destination and the mutation completed, the new owner
 must initiate a separate transfer back. Completion requires a durable,
-authoritative owner readback. Garage storage/retrieval is not enabled.
+authoritative owner readback. An admin-only [personal garage](vehicle-garage.md)
+is prepared for live validation. It preserves native archives for the farmer's
+account and excludes stored vehicles from farm sale credit; it does not use
+the live-transfer row as an archive.
 
 ## Durable operation rules
 

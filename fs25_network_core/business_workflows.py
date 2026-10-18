@@ -493,6 +493,8 @@ class TransferService:
         code = self.db.vehicle_codes.find_one({"code": code_text})
         if not isinstance(code, dict):
             raise ValueError("Vehicle code was not found; refresh /vehicles and try again")
+        if code.get("garage_lock_id"):
+            raise ValueError("Vehicle is held by an active garage operation; inspect its garage status")
         server_key, save_key, world_id = (code.get("server_key"), code.get("save_key"), code.get("world_id"))
         if any(not isinstance(value, str) or not value for value in (server_key, save_key, world_id)):
             raise ValueError("Vehicle code does not have a complete active game identity")
@@ -597,6 +599,8 @@ class TransferService:
             scope = {"server_key": record["server_key"], "save_key": record["save_key"],
                      "world_id": record["world_id"]}
             code = self.db.vehicle_codes.find_one({"code": str(record["item"]).strip().upper()})
+            if isinstance(code, dict) and code.get("garage_lock_id"):
+                raise ValueError("Vehicle is held by an active garage operation")
             if (not isinstance(code, dict)
                     or any(code.get(key) != value for key, value in scope.items())
                     or not isinstance(code.get("native_unique_id"), str)

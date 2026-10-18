@@ -1,12 +1,12 @@
 # FS25 Network Core
 
-All project mods use `FS25_SiN_<Purpose>` for their folder and ZIP names:
-`FS25` identifies the game, `SiN` identifies SimNet, and the suffix identifies
-the mod's purpose. The server runtime mod is `FS25_SiN_Server`.
+Central services and the JiN Discord bot for SiN's FS25 servers, with a Windows
+Agent and the `FS25_SiN_Server` game runtime. Standalone crop, contract and
+economy policy mods are packaged alongside the runtime in `dist`.
 
-Start local game integration with the [local testing guide](docs/local-testing.md).
-The first custom mod exports telemetry from a disposable save; its offline harness
-requires neither Discord nor MongoDB.
+Start with the [complete JiN command guide](docs/bot-commands.md) for all user
+and admin commands, arguments, permissions, channels and examples. Use the
+[local testing guide](docs/local-testing.md) for disposable-save development.
 
 See [Discord channels and authorization](docs/discord-and-authorization.md) for
 the channel layout, account linking, farm role workflow, and custom mod contract.
@@ -22,73 +22,69 @@ boundaries.
 The new authorization workflow supersedes the legacy manual `farm_links` helper
 for banking: only mod-confirmed active farm managers can transact with a farm.
 
-Initial Python backend for a network of FS25 servers. Includes MongoDB identity
-links, an atomic central wallet and withdrawal queue, Discord commands, local
-farm snapshot parsing, and economy speed calculations. It does **not yet deliver
-money or change production speeds in a running game**.
+The current runtime includes community onboarding, verified farm authority,
+receipt-gated banking and vehicle transfers, finance/activity reports and a
+read-only farm closure assessment. Component availability and live validation
+status are documented in the feature guides; a queued operation is not a
+confirmed game mutation.
 
 ## Identity and onboarding
 
-Wallets belong to Discord IDs, stored as strings. Farm links use
-`(server_id, save_id, discord_id)` and carry the in-game farm ID. Change `save_id`
-whenever a save is reset or replaced: farm IDs are not permanent across saves.
-The authorization workflow allows one desired manager per farm, multiple
-workers/visitors, and one farm per user per save.
-Farm migration needs an operator workflow; never silently reuse old mappings.
+Wallets belong to Discord IDs, stored as strings. Game identity links are
+server/save scoped; farms, authority and operations also identify the active
+world generation. Farm numbers and session user numbers are not permanent
+identities. See the [database structure](docs/database-structure.md) and
+[world continuity guide](docs/world-continuity-migration.md).
 
-Players submit `/farm_request server:<server>` and choose a numbered field from
-the current-world map; the approved application supplies the farm name.
-An operator creates the farm and assigns starting land in game, then uses
-`/farm_approve` to associate the requester with a player identity observed by
-the mod. Staff confirms that identity and land allocation before approving.
-`/farm_assign` handles later role changes. Player self-linking is disabled.
-The mod must acknowledge the applied assignment before
-banking is authorized. Matching farm ID/name verifies the snapshot, not player
-identity or current permissions. `AdminManager.link(...)` is a legacy helper
-and its records do not authorize banking. No unverified `dedicatedServer.xml`
-setting is written; verify the farm-creation restriction on your actual server.
+Players apply for community membership, obtain staff approval and link their
+observed game identity when prompted with a registration code. They then use
+`/farm_request server:<server>` and choose a numbered field from the current-world
+map. Submission reserves its farmland; the approved application supplies the
+farm name. Staff `/farm_approve` queues native farm provisioning and the selected
+land assignment. After FS25 confirms the requested owner, manager authority is
+queued separately. Staff do not manually create the farm or buy starting land
+for this workflow. Financial provisioning has a separate capability state.
+`/farm_assign` handles later roles for an already verified identity. Banking
+requires mod-confirmed manager authority. Legacy `farm_links` helpers do not
+authorize access. See [onboarding](docs/discord-and-authorization.md).
 
 ## Banking
 
-Amounts are whole game-currency units. A deposit requires a unique, immutable
-source transfer ID and trusted evidence identifying sender, amount, bank
-destination, and successful completion. An admin balance delta alone is not
-enough. `credit_verified_transfer` is an operator/adapter interface, not a public
-endpoint. Its evidence argument records an attestation; it does not validate
-an Advanced Bank System transfer automatically. Shared-farm personal attribution
-requires a mod event that identifies the player; this version uses the approved
-single manager mapping.
+Amounts are whole game-currency units. `/deposit amount:<integer>` moves verified
+farm cash into SiN checking; `/withdraw amount:<integer>` reserves SiN funds for
+delivery to the verified farm. Both require the enabled money bridge and an
+authenticated native receipt before final settlement. `/balance` shows funds,
+pending amounts and recent outcomes. Native FS25 finance entries use **Misc**;
+separate custom finance rows remain future work.
 
-`/deposit amount` and `/withdraw amount` queue a receipt-gated game operation;
-`/balance` displays funds and outstanding transfers. The bot privately sends
-the final result and balances after a definitive game receipt. A withdrawal
-atomically reserves funds using the Discord interaction ID. Delivery is not
-reported as successful until a trusted operator/adapter calls
-`settle_withdrawal` with a durable receipt.
-A definitively failed delivery refunds exactly once. An ambiguous timeout must
-remain pending until reconciled; never automatically refund or resend it.
+The command's private response in the invoking channel updates on confirmation
+within its interaction window. No deposit/withdrawal DM is sent. Use `/balance`
+for later results or after a bot restart. A definitively failed withdrawal
+refunds once; an uncertain operation remains pending for reconciliation.
+`/pay` and invoices move SiN wallet funds without changing native farm cash.
+See [community banking](docs/community-workflows.md#banking) and
+[bank finance validation](docs/bank-finance-validation.md).
 
 MongoDB transactions make reservation, crediting, and settlement atomic. Unique
 source-transfer and request IDs prevent replay. A local MongoDB **replica set**
 (including a single-node replica set) is required; a standalone instance is not
 sufficient. MongoDB stores the wallet, not a JSON wallet file.
 
-## Live game adapter still required
+## Game integration
 
-There is no implemented or verified GPORTAL command API here, and
-`focNetworkAddMoney` is not assumed to be a built-in command. Before enabling
-withdrawals, implement and test a server-side integration that:
+The authenticated Central/Agent mailbox carries snapshots, commands and durable
+game receipts. The server mod validates scope and native state, applies supported
+operations and reads back their results. Unsupported or uncertain outcomes remain
+pending validation/reconciliation. Native money operations are configuration-gated.
+This does not use an assumed hosting-provider console API or live save-file edits.
 
-- Authenticates the coordinator and validates server/save/farm, integer amount,
-  and current farm ownership before delivery.
-- Accepts a stable operation ID, persists an execution receipt, and provides
-  reconciliation after disconnects and restarts. Merely deduplicating in Python
-  cannot prevent duplicate in-game money after a network timeout.
-- Exposes verified bank transfer events and trustworthy player/factory snapshots.
-- Applies production multipliers authoritatively and restores 1.0 on stale input.
-
-Keep withdrawals disabled until this contract is implemented. Do not edit a live
-save file to deliver cash. No worker consumes the withdrawal queue in this version.
+Vehicle transfers use permanent SiN codes, validate source ownership, relocate to
+the native shop and confirm the destination owner. Cross-server movement is
+unavailable. An admin-only [personal garage](docs/vehicle-garage.md) is prepared
+for validation, with native archives and live/save checkpoint requirements.
+See [vehicle integration](docs/vehicle-inventory-and-garage.md).
+`/farm_assess_admin` reports a proposed closure credit; it does not execute a
+settlement or shut down the farm. See [closure assessment](docs/farm-closure-assessment.md).
 
 ## Economy
 
@@ -114,13 +110,14 @@ a separate policy and game integration.
    For a local replica set, explicitly use
    `MONGODB_URI=mongodb://localhost:27017/?replicaSet=rs0` instead. There is no
    automatic localhost fallback.
-3. `servers.json` contains `local-dev`, configured for test save slot 1. Its
-   onboarding records use a separate `fs25_network_local_test` database. When ready,
-   add production entries using `servers.example.json` as a template,
-   configure real snapshot paths and unique save IDs.  Keep
-   `fs25_money_bridge_enabled` false until both receipt-gated native wallet
-   directions have passed live validation; the legacy `withdrawals_enabled`
-   flag is not sufficient.
+3. Production server/save discovery comes from Central's registry. `servers.json`
+   is an explicit local-development adapter, loaded only with
+   `FS25_SERVERS_FILE=servers.json`. JiN uses the configured central database;
+   this file does not redirect onboarding into a separate database. Register
+   production servers with `/server_register`, then pair/configure the Agent and
+   active save using the [deployment runbook](docs/deploy-runbook.md). Enable
+   `fs25_money_bridge_enabled` only after the native money directions have been
+   validated on that deployment; `withdrawals_enabled` alone is insufficient.
 4. Set `DISCORD_TOKEN` in the process environment or in the root `.env` file as
    `DISCORD_TOKEN=your-bot-token`. `discord.json` configures guild
    `1547411827539837081`; `DISCORD_GUILD_ID` can override it. Invite
@@ -128,14 +125,16 @@ a separate policy and game integration.
 5. Run `python -m fs25_network_core.bot_frontend`.
 
 `discord.json` configures Network Admin role `1547417095589994576` for
-`/farm_assign`. `DISCORD_OPERATOR_ROLE_IDS` overrides that list when set (an empty
-value denies all operators). The local adapter only reads observations; live
-permission application and acknowledgments still require implementation. See the authorization guide for Discord
-command visibility configuration and the proposed permission policies.
+staff commands. `DISCORD_OPERATOR_ROLE_IDS` overrides that list when set (an empty
+value denies all operators). Discord command visibility and the backend role
+check are separate. See the [command guide](docs/bot-commands.md#permissions-and-channels)
+for the exact channel and default command permissions.
 
 The bot registers guild commands and takes user identity from Discord interactions.
-No privileged member/message intents are required. MongoDB and operator Python
-interfaces must remain private. Tokens and database credentials belong in the
+The current bot enables Message Content intent for the configured Activity-channel
+chat bridge; enable it in the Discord application settings. Slash commands take
+identity from their interactions. MongoDB and operator Python interfaces must
+remain private. Tokens and database credentials belong in the
 environment or the ignored private environment files, not configuration committed
 to source control. Startup loads `atlas-credentials.env` then `.env` from the
 repository root. Existing process variables take precedence, and secret values

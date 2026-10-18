@@ -28,6 +28,7 @@ from .business_workflows import (ChatService, ContractService, InvoiceService,
                                   CommunityEventService, TransferService)
 from .farm_lifecycle import FarmLifecycle, SYSTEM_FARM_NAME, FIRST_FIELD_MAX_PRICE
 from .vehicle_inventory import VehicleInventoryService
+from .vehicle_garage import VehicleGarageService
 from .farm_report import FarmReportService, format_farm_report
 from .farm_assessment import FarmAssessmentService, format_farm_assessment, assessment_csv
 from .contract_contribution import (ContractContributionReportService,
@@ -461,6 +462,7 @@ class NetworkBot(discord.Client):
         self.server_registry = ServerRegistry(bank.database)
         self.farm_lifecycle = FarmLifecycle(bank.database, self.authorization)
         self.vehicle_inventory = VehicleInventoryService(bank.database)
+        self.vehicle_garage = VehicleGarageService(bank.database)
         self.farm_reports = FarmReportService(bank.database)
         self.farm_assessments = FarmAssessmentService(bank.database)
         self.contract_reports = ContractContributionReportService(
@@ -1909,6 +1911,80 @@ class NetworkBot(discord.Client):
 
         @vehicle_transfer_admin.autocomplete("destination_farm")
         async def vehicle_transfer_admin_destination_farm_autocomplete(interaction: discord.Interaction, current: str):
+            return await observed_farms(interaction, current, "destination_server")
+
+        @self.tree.command(name="vehicle_garage_store_admin", description="Staff: preserve a farm vehicle in its owner's virtual garage")
+        @app_commands.check(channel_check)
+        @app_commands.default_permissions(administrator=True)
+        @app_commands.describe(server="Select the vehicle's current server", vehicle_code="Permanent SiN vehicle code",
+                               reason="Audit reason for storing this vehicle")
+        async def vehicle_garage_store_admin(interaction: discord.Interaction, server: str,
+                                             vehicle_code: str, reason: str):
+            staff_check(interaction)
+            server_config(interaction, server)
+            await interaction.response.defer(ephemeral=True)
+            item = await asyncio.to_thread(self.vehicle_garage.store, str(interaction.id),
+                                          str(interaction.user.id), server, vehicle_code, reason)
+            await interaction.followup.send(
+                f"Garage storage for `{item['vehicle_code']}` queued for the farm owner's account. "
+                "The game must archive the vehicle, confirm its removal, and save that removal before it is stored. "
+                "Wait for garage status **stored** before decommissioning the farm. "
+                "This private reply will update with the final result while available.", ephemeral=True)
+            self.remember_transfer_interaction("garage:" + item["_id"], interaction)
+
+        @vehicle_garage_store_admin.autocomplete("server")
+        async def garage_store_server_autocomplete(interaction: discord.Interaction, current: str):
+            return await server_choices(interaction, current, "reconcile")
+
+        @self.tree.command(name="vehicle_garage_admin", description="Staff: inspect a member's virtual garage and pending moves")
+        @app_commands.check(channel_check)
+        @app_commands.default_permissions(administrator=True)
+        async def vehicle_garage_admin(interaction: discord.Interaction, member: discord.User,
+                                       page: app_commands.Range[int, 1, 10] = 1):
+            staff_check(interaction)
+            await interaction.response.defer(ephemeral=True)
+            records = await asyncio.to_thread(self.vehicle_garage.list_for, str(member.id))
+            pages = max(1, (len(records) + 9) // 10)
+            if page > pages:
+                raise ValueError(f"This garage has {pages} page(s)")
+            lines = [f"**Personal vehicle garage — {discord.utils.escape_markdown(str(member))}**",
+                     f"Page {page}/{pages}. Stored vehicles are retained assets and earn no farm sale credit."]
+            for item in records[(page-1)*10:page*10]:
+                name = discord.utils.escape_markdown(str(item.get("name") or "Vehicle")[:65])
+                lines.append(f"`{item['vehicle_code']}` {name} — **{item['state']}** ({item['server_key']})")
+                note = (item.get("last_receipt") or {}).get("receipt")
+                if note and item["state"] in {"review_required", "failed"}:
+                    lines.append(discord.utils.escape_markdown(str(note)[:110]))
+            if not records:
+                lines.append("No retained vehicles or pending garage operations.")
+            await interaction.followup.send("\n".join(lines)[:1950], ephemeral=True,
+                                            allowed_mentions=discord.AllowedMentions.none())
+
+        @self.tree.command(name="vehicle_garage_retrieve_admin", description="Staff: restore a garaged vehicle to its owner's farm at the shop")
+        @app_commands.check(channel_check)
+        @app_commands.default_permissions(administrator=True)
+        @app_commands.describe(destination_server="Original server/world for this garage asset",
+                               destination_farm="Choose a farm belonging to the garage's account owner",
+                               vehicle_code="Permanent SiN code from the garage", reason="Audit reason for retrieval")
+        async def vehicle_garage_retrieve_admin(interaction: discord.Interaction, destination_server: str,
+                                                destination_farm: str, vehicle_code: str, reason: str):
+            staff_check(interaction)
+            server_config(interaction, destination_server)
+            await interaction.response.defer(ephemeral=True)
+            item = await asyncio.to_thread(self.vehicle_garage.retrieve, str(interaction.id),
+                str(interaction.user.id), vehicle_code, destination_server, destination_farm, reason)
+            await interaction.followup.send(
+                f"Garage retrieval for `{item['vehicle_code']}` queued. It completes after the game "
+                "confirms the restored vehicle at the shop and saves it. The archive remains held until then. "
+                "This private reply will update with the result while available.", ephemeral=True)
+            self.remember_transfer_interaction("garage:" + item["_id"], interaction)
+
+        @vehicle_garage_retrieve_admin.autocomplete("destination_server")
+        async def garage_retrieve_server_autocomplete(interaction: discord.Interaction, current: str):
+            return await server_choices(interaction, current, "reconcile")
+
+        @vehicle_garage_retrieve_admin.autocomplete("destination_farm")
+        async def garage_retrieve_farm_autocomplete(interaction: discord.Interaction, current: str):
             return await observed_farms(interaction, current, "destination_server")
 
         @self.tree.command(name="transfer_list", description="Staff: list durable farm transfers")

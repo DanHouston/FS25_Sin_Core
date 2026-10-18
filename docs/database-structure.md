@@ -1,5 +1,13 @@
 # MongoDB structure
 
+Virtual garage additions: `vehicle_garage` stores account ownership, original
+server/save/world/native vehicle identity, custody state and operation/audit
+references. `vehicle_garage_archives` stores the immutable native XML bytes and
+SHA-256 for each custody cycle. Both have no TTL and are retained across farm
+decommission and world replacement; include them in backups. A vehicle-code
+record's `garage_lock_id` prevents concurrent custody and transfers. Historical
+retrieved archives cannot be reused. See [garage protocol](vehicle-garage.md).
+
 The application stores data in MongoDB collections (the closest equivalent to
 SQL tables). `MONGODB_DATABASE` selects the database; it defaults to
 `fs25_network`. `community_db` in the authorization code is an alias for the

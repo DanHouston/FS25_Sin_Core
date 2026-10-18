@@ -39,6 +39,10 @@ function FS25SiNServer:exportFarmAssessments(xml)
     xml:setString("networkLocal#farmAssessmentStockScope", "building_storage_only")
     local mission = g_currentMission
     if mission == nil or not mission:getIsServer() or mission.isRunning ~= true then return end
+    local info = self:resolveSaveMissionInfo(mission)
+    if info ~= nil and info.savegameDirectory ~= nil then
+        xml:setString("networkLocal#garageSaveDirectory", info.savegameDirectory)
+    end
     local farms = {}
     for farmId = 1, 254 do
         local farm = g_farmManager:getFarmById(farmId)

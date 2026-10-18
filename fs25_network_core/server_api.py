@@ -12,6 +12,8 @@ from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
+from xml.etree.ElementTree import ParseError
+from defusedxml.common import DefusedXmlException
 
 from .config import load_local_environment
 from .database import Database
@@ -20,6 +22,7 @@ from .event_processing import (CentralEventProcessor, EventAuthenticationError,
                                 EventRetryableError, EventScopeError, EventValidationError)
 from .clock_policy import target_game_minutes
 from .farm_lifecycle import FarmLifecycle
+from .vehicle_garage import VehicleGarageService
 
 LOG = logging.getLogger(__name__)
 SNAPSHOT_LOCK = threading.Lock()
@@ -65,7 +68,7 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802 - required by BaseHTTPRequestHandler
         path = urlsplit(self.path).path
         if path not in {"/api/server/clock", OPERATIONS_PATH, "/api/server/manager-authority",
-                        "/api/server/vehicle-codes"}:
+                        "/api/server/vehicle-codes", "/api/server/garage/archive", "/api/server/garage/pending"}:
             _json_response(self, 404, {"error": "not_found"})
             return
         query = parse_qs(urlsplit(self.path).query)
@@ -85,6 +88,18 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
             return
         try:
             save_key = self.event_processor.registry.resolve_save(record["server_key"], fs25_save_id)
+            if path.startswith("/api/server/garage/"):
+                self.farm_lifecycle.require_current_world(record["server_key"], save_key, world_id)
+                scope = {"server_key": record["server_key"], "save_key": save_key, "world_id": str(world_id)}
+                garage = VehicleGarageService(self.event_processor.database)
+                if path.endswith("/archive"):
+                    response = garage.archive_for_agent(scope, query.get("garage_id", [""])[0])
+                else:
+                    rows = garage.db.vehicle_garage.find({**scope, "state": {"$in": ["awaiting_store_save", "awaiting_retrieve_save"]}})
+                    response = {"items": [{key: row.get(key) for key in ("_id", "state", "native_unique_id",
+                        "archive_sha256", "destination_farm_id", "retrieve_operation_id")} for row in rows][:100]}
+                _json_response(self, 200, response)
+                return
             if path == OPERATIONS_PATH:
                 self.farm_lifecycle.require_current_world(record["server_key"], save_key, world_id)
                 operations = self.farm_lifecycle.operations_for(record["server_key"], save_key, world_id)
@@ -211,6 +226,9 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
         _json_response(self, 200, response)
 
     def do_POST(self):  # noqa: N802 - required by BaseHTTPRequestHandler
+        if self.path in {"/api/server/garage/capture", "/api/server/garage/checkpoint"}:
+            self.do_garage()
+            return
         if self.path == "/api/server/events":
             self.do_events()
             return
@@ -342,7 +360,10 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
                 raise ValueError("operation receipt world generation is required")
             if str(receipt.get("world_id")) != str(world_id):
                 raise ValueError("operation receipt world generation does not match runtime")
-            if receipt.get("operation_type") == "assign_farmland":
+            if receipt.get("operation_type") in {"garage_prepare", "garage_store", "garage_retrieve"}:
+                result = VehicleGarageService(self.event_processor.database).accept_receipt(
+                    {"server_key": record["server_key"], "save_key": save_key, "world_id": str(world_id)}, receipt)
+            elif receipt.get("operation_type") == "assign_farmland":
                 # Farmland assignment is a FarmLifecycle operation.  Its
                 # receipt includes the FS25 owner read-back; do not route it
                 # through the legacy land_operations compatibility path.
@@ -387,6 +408,23 @@ class PairingRequestHandler(BaseHTTPRequestHandler):
             return
         _json_response(self, 200, {"status": "accepted", "operation_id": result["operation_id"],
                                    "operation_state": result.get("state")})
+
+    def do_garage(self):
+        try:
+            payload = self._read_json(3_000_000)
+            record, save_key = self._authenticated_scope(payload)
+            world_id = payload.get("world_id")
+            self.farm_lifecycle.require_current_world(record["server_key"], save_key, world_id)
+            garage = VehicleGarageService(self.event_processor.database)
+            scope = {"server_key": record["server_key"], "save_key": save_key, "world_id": str(world_id)}
+            result = garage.capture(scope, payload) if self.path.endswith("/capture") else garage.checkpoint(scope, payload)
+        except PermissionError:
+            _json_response(self, 401, {"error": "invalid_server_authentication"})
+            return
+        except (ValueError, TypeError, KeyError, ParseError, DefusedXmlException):
+            _json_response(self, 400, {"error": "invalid_garage_evidence"})
+            return
+        _json_response(self, 200, {"status": "accepted", "state": result.get("state")})
 
     def do_registration(self):
         try:

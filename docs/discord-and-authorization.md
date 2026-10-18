@@ -1,5 +1,8 @@
 # Admin-controlled farm onboarding
 
+For the complete user/admin slash-command catalog, exact arguments, channel
+requirements and examples, see the [JiN command guide](bot-commands.md).
+
 ## Durable farm lifecycle
 
 Pairing establishes server trust; it does not create a farm. Once an authenticated
@@ -170,8 +173,9 @@ a member optionally use the separate `/farm_request` workflow below.
 
 Keep #staff, #operations, and #audit-log private to staff. Other useful
 channels remain #sin-rules, #sin-apply, #sin-lobby, #announcements, #mod-updates,
-#general, #sin-jobs, #market, #server-status, and per-server chat/voice. No
-automatic channel creation or background posting occurs.
+#general, #sin-jobs, #market, #server-status, and per-server chat/voice. The bot
+uses existing configured channels for status/activity and enabled workflow cards;
+it does not create those channels automatically.
 The bot responds privately to commands. Staff inspects the request queue with
 /farm_requests; requests are not automatically posted to a channel.
 
@@ -324,7 +328,8 @@ unauthorized managers, and promotes only persisted SiN-authorized managers.
 The existing periodic reconciliation remains a backstop. FS25 does not expose a
 pre-transition hook here, so the engine may still establish its initial manager
 state before this post-transition callback runs.
-Requests never establish land reservations. Managers can later change game assets.
+Submitting the current-world farm picker atomically reserves the selected
+farmland; merely opening it reserves nothing. Managers can later change game assets.
 
 Only active, mod-confirmed farm managers can use farm banking. Pending permission
 changes block that access. Local development withdrawals are disabled, and its

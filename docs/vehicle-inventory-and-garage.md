@@ -58,8 +58,9 @@ does not have to repeat the source farm ID. `destination_server` is included
 for the multi-server workflow, but today it must be the same server identified
 by the vehicle code. Selecting another server is rejected: cross-server
 movement is not implemented. The destination farm is selected on that same
-active FS25 world using a name-filtered farm autocomplete; the selected label
-includes the farm ID and name while the command submits the corresponding ID.
+active FS25 world using a name-filtered farm autocomplete. The label uses the
+canonical owner/farm pattern where available, such as `Repton | Repton Does`,
+with an observed farm-name fallback; the command submits the corresponding ID.
 Staff `/vehicle_transfer_admin` uses the same farm picker. Dispatch is allowed
 only when the latest game snapshot is complete and no older than two minutes.
 A staff-only `/transfer_dispatch` remains available for retry after a stale
@@ -83,23 +84,22 @@ same server/save/world/native ID. Central marks the transfer complete only
 after the mailbox receipt identifies the same transfer and asset and confirms
 both destination ownership and shop-position readback. Unclear outcomes remain
 in reconciliation rather than being retried as a second mutation. The
-initiating Discord user receives a direct message after FS25 reports a final
-result; uncertain results are labeled as needing review. If the source manager
+initiating Discord user's private response in the invoking channel is edited
+after FS25 reports a result, while its 14-minute in-memory interaction tracking
+remains available. No transfer-result DM is sent. After expiry or a bot restart,
+staff can inspect `/transfer_list`; uncertain results are labeled as needing
+review. If the source manager
 chose the wrong destination and the transfer completed, the destination farm
 must initiate a new transfer back. This first transfer path is limited to two
 farms in the same active FS25 world; it does not move vehicles between servers
 or saves.
 
-## Garage status
+## Virtual garage
 
-The garage is **not yet enabled**. A snapshot is not a durable vehicle archive,
-and an FS25 vehicle cannot safely be removed on the strength of a Mongo row.
-Garage deposit/retrieval needs an exact native XML save, independent durability
-confirmation, source removal, destination shop-space/slot checks, asynchronous
-load verification, client synchronization, and crash/restart reconciliation.
-GIANTS' savegame vehicle loader can sell an item automatically when slots are
-full, so it must not be used as a blind garage retrieval path. Direct transfer
-of a live vehicle does not require first depositing it in the garage. The
-transfer handler exists, but garage work remains separate and must not be
-enabled until its save/remove/load/rollback sequence has dedicated game-server
-testing.
+An admin-only garage implementation is prepared for live validation. It uses
+native vehicle XML, an independent immutable Central copy, a custody lock and
+both live and saved-game confirmation. It preserves equipment for the canonical
+farmer's account instead of paying its resale value during farm closure.
+See the [garage guide](vehicle-garage.md) for commands, state transitions,
+same-world restrictions, recovery limitations and validation requirements.
+Direct farm-to-farm transfer does not require garage storage.

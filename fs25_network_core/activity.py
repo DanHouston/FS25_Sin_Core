@@ -17,7 +17,7 @@ class ActivityOutbox:
                                          str(world_id or "legacy"), str(source_event_id))).encode("utf-8")).hexdigest()
 
     def enqueue(self, source_event_id, server_key, activity_type, message, save_key=None,
-                world_id=None, destination="activity", metadata=None):
+                world_id=None, destination="activity", metadata=None, session=None):
         scoped_id = self._scoped_id(source_event_id, server_key, save_key, world_id)
         doc = {"_id": scoped_id, "activity_id": scoped_id, "source_event_id": source_event_id,
                "server_key": server_key, "save_key": save_key, "activity_type": activity_type, "message": message,
@@ -27,6 +27,9 @@ class ActivityOutbox:
             doc["metadata"] = dict(metadata)
         if world_id:
             doc["world_id"] = str(world_id)
+        if session is not None:
+            self.db.activity_outbox.update_one({"_id": scoped_id}, {"$setOnInsert": doc}, upsert=True, session=session)
+            return doc
         try: self.db.activity_outbox.insert_one(doc)
         except DuplicateKeyError:
             pass

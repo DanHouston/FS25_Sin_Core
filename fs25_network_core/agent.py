@@ -1,5 +1,6 @@
 """Mongo-free per-server Agent for authenticated mailbox transport."""
 import argparse
+import base64
 import errno
 import hashlib
 import heapq
@@ -8,6 +9,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import math
 import os
+import re
 import time
 import traceback
 from datetime import datetime, timezone
@@ -217,6 +219,98 @@ class PairingAgent:
         if root.tag != "serverBinding" or not root.get("serverKey") or not root.get("credential"):
             raise ValueError("invalid server binding")
         return root.get("serverKey"), root.get("credential")
+
+    def _garage_request(self, suffix, payload=None, garage_id=None):
+        server_key, credential = self._binding()
+        scope = {"fs25_save_id": self._runtime_save_id(), "world_id": self._runtime_world_id()}
+        url = self.backend_root + "/api/server/garage/" + suffix
+        body = None
+        if payload is None:
+            query = "&".join(key + "=" + quote(str(value), safe="") for key, value in scope.items())
+            if garage_id:
+                query += "&garage_id=" + quote(garage_id, safe="")
+            url += "?" + query
+        else:
+            body = json.dumps({**payload, **scope}).encode("utf-8")
+        request = Request(url, data=body, headers={"Content-Type": "application/json",
+            "X-SiN-Server-Key": server_key, "Authorization": "Bearer " + credential},
+            method="GET" if body is None else "POST")
+        with self.opener(request, timeout=20) as response:
+            raw = response.read(3_000_001)
+            if response.status != 200 or len(raw) > 3_000_000:
+                raise ValueError("Garage API rejected the request")
+            return json.loads(raw)
+
+    def _garage_path(self, garage_id, suffix):
+        if not re.fullmatch(r"[a-f0-9-]{36}", str(garage_id)):
+            raise ValueError("Invalid garage archive ID")
+        folder = self.directory / "garage"
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder / (garage_id + suffix)
+
+    def _garage_download(self, payload):
+        garage_id = payload.get("garage_id")
+        archive = self._garage_request("archive", garage_id=garage_id)
+        raw = base64.b64decode(archive["archive_base64"], validate=True)
+        digest = hashlib.sha256(raw).hexdigest()
+        if not 1 <= len(raw) <= 2_000_000 or digest != payload.get("archive_sha256") or digest != archive["archive_sha256"]:
+            raise ValueError("Garage download checksum mismatch")
+        target = self._garage_path(garage_id, ".xml")
+        temporary = target.with_suffix(".tmp")
+        with temporary.open("wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _atomic_replace(temporary, target)
+        if hashlib.sha256(target.read_bytes()).hexdigest() != digest:
+            raise ValueError("Garage archive disk readback failed")
+        marker = ElementTree.Element("garageVerified", archiveSha256=digest,
+            worldId=self._runtime_world_id(), vehicleUniqueId=str(payload.get("vehicle_unique_id")))
+        destination = self._garage_path(garage_id, ".verified.xml")
+        temporary = destination.with_suffix(".tmp")
+        ElementTree.ElementTree(marker).write(temporary, encoding="utf-8", xml_declaration=True)
+        _atomic_replace(temporary, destination)
+
+    def process_garage_checkpoints_once(self):
+        try:
+            pending = self._garage_request("pending").get("items", [])
+            if not pending:
+                return
+            snapshot = ElementTree.parse(self.directory / "snapshot.xml").getroot()
+            # The native mod provides this path. Confine it to this game
+            # profile's savegame directories; never read an API-supplied path.
+            profile = self.directory.parent.parent.resolve()
+            save_directory = Path(snapshot.get("garageSaveDirectory") or "").resolve()
+            if save_directory.parent != profile or not re.fullmatch(r"savegame[0-9]+", save_directory.name, re.I):
+                raise ValueError("Garage checkpoint save directory is not in this game profile")
+            marker = ElementTree.parse(save_directory / "FS25_SiN_Server_world.xml").getroot()
+            if marker.get("worldId") != self._runtime_world_id():
+                raise ValueError("Garage checkpoint save world does not match runtime")
+            saved_path = save_directory / "vehicles.xml"
+            before = saved_path.stat()
+            saved = ElementTree.parse(saved_path).getroot()
+            if saved.tag != "vehicles" or saved_path.stat().st_mtime_ns != before.st_mtime_ns:
+                raise ValueError("Native save is changing; wait for save completion")
+            for item in pending:
+                garage_id = item["_id"]
+                journal_path = self._garage_path(garage_id, ".journal.xml")
+                journal = ElementTree.parse(journal_path).getroot()
+                phase = "removed" if item["state"] == "awaiting_store_save" else "restored"
+                if (journal.get("phase") != phase or journal.get("worldId") != self._runtime_world_id()
+                        or before.st_mtime_ns < journal_path.stat().st_mtime_ns):
+                    continue
+                rows = [row for row in saved.findall("vehicle") if row.get("uniqueId") == item["native_unique_id"]]
+                if len(rows) > 1:
+                    continue
+                if phase == "removed" and rows or phase == "restored" and not rows:
+                    continue
+                self._garage_request("checkpoint", {"garage_id": garage_id,
+                    "archive_sha256": item["archive_sha256"], "disk_vehicle_present": bool(rows),
+                    "disk_owner_farm_id": rows[0].get("farmId") if rows else None,
+                    "save_mtime_ns": str(before.st_mtime_ns)})
+        except (OSError, ValueError, KeyError, ElementTree.ParseError, URLError, TimeoutError):
+            # Absence of checkpoint proof must never consume garage custody.
+            LOG.debug("Garage checkpoint not yet available")
 
     def _runtime_save_id(self):
         root = ElementTree.parse(self.directory / "snapshot.xml").getroot()
@@ -537,6 +631,12 @@ class PairingAgent:
                     except OSError:
                         continue
             if not destination.exists():
+                if operation.get("operation_type") in {"garage_store", "garage_retrieve"}:
+                    try:
+                        self._garage_download(payload)
+                    except (OSError, ValueError, KeyError, URLError, TimeoutError):
+                        LOG.warning("Garage archive download unavailable; command not delivered operation=%s", operation_id)
+                        continue
                 values = {"operation_id": operation_id, "operation_type": operation.get("operation_type", ""),
                           "server_id": server_key, "save_id": operation.get("save_key", ""),
                           "world_id": world_id,
@@ -583,6 +683,17 @@ class PairingAgent:
                 if root.tag not in {"networkLocalReceipt", "permissionReceipt"} or not root.get("operation_id"):
                     continue
                 receipt = dict(root.attrib)
+                if receipt.get("operation_type") == "garage_prepare" and receipt.get("status") == "prepared":
+                    archive_path = self._garage_path(receipt.get("garage_id"), ".xml")
+                    before = archive_path.stat()
+                    if before.st_size > 2_000_000:
+                        raise ValueError("Native garage archive is too large")
+                    raw = archive_path.read_bytes()
+                    if archive_path.stat().st_mtime_ns != before.st_mtime_ns:
+                        continue
+                    self._garage_request("capture", {"garage_id": receipt["garage_id"],
+                        "archive_sha256": hashlib.sha256(raw).hexdigest(),
+                        "archive_base64": base64.b64encode(raw).decode("ascii")})
                 receipt["result"] = {key: value for key, value in receipt.items()
                                       if key not in {"operation_id", "operation_type", "server_id", "save_id", "status", "receipt"}}
                 self._post_receipt(server_key, credential, fs25_save_id, world_id, receipt)
@@ -1202,6 +1313,7 @@ class PairingAgent:
             self.process_once()
             self.process_registration_once()
             self.process_receipts_once()
+            self.process_garage_checkpoints_once()
             # Receipt polling precedes operation materialization: a command
             # acknowledged by the game must never be recreated in the window
             # between those two control-plane calls.

@@ -175,7 +175,8 @@ class FarmAssessmentService:
                 issues.append("Recipient's existing SiN account balance is unreadable")
 
         pending = []
-        relevant_types = {"deposit_funds", "withdraw_funds", "vehicle_transfer", "assign_farmland", "provision_farm"}
+        relevant_types = {"deposit_funds", "withdraw_funds", "vehicle_transfer", "assign_farmland", "provision_farm",
+                          "garage_prepare", "garage_store", "garage_retrieve"}
         for operation in self.db.farm_operations.find({**scope, "state": {"$nin": ["succeeded", "failed", "superseded", "cancelled"]}}):
             payload = operation.get("payload") or {}
             if not isinstance(payload, dict):
@@ -186,6 +187,14 @@ class FarmAssessmentService:
                 pending.append(str(operation.get("_id")))
         if pending:
             issues.append(f"{len(pending)} unsettled cash or asset operation(s) require reconciliation")
+        garage = list(self.db.vehicle_garage.find({**scope, "source_farm_id": farm_id,
+                      "state": {"$ne": "retrieved"}}))
+        garage_stored = [item for item in garage if item.get("state") == "stored"]
+        for item in garage_stored:
+            if any(row.get("id") == item.get("native_unique_id") for row in rows):
+                issues.append("A garaged vehicle still appears in farm assets; wait for a fresh snapshot and resolve any duplicate")
+        if any(item.get("state") not in {"stored", "retrieved", "failed"} for item in garage):
+            issues.append("Garage custody is unsettled; complete storage/save confirmation before farm closure")
         active_contracts = list(self.db.native_contracts.find({
             **scope, "accepting_farm_id": {"$in": [str(farm_id), farm_id]},
             "lifecycle": {"$in": ["accepted", "started"]}}))
@@ -205,7 +214,8 @@ class FarmAssessmentService:
                 "debt_shortfall": max(Decimal(0), -net) if net is not None else None,
                 "complete": complete, "rows": rows, "issues": issues,
                 "estimated_rows": sum("estimate" in row.get("basis", "") for row in rows),
-                "pending_operations": pending, "active_contracts": active_contracts}
+                "pending_operations": pending, "active_contracts": active_contracts,
+                "garaged_vehicles": garage_stored}
 
 
 def format_farm_assessment(report):
@@ -239,6 +249,8 @@ def format_farm_assessment(report):
             lines.append(f"• {len(report['issues']) - 4} further issue(s) in the attachment")
     if report["estimated_rows"]:
         lines.append(f"{report['estimated_rows']} item(s) use a labeled fallback estimate.")
+    if report.get("garaged_vehicles"):
+        lines.append(f"Personal garage: {len(report['garaged_vehicles'])} vehicle(s) retained; excluded from farm cash credit.")
     if report["observed_at"]:
         lines.append(f"Inventory observed: {report['observed_at'].isoformat(timespec='seconds')}")
     lines.append("Full inventory and valuation basis attached. Prices can change; whole-unit credit rounds down.")
@@ -276,6 +288,8 @@ def assessment_csv(report):
         write("Unresolved", message)
     for operation in report["pending_operations"]:
         write("Unsettled operation", operation)
+    for item in report.get("garaged_vehicles", []):
+        write("Personal garage; no sale credit", item.get("vehicle_code"), item.get("name"), item.get("owner_discord_id"))
     for contract in report["active_contracts"]:
         write("Active native contract", contract.get("mission_id") or contract.get("_id"),
               contract.get("field_id"), contract.get("lifecycle"))

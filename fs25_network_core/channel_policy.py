@@ -12,6 +12,7 @@ COMMAND_CHANNELS = {
     "event_cancel": "staff", "event_complete": "staff",
     "transfer_list": "staff", "transfer_dispatch": "staff", "vehicle_transfer_admin": "staff",
     "admin_pay": "staff",
+    "vehicle_garage_admin": "staff", "vehicle_garage_store_admin": "staff", "vehicle_garage_retrieve_admin": "staff",
     "server_reconcile": "operations", "chat_send": "operations", "activity_status": "operations",
 }
 

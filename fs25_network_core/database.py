@@ -121,6 +121,11 @@ class Database:
             [("server_key", 1), ("save_key", 1), ("world_id", 1), ("native_unique_id", 1)],
             name="vehicle_code_native_identity", unique=True)
         self.db.vehicle_codes.create_index("code", name="vehicle_code_global", unique=True)
+        # Garage assets are personal custody records, retained across farm and
+        # world decommission. Native archives are immutable and have no TTL.
+        self.db.vehicle_garage.create_index([("owner_discord_id", 1), ("state", 1), ("created_at", -1)])
+        self.db.vehicle_garage.create_index([("server_key", 1), ("save_key", 1), ("world_id", 1), ("state", 1)])
+        self.db.vehicle_garage_archives.create_index("created_at")
         self.db.community_applications.create_index([("state", 1), ("submitted_at", 1)])
         self.db.sin_servers.create_index("server_key", unique=True)
         self.db.sin_saves.create_index([("server_key", 1), ("fs25_save_id", 1)], unique=True)

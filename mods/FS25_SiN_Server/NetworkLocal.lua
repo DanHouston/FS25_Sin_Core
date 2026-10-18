@@ -2517,6 +2517,7 @@ function FS25SiNServer:update(dt)
     end
     if g_currentMission ~= nil and g_currentMission:getIsServer() == true then
         self:installNativeContractLifecycleListener()
+        if type(self.updateGaragePending) == "function" then self:updateGaragePending(dt) end
     end
     if not self.failed and g_currentMission ~= nil and self.worldIdentitySaveHookInstalled ~= true then
         self:installWorldIdentityPersistenceHook()
@@ -3225,6 +3226,8 @@ function FS25SiNServer:processPermissionCommands()
                     self:processMoneyCommand(command, operationId, operationType)
                 elseif operationType == "vehicle_transfer" then
                     self:processVehicleTransferCommand(command, operationId)
+                elseif operationType == "garage_prepare" or operationType == "garage_store" or operationType == "garage_retrieve" then
+                    self:processGarageCommand(command, operationId, operationType)
                 else
                     local requestedRole = command:getString("permissionCommand#role")
                     if requestedRole == "contractor" then

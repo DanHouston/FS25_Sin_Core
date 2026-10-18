@@ -30,6 +30,12 @@ new credit. Negative equity shows an uncovered debt amount; it does not debit
 the recipient or authorize a farm closure. Currency calculations use Decimal
 in Central and the proposed credit rounds down to whole game-currency units.
 
+To retain equipment, use the admin [virtual garage](vehicle-garage.md) first.
+Wait for **stored** after both live removal and a native save. Retained garage
+vehicles are listed separately with no cash credit; pending/review custody
+blocks the final proposal. They remain the farmer's personal assets after the
+farm is decommissioned. This integration requires mod 0.2.2.26 and updated core/Agent.
+
 The recipient comes from one active canonical `sin_farms` member-farm mapping
 for the exact server/save/world/farm. The command never treats an online worker
 or the first farm manager as the owner. Ambiguous mappings and system farms
