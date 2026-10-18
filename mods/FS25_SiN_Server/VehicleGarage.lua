@@ -107,6 +107,25 @@ local function writePhase(journal, phase)
     if journal:save() == false then error("garage journal could not be persisted") end
 end
 
+local function cleanReason(reason)
+    local text = tostring(reason)
+    while true do
+        local cleaned, count = text:gsub("^.-%.lua:%d+:%s*", "", 1)
+        text = cleaned
+        if count == 0 then return text end
+    end
+end
+
+local function stateMismatch(receipt, vehicleId, key, archived, current)
+    local field = key:gsub("^vehicles%.vehicle%(%d+%)%.?", "")
+    receipt:setString("networkLocalReceipt#changed_field", key)
+    receipt:setString("networkLocalReceipt#archived_value", tostring(archived):sub(1, 300))
+    receipt:setString("networkLocalReceipt#current_value", tostring(current):sub(1, 300))
+    Logging.warning("[SiN Vehicle Garage] state changed vehicle=%s field=%s archived=%s current=%s",
+        vehicleId, key, tostring(archived):sub(1, 300), tostring(current):sub(1, 300))
+    error("vehicle changed after archiving: " .. field .. "; keep it parked with engine off before retrying", 0)
+end
+
 function FS25SiNServer:processGarageCommand(command, operationId, operationType)
     self.garagePending = self.garagePending or {}
     local previousPending = self.garagePending[operationId]
@@ -194,10 +213,15 @@ function FS25SiNServer:processGarageCommand(command, operationId, operationType)
                     for i=0, count-1 do
                         local field = string.format("garageJournal.field(%d)", i)
                         local key, value = journal:getString(field .. "#key"), journal:getString(field .. "#value")
-                        if key == nil or fields[key] ~= value then error("vehicle state changed after capture; store it again after correction") end
+                        if key == nil then error("garage comparison journal is incomplete") end
+                        if fields[key] ~= value then stateMismatch(receipt, id, key, value, fields[key]) end
                         fields[key] = nil
                     end
-                    if count == 0 or next(fields) ~= nil then error("vehicle save state changed after capture") end
+                    if count == 0 then error("garage comparison journal is empty") end
+                    local extraKeys = {}
+                    for key in pairs(fields) do table.insert(extraKeys, key) end
+                    table.sort(extraKeys)
+                    if #extraKeys > 0 then stateMismatch(receipt, id, extraKeys[1], nil, fields[extraKeys[1]]) end
                     writePhase(journal, "removing")
                     mutationStarted = true
                     self.garagePending[operationId] = {id=id, journal=journal, command=command,
@@ -276,7 +300,7 @@ function FS25SiNServer:processGarageCommand(command, operationId, operationType)
                     end)
                     if not callbackOk then
                         receipt:setString("networkLocalReceipt#status", "pending_validation")
-                        receipt:setString("networkLocalReceipt#receipt", "native restoration requires review: " .. tostring(callbackError))
+                        receipt:setString("networkLocalReceipt#receipt", "native restoration requires review: " .. cleanReason(callbackError))
                     end
                     receipt:setBool("networkLocalReceipt#mutation_started", true)
                     journal:delete(); archive:delete()
@@ -289,7 +313,7 @@ function FS25SiNServer:processGarageCommand(command, operationId, operationType)
     if deferred and ok then return end
     if not ok then
         status = mutationStarted and "pending_validation" or "definitively_not_applied"
-        reason = tostring(failure)
+        reason = cleanReason(failure)
         self.garagePending[operationId] = nil
     end
     if journal ~= nil then journal:delete() end

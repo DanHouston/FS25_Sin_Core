@@ -19,6 +19,17 @@ def now():
     return datetime.now(timezone.utc)
 
 
+def garage_receipt_reason(value, limit=200):
+    """Keep the useful native reason ahead of any display length limit.
+
+    Historical receipts retain their raw Lua locations for audit, but those
+    paths must not consume the space available for the farmer's explanation.
+    """
+    text = re.sub(r"^(?:.*?\.lua:\d+:\s*)+", "", str(value or ""))
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[:limit-1] + "…"
+
+
 class VehicleGarageService:
     def __init__(self, database):
         self.database, self.db = database, database.db
@@ -253,7 +264,7 @@ class VehicleGarageService:
                     if target == "failed":
                         self.db.vehicle_codes.update_one({"code": item["vehicle_code"], "garage_lock_id": item["_id"]},
                             {"$unset": {"garage_lock_id": ""}}, session=session)
-                    self._notice(item, "failed: " + str(receipt.get("receipt") or "native preflight failed")[:200], session)
+                    self._notice(item, "failed: " + garage_receipt_reason(receipt.get("receipt") or "native preflight failed"), session)
                 self.database.atomic(reject)
                 return {"operation_id": operation["_id"], "state": target}
         # Once a mutation was authorized, a failure/timeout never releases its
@@ -262,7 +273,7 @@ class VehicleGarageService:
             "state": "review_required", "last_receipt": receipt, "updated_at": now()}})
         self.db.farm_operations.update_one({"_id": operation["_id"]}, {"$set": {
             "state": "reconciliation_required", "receipt": receipt, "updated_at": now()}})
-        self._notice(item, "needs review: " + str(receipt.get("receipt") or "game operation unconfirmed")[:200])
+        self._notice(item, "needs review: " + garage_receipt_reason(receipt.get("receipt") or "game operation unconfirmed"))
         return {"operation_id": operation["_id"], "state": "review_required"}
 
     def checkpoint(self, scope, payload):

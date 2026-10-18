@@ -55,6 +55,31 @@ reconstruction or a catalog replacement. Required vehicle mods/store items must
 remain installed; bundles and externally mounted objects are not supported by
 this first path. Behavior of custom specializations still needs game validation.
 
+### Failed storage attempts
+
+`failed` records are separate attempts, not additional stored copies. A
+definitively failed store retains the live source vehicle and releases that
+attempt's custody lock. Correct the reported condition before a new request.
+
+`detach all attached vehicles first` rejects an attached combination. A
+`vehicle changed after archiving` rejection means the second native save-state
+capture differed from the independently archived copy; removal was blocked.
+Keep it detached, parked, empty of occupants, with engine and AI stopped.
+
+Server mod **0.2.2.27** names the changed XML field in the receipt and logs
+`[SiN Vehicle Garage] state changed` with archived/current values. It preserves
+the comparison checks; an unexplained mismatch still requires investigation.
+The garage list removes Lua source-location prefixes from historical failures
+before limiting their length. Long pages use multiple private channel replies
+so the last failure reasons are not silently cut off.
+
+On the Windows game host, inspect mismatch details from the server's game log
+(substitute its path if different):
+
+```powershell
+Select-String -LiteralPath 'C:\Users\SiNAdmin\Documents\My Games\FarmingSimulator2025\log.txt' -Pattern '\[SiN Vehicle Garage\] state changed' | Select-Object -Last 10
+```
+
 ## Storage protocol and durability
 
 1. Central atomically claims vehicle custody, records the canonical farmer,
@@ -143,7 +168,9 @@ produce checkpoint proof in this first implementation.
 
 ## Deployment and validation status
 
-Update Central/API, JiN, Agent and **FS25_SiN_Server 0.2.2.26** together. Server
+The initial garage requires Central/API, JiN, Agent and **FS25_SiN_Server 0.2.2.26**
+or newer. The field-mismatch diagnostics require **0.2.2.27** and the updated
+Central/JiN display formatter; no additional Agent change is required. Server
 and clients need the identical mod ZIP. Updated ZIPs are directly in `dist`.
 Database initialization adds indexes for the new collections. No live data has
 been moved by preparing the source, and nothing is deployed automatically.

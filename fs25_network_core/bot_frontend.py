@@ -28,7 +28,7 @@ from .business_workflows import (ChatService, ContractService, InvoiceService,
                                   CommunityEventService, TransferService)
 from .farm_lifecycle import FarmLifecycle, SYSTEM_FARM_NAME, FIRST_FIELD_MAX_PRICE
 from .vehicle_inventory import VehicleInventoryService
-from .vehicle_garage import VehicleGarageService
+from .vehicle_garage import VehicleGarageService, garage_receipt_reason
 from .farm_report import FarmReportService, format_farm_report
 from .farm_assessment import FarmAssessmentService, format_farm_assessment, assessment_csv
 from .contract_contribution import (ContractContributionReportService,
@@ -1947,18 +1947,25 @@ class NetworkBot(discord.Client):
             pages = max(1, (len(records) + 9) // 10)
             if page > pages:
                 raise ValueError(f"This garage has {pages} page(s)")
-            lines = [f"**Personal vehicle garage — {discord.utils.escape_markdown(str(member))}**",
-                     f"Page {page}/{pages}. Stored vehicles are retained assets and earn no farm sale credit."]
+            header = (f"**Personal vehicle garage — {discord.utils.escape_markdown(str(member))}**\n"
+                      f"Page {page}/{pages}. Stored vehicles are retained assets and earn no farm sale credit.")
+            messages, message = [], header
             for item in records[(page-1)*10:page*10]:
                 name = discord.utils.escape_markdown(str(item.get("name") or "Vehicle")[:65])
-                lines.append(f"`{item['vehicle_code']}` {name} — **{item['state']}** ({item['server_key']})")
+                entry = f"`{item['vehicle_code']}` {name} — **{item['state']}** ({item['server_key']})"
                 note = (item.get("last_receipt") or {}).get("receipt")
                 if note and item["state"] in {"review_required", "failed"}:
-                    lines.append(discord.utils.escape_markdown(str(note)[:110]))
+                    entry += "\n" + discord.utils.escape_markdown(garage_receipt_reason(note))
+                if len(message) + len(entry) + 1 > 1950:
+                    messages.append(message)
+                    message = header
+                message += "\n" + entry
             if not records:
-                lines.append("No retained vehicles or pending garage operations.")
-            await interaction.followup.send("\n".join(lines)[:1950], ephemeral=True,
-                                            allowed_mentions=discord.AllowedMentions.none())
+                message += "\nNo retained vehicles or pending garage operations."
+            messages.append(message)
+            for message in messages:
+                await interaction.followup.send(message, ephemeral=True,
+                                                allowed_mentions=discord.AllowedMentions.none())
 
         @self.tree.command(name="vehicle_garage_retrieve_admin", description="Staff: restore a garaged vehicle to its owner's farm at the shop")
         @app_commands.check(channel_check)
