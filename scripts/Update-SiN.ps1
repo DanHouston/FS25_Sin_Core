@@ -10,6 +10,8 @@ param(
     [string]$ApiUrl = "https://sin-central.duckdns.org",
     [double]$PollInterval = 2,
     [string]$AgentTaskName = "SiN FS25 Agent",
+    [System.Management.Automation.PSCredential]$AgentTaskCredential,
+    [switch]$PromptForAgentTaskCredential,
     # Retained for command-line compatibility; this Agent updater never reads
     # from or writes to an FS25 mods directory.
     [string]$ModsPath = "",
@@ -80,7 +82,9 @@ function Set-AgentTaskAction {
         $settings.RestartInterval -eq 'PT1M' -and
         $settings.ExecutionTimeLimit -eq 'PT0S' -and
         [int]$settings.MultipleInstances -eq 2
-    if ($actionMatches -and $settingsMatch) { return }
+    if (-not $AgentTaskCredential -and -not $PromptForAgentTaskCredential) {
+        if ($actionMatches -and $settingsMatch) { return }
+    }
 
     # Preserve identity, triggers, and other settings. Watch processes run
     # indefinitely; failed exits get bounded automatic recovery.
@@ -89,11 +93,39 @@ function Set-AgentTaskAction {
     $settings.ExecutionTimeLimit = 'PT0S'
     $settings.MultipleInstances = 2 # TASK_INSTANCES_IGNORE_NEW
 
+    $principal = $task.Principal
+    $credential = $AgentTaskCredential
+    if ($PromptForAgentTaskCredential -and -not $credential) {
+        $credential = Get-Credential -UserName $principal.UserId -Message "Windows credentials for the existing SiN Agent task account"
+        if (-not $credential) { throw "Agent task credential entry was cancelled; Agent files and running process were not changed." }
+    }
+    $credentialParameters = @{}
+    if ($credential) {
+        if ([string]$principal.LogonType -ne 'Password') {
+            throw "Agent task credentials are only supported for an existing Password logon task; the task identity and logon type will not be changed."
+        }
+        # Compare identities, including local/domain aliases, before supplying
+        # a password. Never silently switch the scheduled task to another user.
+        $identityType = [System.Security.Principal.SecurityIdentifier]
+        $principalSid = if ([string]$principal.UserId -match '^S-1-') {
+            [System.Security.Principal.SecurityIdentifier]::new([string]$principal.UserId)
+        } else {
+            [System.Security.Principal.NTAccount]::new([string]$principal.UserId).Translate($identityType)
+        }
+        $credentialSid = [System.Security.Principal.NTAccount]::new($credential.UserName).Translate($identityType)
+        if ($principalSid.Value -ne $credentialSid.Value) {
+            throw "The supplied credentials must belong to the existing Agent task account '$($principal.UserId)'."
+        }
+        $credentialParameters.User = [string]$principal.UserId
+        $credentialParameters.Password = $credential.GetNetworkCredential().Password
+    }
     try {
-        Set-ScheduledTask -TaskName $AgentTaskName -Action $action -Settings $settings -ErrorAction Stop | Out-Null
+        Set-ScheduledTask -TaskName $AgentTaskName -Action $action -Settings $settings -TaskPath $task.TaskPath @credentialParameters -ErrorAction Stop | Out-Null
     } catch {
-        $principal = $task.Principal
-        throw "Could not update the Agent scheduled-task action for '$($principal.UserId)' (logon type $($principal.LogonType)): $($_.Exception.Message). The task's saved Windows credentials may need to be refreshed in Task Scheduler."
+        throw "Could not update the Agent scheduled-task action for '$($principal.UserId)' (logon type $($principal.LogonType)): $($_.Exception.Message). For a Password logon task, rerun with -PromptForAgentTaskCredential and enter that account's Windows password. The task's saved Windows credentials may need to be refreshed in Task Scheduler. Agent files and running process were not changed."
+    } finally {
+        $credentialParameters.Clear()
+        $credential = $null
     }
 }
 
@@ -499,7 +531,6 @@ function Test-AgentPackage($directory) {
 
 function Start-Agent {
     New-Item -ItemType Directory -Force -Path $MailboxDir | Out-Null
-    Set-AgentTaskAction
     Start-ScheduledTask -TaskName $AgentTaskName -ErrorAction Stop
     Start-Sleep -Seconds 3
     $task = Get-ScheduledTask -TaskName $AgentTaskName -ErrorAction Stop
@@ -551,6 +582,7 @@ function Invoke-Rollback {
     if (-not $backup) { throw "No rollback backup exists" }
     $savedCore = Join-Path $backup.FullName "fs25_network_core"
     if (-not (Test-Path $savedCore)) { throw "Latest backup does not contain an Agent backup" }
+    Set-AgentTaskAction
     Stop-Agent
     $liveCore = Join-Path $AgentRoot "fs25_network_core"
     if (Test-Path $liveCore) { Remove-Item -LiteralPath $liveCore -Recurse -Force }
@@ -584,6 +616,9 @@ try {
     Copy-Item -LiteralPath (Join-Path $downloadDirectory "Restart-SiN-Agent.ps1") -Destination (Join-Path $DeployRoot "Restart-SiN-Agent.ps1") -Force
     Copy-Item -LiteralPath (Join-Path $downloadDirectory "Publish-SiN-Modpack.ps1") -Destination (Join-Path $DeployRoot "Publish-SiN-Modpack.ps1") -Force
 
+    # Task-definition/password failures must happen before stopping the Agent
+    # or replacing its files. Task edits do not affect an already-running task.
+    Set-AgentTaskAction
     $timestamp = (Get-Date).ToUniversalTime().ToString("yyyyMMdd-HHmmss")
     $backup = Join-Path $BackupRoot "$timestamp-$resolvedVersion"
     New-Item -ItemType Directory -Force -Path $backup | Out-Null

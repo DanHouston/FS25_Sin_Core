@@ -107,11 +107,23 @@ powershell.exe -ExecutionPolicy Bypass -File "C:\SiN\Deploy\Update-SiN.ps1" -Ver
 The updater resolves public GitHub Releases over HTTPS, downloads the Agent
 and updater assets to `C:\SiN\Downloads\<version>`, verifies their checksums,
 and backs up the live Agent and deployment metadata under
-`C:\SiN\Backups\<timestamp>-<version>`. It stops the existing `SiN FS25 Agent`
-task, installs the Agent under `C:\SiN\Agent\fs25_network_core`, then updates
-and starts that task using its configured Python executable. It preserves the
+`C:\SiN\Backups\<timestamp>-<version>`. It checks and, when necessary, updates
+the existing task definition before stopping the Agent. It then installs the
+Agent under `C:\SiN\Agent\fs25_network_core` and starts the task using its
+configured Python executable. It preserves the
 task's principal and triggers and never starts a standalone Python process.
 Existing server-mod path/hash metadata is preserved without checking the file.
+
+Unchanged task actions/settings are left alone. If Windows rejects a required
+task edit with a username/password error, use the current release updater with
+`-PromptForAgentTaskCredential`. This opens Windows credential entry for the
+existing task account; use its Windows password, not a Windows Hello PIN.
+The script passes the password to Task Scheduler without writing it to the
+deployment files. A credential failure stops the update before the running
+Agent or installed Agent files are changed. The restart helper accepts the
+same switch and also checks task configuration before stopping the Agent.
+Programmatic callers may instead supply a `PSCredential` through
+`-AgentTaskCredential` in the same PowerShell process.
 
 Agent updates take effect after the updater restarts the Agent. Server-mod ZIP
 updates remain a separate manual operation and should use the established mod

@@ -167,6 +167,43 @@ Agent/restart scripts, uses the canonical mailbox, restarts the scheduled Agent,
 and writes `C:\SiN\deployment.json`. It preserves prior server-mod hash/path
 metadata without inspecting or changing the mod ZIP.
 
+### Windows task username/password error
+
+For a task with `Password` logon, Windows can require the account password when
+changing its action or recovery settings. This error alone does not establish
+that the task's saved password is stale. The updater and restart helper skip
+unchanged task definitions and perform required edits before stopping the Agent
+or replacing its files. They keep the existing account, logon type, and triggers.
+
+Download the **current release's updater** directly as shown above; running an
+older updater only stages the new file and still executes the older behavior.
+Then run the staged updater with secure credential entry:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File "C:\SiN\Deploy\Update-SiN.next.ps1" `
+  -Version $Version `
+  -ApiUrl $CentralUrl `
+  -MailboxDir $Mailbox `
+  -PromptForAgentTaskCredential
+```
+
+Enter the existing task account's **Windows password**, not a Windows Hello
+PIN. Do not put the password in command arguments, scripts, or deployment JSON.
+The script supplies it to Task Scheduler in memory and rejects a different
+account. Programmatic callers can pass `-AgentTaskCredential (Get-Credential)`
+using `&` in the same PowerShell process. The restart helper supports both
+credential options too. A wrong password fails before stopping a running Agent.
+
+If an older updater already failed at this step, Agent files and deployment
+metadata may already have been replaced and the task may be stopped. Rerun the
+new updater as above, then check the task state and Agent log. A successful task
+definition update cannot guarantee a successful launch; check both.
+
+Task Scheduler owns its saved credentials. See Microsoft's
+[Set-ScheduledTask documentation](https://learn.microsoft.com/en-us/powershell/module/scheduledtasks/set-scheduledtask?view=windowsserver2025-ps)
+for the `User`/`Password` parameters and updating a running task definition.
+
 For an Agent-only restart, without changing the FS25 ZIP:
 
 ```powershell
