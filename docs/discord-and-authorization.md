@@ -177,7 +177,7 @@ The bot responds privately to commands. Staff inspects the request queue with
 
 Staff can use `/farm_assess_admin server:<server> farm:<owner/farm name>` in
 the staff channel for a private, itemized closure estimate. It reports cash,
-loan, land/building/equipment values, harvested inventory, and the proposed SiN
+loan, land/building/equipment values, building-stored inventory, livestock, and the proposed SiN
 account credit. See [farm closure assessment](farm-closure-assessment.md) for
 the calculation and valuation gaps. This command performs no settlement or
 farm deletion.

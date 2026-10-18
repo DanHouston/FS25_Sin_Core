@@ -35,6 +35,8 @@ end
 
 function FS25SiNServer:exportFarmAssessments(xml)
     xml:setBool("networkLocal#farmAssessmentReady", false)
+    xml:setInt("networkLocal#farmAssessmentSchemaVersion", 2)
+    xml:setString("networkLocal#farmAssessmentStockScope", "building_storage_only")
     local mission = g_currentMission
     if mission == nil or not mission:getIsServer() or mission.isRunning ~= true then return end
     local farms = {}
@@ -104,7 +106,7 @@ function FS25SiNServer:exportFarmAssessments(xml)
             basis=value.basis or "unpriced", note=value.station or "No native price available"})
     end
     local seenStorages = {}
-    local function inspectStorage(storage, source)
+    local function inspectStorage(storage, source, expectedFarmId)
         if storage == nil or seenStorages[storage] then return end
         seenStorages[storage] = true
         if not finite(read(storage, "getOwnerFarmId")) then
@@ -112,6 +114,10 @@ function FS25SiNServer:exportFarmAssessments(xml)
             return
         end
         local farmId = owner(storage)
+        if farmId ~= expectedFarmId then
+            issue(expectedFarmId, "Storage ownership does not match its building at " .. source)
+            return
+        end
         if farms[farmId] == nil then return end
         local levels = read(storage, "getFillLevels")
         if type(levels) ~= "table" then issue(farmId, "Storage inventory unavailable at " .. source); return end
@@ -122,10 +128,47 @@ function FS25SiNServer:exportFarmAssessments(xml)
     end
     local storages = read(storageSystem, "getStorages")
     if type(storages) ~= "table" and storageSystem ~= nil then storages = storageSystem.storages end
-    if type(storages) == "table" then
-        for _, storage in ipairs(objects(storages)) do inspectStorage(storage, "Storage " .. tostring(storage.rootNode or "")) end
-    else
-        issueAll("Global storage inventory unavailable; silo and production observations may be partial")
+
+    local seenClusters = {}
+    local function livestock(farmId, placeable, source, sourceId)
+        -- Native FS25 husbandry groups expose the current per-animal sale
+        -- value. Do not reconstruct this from age, health or purchase prices.
+        local clusters = read(placeable, "getClusters")
+        local expectedCount = read(placeable, "getNumOfAnimals")
+        if type(clusters) ~= "table" or not finite(expectedCount)
+            or expectedCount < 0 or expectedCount % 1 ~= 0 then
+            issue(farmId, "Livestock inventory unavailable at " .. source)
+            return
+        end
+        local totalCount = 0
+        for index, cluster in ipairs(objects(clusters)) do
+            local count = read(cluster, "getNumAnimals")
+            if not finite(count) or count < 0 or count % 1 ~= 0 then
+                issue(farmId, "Unreadable livestock quantity at " .. source)
+            else
+                totalCount = totalCount + count
+                if count > 0 then
+                    if seenClusters[cluster] then
+                        issue(farmId, "Livestock group appears in more than one location at " .. source)
+                        issue(seenClusters[cluster], "Livestock group appears in more than one location")
+                    else
+                        seenClusters[cluster] = farmId
+                        local price = read(cluster, "getSellPrice")
+                        if not finite(price) or price < 0 then price = nil end
+                        local subTypeIndex = read(cluster, "getSubTypeIndex")
+                        local subType = read(mission.animalSystem, "getSubTypeByIndex", subTypeIndex)
+                        local name = type(subType) == "table" and subType.name or "Animal group " .. tostring(index)
+                        local age = read(cluster, "getAge")
+                        local note = "Current native sale value per animal; sale/transport fees excluded"
+                        if finite(age) then note = note .. "; age " .. tostring(age) .. " months" end
+                        add(farmId, {kind="livestock", id=sourceId .. ":animal:" .. tostring(index),
+                            name=name, location=source, quantity=count, unit="animals", unitPrice=price,
+                            value=price ~= nil and count * price or nil, basis="native_animal_sale", note=note})
+                    end
+                end
+            end
+        end
+        if totalCount ~= expectedCount then issue(farmId, "Livestock group count does not match barn total at " .. source) end
     end
 
     local placeables = mission.placeableSystem ~= nil and mission.placeableSystem.placeables or nil
@@ -145,15 +188,25 @@ function FS25SiNServer:exportFarmAssessments(xml)
                 quantity=1, unit="building", value=price, basis=basis})
             local silo = placeable.spec_silo
             if silo ~= nil then
-                for _, storage in ipairs(objects(silo.storages)) do inspectStorage(storage, name) end
+                for _, storage in ipairs(objects(silo.storages)) do inspectStorage(storage, name, farmId) end
             end
             local extension = placeable.spec_siloExtension
-            if extension ~= nil then inspectStorage(extension.storage, name) end
+            if extension ~= nil then inspectStorage(extension.storage, name, farmId) end
             local spec = placeable.spec_productionPoint
             local production = spec ~= nil and spec.productionPoint or nil
-            if production ~= nil then inspectStorage(production.storage, name .. " production") end
+            if production ~= nil then inspectStorage(production.storage, name .. " production", farmId) end
+            local husbandry = placeable.spec_husbandry
+            if husbandry ~= nil then inspectStorage(husbandry.storage, name .. " husbandry", farmId) end
             if placeable.spec_husbandryAnimals ~= nil then
-                issue(farmId, "Livestock at " .. name .. " requires a separate valuation")
+                livestock(farmId, placeable, name, "building:" .. tostring(index))
+            end
+            local objectStorage = placeable.spec_objectStorage
+            if objectStorage ~= nil then
+                if type(objectStorage.storedObjects) ~= "table" then
+                    issue(farmId, "Stored bale/pallet inventory unavailable at " .. name)
+                elseif next(objectStorage.storedObjects) ~= nil then
+                    issue(farmId, "Stored bale/pallet quantities at " .. name .. " require a separate inventory")
+                end
             end
             if placeable.spec_bunkerSilo ~= nil then
                 issue(farmId, "Bunker contents at " .. name .. " require a separate inventory")
@@ -161,10 +214,29 @@ function FS25SiNServer:exportFarmAssessments(xml)
         end
     end
 
+    -- Only a storage linked directly to an owned building is eligible. An
+    -- unfamiliar registered storage remains a coverage gap, never loose stock.
+    if type(storages) == "table" then
+        for _, storage in ipairs(objects(storages)) do
+            local farmId = owner(storage)
+            if farms[farmId] ~= nil and not seenStorages[storage] then
+                local levels = read(storage, "getFillLevels")
+                if type(levels) ~= "table" then
+                    issue(farmId, "Unlinked storage inventory unavailable")
+                else
+                    for _, amount in pairs(levels) do
+                        if not finite(amount) or amount ~= 0 then
+                            issue(farmId, "Registered storage could not be linked to an owned building")
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    end
+
     local vehicles = mission.vehicleSystem ~= nil and mission.vehicleSystem.vehicles or nil
     if type(vehicles) ~= "table" or VehiclePropertyState == nil then issueAll("Equipment inventory unavailable") end
-    local seenItems = {}
-    local operatingFillTypes = {DIESEL=true, DEF=true, AIR=true, ELECTRICCHARGE=true, METHANE=true}
     for index, vehicle in ipairs(objects(vehicles)) do
         if not finite(read(vehicle, "getOwnerFarmId")) then issueAll("A vehicle has unreadable ownership") end
         local farmId = owner(vehicle)
@@ -173,8 +245,11 @@ function FS25SiNServer:exportFarmAssessments(xml)
             local id = tostring(read(vehicle, "getUniqueId") or index)
             local container = vehicle.isPallet == true or vehicle.isBigBag == true or vehicle.isBale == true
             local owned = vehicle.propertyState == VehiclePropertyState.OWNED
-            local leased = VehiclePropertyState.LEASED ~= nil and vehicle.propertyState == VehiclePropertyState.LEASED
-            if not container then
+            local rideable = vehicle.spec_rideable ~= nil
+            if rideable then
+                -- A horse being ridden is outside its barn's cluster list.
+                issue(farmId, "Return ridden animals to their owned barn before assessment: " .. name)
+            elseif not container then
                 if owned then
                     add(farmId, {kind="equipment", id=id, name=name, quantity=1, unit="vehicle/implement",
                         value=read(vehicle, "getSellPrice"), basis="native_resale"})
@@ -183,42 +258,16 @@ function FS25SiNServer:exportFarmAssessments(xml)
                         value=0, basis="not_owned", note="Leased or mission equipment has no asset credit"})
                 end
             end
-            if owned or leased or (container and vehicle.propertyState == nil) then
-                seenItems[vehicle] = true
-                local units = read(vehicle, "getFillUnits")
-                if vehicle.spec_fillUnit ~= nil and type(units) ~= "table" then
-                    issue(farmId, "Vehicle contents unavailable at " .. name)
-                elseif type(units) == "table" then
-                    for unitIndex in pairs(units) do
-                        -- Physical backing values avoid counting virtual fill
-                        -- getters which proxy a separately enumerated pallet.
-                        local unit = units[unitIndex]
-                        local liters = type(unit) == "table" and unit.fillLevel or nil
-                        local fillType = type(unit) == "table" and unit.fillType or nil
-                        local fillName = read(g_fillTypeManager, "getFillTypeNameByIndex", fillType)
-                        if container or not operatingFillTypes[fillName] then
-                            stock(farmId, "vehicle:" .. id .. ":" .. tostring(unitIndex), name, fillType, liters)
-                        end
-                    end
+            if vehicle.spec_livestockTrailer ~= nil then
+                local count = read(vehicle, "getNumOfAnimals")
+                if not finite(count) or count ~= 0 then
+                    -- Native trailer resale includes part of its animal value.
+                    -- Leased trailers can also carry farm-owned animals.
+                    issue(farmId, "Unload livestock into an owned barn before assessment: " .. name)
                 end
             end
-        end
-    end
-
-    local itemSystem = mission.itemSystem
-    local items = read(itemSystem, "getItems")
-    if type(items) ~= "table" and itemSystem ~= nil then items = itemSystem.items end
-    if type(items) ~= "table" then issueAll("Loose bale/item inventory unavailable") end
-    for index, item in ipairs(objects(items)) do
-        if not finite(read(item, "getOwnerFarmId")) then issueAll("A loose item has unreadable ownership") end
-        local farmId = owner(item)
-        if farms[farmId] ~= nil and not seenItems[item] then
-            if type(item.getFillType) == "function" and type(item.getFillLevel) == "function" then
-                stock(farmId, "item:" .. tostring(index), label(item, "Bale/item " .. tostring(index)),
-                    read(item, "getFillType"), read(item, "getFillLevel"))
-            else
-                issue(farmId, "Loose item " .. tostring(index) .. " requires a separate valuation")
-            end
+            -- Cargo, loose pallets/bales and implement contents earn no
+            -- stock credit. They must be unloaded into eligible buildings.
         end
     end
 

@@ -9,9 +9,9 @@ from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 from .world_generation import WorldGenerationRegistry
 
 
-KINDS = ("equipment", "building", "land", "stock")
+KINDS = ("equipment", "building", "land", "stock", "livestock")
 LABELS = {"equipment": "Equipment", "building": "Buildings", "land": "Land",
-          "stock": "Harvested stock / products", "excluded": "Excluded"}
+          "stock": "Building stock / products", "livestock": "Livestock", "excluded": "Excluded"}
 MAX_AGE_SECONDS = 120
 
 
@@ -75,9 +75,10 @@ class FarmAssessmentService:
 
         data = snapshot.get("farm_assessments")
         data = data.get(str(farm_id), data.get(farm_id)) if isinstance(data, dict) else None
-        ready = snapshot.get("farm_assessment_ready") is True and isinstance(data, dict) and data.get("schema_version") == 1
+        ready = (snapshot.get("farm_assessment_ready") is True and isinstance(data, dict)
+                 and data.get("schema_version") == 2 and data.get("stock_scope") == "building_storage_only")
         if not ready:
-            issues.append("Detailed assessment unavailable; deploy the assessment mod and Agent and wait for a fresh snapshot")
+            issues.append("Building-storage and livestock assessment unavailable; update mod and Agent and wait for a fresh snapshot")
             if snapshot.get("farm_assessment_error"):
                 issues.append(str(snapshot["farm_assessment_error"])[:400])
             data = {}
@@ -114,12 +115,19 @@ class FarmAssessmentService:
             seen.add(identity)
             row.update(value=_decimal(raw.get("value")), quantity=_decimal(raw.get("quantity")),
                        unit_price=_decimal(raw.get("unitPrice")))
-            if row["kind"] == "stock" and row["value"] is not None:
+            if row["kind"] == "stock" and not row["id"].startswith("storage:"):
+                issues.append("Stock outside a building storage is not eligible for credit")
+                continue
+            if row["kind"] == "livestock" and (row["quantity"] is None or row["quantity"] <= 0
+                                               or row["quantity"] % 1 != 0 or row["unit"] != "animals"):
+                row["value"] = None
+                issues.append("A livestock quantity is missing or invalid")
+            if row["kind"] in {"stock", "livestock"} and row["value"] is not None:
                 if row["quantity"] is None or row["unit_price"] is None:
                     row["value"] = None
                 elif abs(row["quantity"] * row["unit_price"] - row["value"]) > Decimal("0.01"):
                     row["value"] = None
-                    issues.append("A stock valuation does not match its quantity and unit price")
+                    issues.append("A stock or livestock valuation does not match its quantity and unit price")
             if row["kind"] == "excluded":
                 row["value"] = Decimal(0)
             elif row["value"] is None:
@@ -202,13 +210,19 @@ class FarmAssessmentService:
 
 def format_farm_assessment(report):
     lines = [f"**Farm closure assessment — {_label(report['farm_name'], 80)}**",
-             "Read-only estimate · harvested stock only",
+             "Read-only estimate · building stock and livestock",
              f"Server: {_label(report.get('server_name') or report['server_key'], 60)} · Farm {report['farm_id']}",
              f"Farm cash: {_money(report['cash'])}"]
     for kind in KINDS:
         count = sum(row["kind"] == kind for row in report["rows"])
         heading = LABELS[kind] if report["complete"] else "Known " + LABELS[kind].lower()
-        lines.append(f"{heading} ({count} rows): {_money(report['totals'][kind])}")
+        if kind == "livestock":
+            animals = sum((row["quantity"] for row in report["rows"]
+                           if row["kind"] == kind and row.get("quantity") is not None), Decimal(0))
+            detail = f"{animals:,.0f} animals / {count} groups"
+        else:
+            detail = f"{count} rows"
+        lines.append(f"{heading} ({detail}): {_money(report['totals'][kind])}")
     lines.extend([f"Farm loan to deduct: {_money(report['loan'])}",
                   f"{'Estimated net equity' if report['complete'] else 'Known net (incomplete)'}: {_money(report['net_equity'])}",
                   f"**Proposed SiN account credit: {_money(report['proposed_credit'])}**"])
@@ -228,7 +242,7 @@ def format_farm_assessment(report):
     if report["observed_at"]:
         lines.append(f"Inventory observed: {report['observed_at'].isoformat(timespec='seconds')}")
     lines.append("Full inventory and valuation basis attached. Prices can change; whole-unit credit rounds down.")
-    lines.append("Standing crops, forestry/ground heaps, operating fuel and sale/delivery fees are excluded. No assets sold, money credited, or farm closed.")
+    lines.append("Vehicle contents, loose bales/pallets, standing crops, ground heaps and sale/delivery fees excluded. No assets sold, money credited, or farm closed.")
     return "\n".join(lines)[:1950]
 
 
@@ -245,7 +259,7 @@ def assessment_csv(report):
         writer.writerow(safe)
     write("Farm closure assessment", report["farm_name"], "Farm ID", report["farm_id"])
     write("Server", report["server_key"], "Save", report["save_key"], "World", report["world_id"])
-    write("Inventory observed", report["observed_at"], "Read-only; harvested stock only")
+    write("Inventory observed", report["observed_at"], "Read-only; building stock and livestock")
     write("Recipient account", report["recipient"])
     for name, value in (("Farm cash", report["cash"]), ("Known asset subtotal", report["asset_total"]),
                         ("Farm loan", report["loan"]), ("Net equity", report["net_equity"]),
@@ -265,5 +279,5 @@ def assessment_csv(report):
     for contract in report["active_contracts"]:
         write("Active native contract", contract.get("mission_id") or contract.get("_id"),
               contract.get("field_id"), contract.get("lifecycle"))
-    write("Exclusions", "Standing crops; forestry and ground heaps; operating fuel; sale/delivery fees")
+    write("Exclusions", "Vehicle/implement contents; loose bales/pallets; standing crops; forestry and ground heaps; operating fuel; sale/delivery fees")
     return stream.getvalue().encode("utf-8-sig")

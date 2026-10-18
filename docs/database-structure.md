@@ -48,6 +48,9 @@ itemized asset/stock valuations inside the existing current-world
 `server_snapshots.farm_assessments` field. Source freshness is carried by
 `farm_assessment_observed_at`; no closure or wallet-credit record is created
 by requesting an assessment. Recipient ownership comes from `sin_farms`.
+Schema 2 carries `stock_scope=building_storage_only` and a separate `livestock`
+asset category (animal count, per-animal sale price and total); older snapshots
+cannot produce a closure credit under this policy.
 
 ## Money and farm operations
 

@@ -435,7 +435,7 @@ class PairingAgent:
                                 raise ValueError("assessment inventory exceeds safe limit")
                             row = {key: asset.get(key, "")[:400] for key in
                                    ("kind", "id", "name", "location", "unit", "basis", "note")}
-                            if row["kind"] not in {"stock", "equipment", "building", "land", "excluded"}:
+                            if row["kind"] not in {"stock", "livestock", "equipment", "building", "land", "excluded"}:
                                 raise ValueError("invalid assessment asset category")
                             for key in ("quantity", "unitPrice", "value"):
                                 row[key] = number(asset, key)
@@ -443,7 +443,9 @@ class PairingAgent:
                         if int(node.get("assetCount", "-1")) != len(rows):
                             raise ValueError("assessment inventory count mismatch")
                         assessments[farm_key] = {
-                            "schema_version": 1, "cash": number(node, "cash", negative=True),
+                            "schema_version": int(root.get("farmAssessmentSchemaVersion", "1")),
+                            "stock_scope": root.get("farmAssessmentStockScope", "")[:100],
+                            "cash": number(node, "cash", negative=True),
                             "loan": number(node, "loan"), "assets": rows,
                             "issues": [item.get("message", "")[:400]
                                        for item in node.findall("./issues/issue")][:1000]}
