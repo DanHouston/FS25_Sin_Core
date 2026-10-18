@@ -6,7 +6,8 @@ end
 local function read(object, method, ...)
     if object == nil or type(object[method]) ~= "function" then return nil end
     local ok, value = pcall(object[method], object, ...)
-    return ok and value or nil
+    if ok then return value end
+    return nil
 end
 
 local function owner(object)
@@ -47,7 +48,7 @@ function FS25SiNServer:exportFarmAssessments(xml)
     for farmId = 1, 254 do
         local farm = g_farmManager:getFarmById(farmId)
         if farm ~= nil and farm.name ~= nil then
-            farms[farmId] = {farm=farm, assets={}, issues={}, issueSet={}}
+            farms[farmId] = {farm=farm, assets={}, issues={}, issueSet={}, contracts={}}
         end
     end
     local function issue(farmId, message)
@@ -96,7 +97,7 @@ function FS25SiNServer:exportFarmAssessments(xml)
         prices[fillType] = result
         return result
     end
-    local function stock(farmId, id, source, fillType, liters)
+    local function stock(farmId, id, source, fillType, liters, detail)
         if not finite(liters) or liters < 0 then issue(farmId, "Unreadable stock quantity at " .. source); return end
         if liters <= 0 then return end
         local name = read(g_fillTypeManager, "getFillTypeNameByIndex", fillType)
@@ -105,9 +106,106 @@ function FS25SiNServer:exportFarmAssessments(xml)
             issue(farmId, "Unidentified stock at " .. source)
         end
         local value = name ~= "Unknown fill type" and quote(fillType) or {}
+        local note = value.station or "No native price available"
+        if detail ~= nil then note = note .. "; " .. detail end
         add(farmId, {kind="stock", id=id, name=name, location=source, quantity=liters,
             unit="liters", unitPrice=value.price, value=value.price ~= nil and liters * value.price or nil,
-            basis=value.basis or "unpriced", note=value.station or "No native price available"})
+            basis=value.basis or "unpriced", note=note})
+    end
+
+    local seenStoredObjects = {}
+    local function objectStock(farmId, placeable, source, sourceId)
+        local spec = placeable.spec_objectStorage
+        local stored = spec.storedObjects
+        if type(stored) ~= "table" or not finite(spec.numStoredObjects)
+            or spec.numStoredObjects ~= #stored or #stored > 10000 then
+            issue(farmId, "Stored bale/pallet inventory unavailable or incomplete at " .. source)
+            return
+        end
+        if spec.objectSpawn ~= nil and spec.objectSpawn.isActive == true then
+            issue(farmId, "Stored objects are being unloaded at " .. source .. "; wait for completion")
+            return
+        end
+        local count, seenHere = 0, {}
+        for key, object in pairs(stored) do
+            count = count + 1
+            if not finite(key) or key % 1 ~= 0 or key < 1 or key > #stored or type(object) ~= "table" then
+                issue(farmId, "Stored bale/pallet inventory has an invalid entry at " .. source)
+                return
+            end
+            if seenHere[object] then
+                issue(farmId, "A stored object is duplicated at " .. source)
+                return
+            end
+            seenHere[object] = true
+            if seenStoredObjects[object] ~= nil then
+                issue(farmId, "A stored object appears in multiple buildings at " .. source)
+                issue(seenStoredObjects[object], "A stored object appears in multiple buildings")
+                return
+            end
+        end
+        if count ~= #stored then issue(farmId, "Stored object count does not match at " .. source); return end
+        if count == 0 then return end
+        if PlaceableObjectStorage == nil or type(PlaceableObjectStorage.saveToXMLFile) ~= "function"
+            or Placeable == nil or Placeable.xmlSchemaSavegame == nil then
+            issue(farmId, "Native stored-object reader unavailable at " .. source)
+            return
+        end
+
+        -- Use the native serializer for AbstractBaleObject/AbstractPalletObject;
+        -- their storage entries are not live vehicles with FillUnit methods.
+        -- This temporary XML stays in memory: no game save, spawning or sale.
+        local doc = XMLFile.create("sinAssessmentStoredObjects", self.directory .. "assessment-objects.xml",
+            "placeables", Placeable.xmlSchemaSavegame)
+        if doc == nil then issue(farmId, "Stored-object inventory cannot be read at " .. source); return end
+        local totals, excluded, observed = {}, {}, 0
+        local key = "placeables.placeable(0).objectStorage"
+        local ok, reason = pcall(function()
+            PlaceableObjectStorage.saveToXMLFile(placeable, doc, key, {})
+            doc:iterate(key .. ".object", function(_, objectKey)
+                observed = observed + 1
+                local className = doc:getString(objectKey .. "#className")
+                if className ~= "Bale" and className ~= "Vehicle" then error("unsupported stored-object class", 0) end
+                if doc:getInt(objectKey .. "#farmId") ~= farmId then error("stored-object ownership differs from its building", 0) end
+                local fillName = doc:getString(objectKey .. "#fillType")
+                local fillType = type(fillName) == "string" and read(g_fillTypeManager, "getFillTypeIndexByName", fillName) or nil
+                local liters = doc:getFloat(objectKey .. "#fillLevel")
+                if not finite(liters) or liters < 0 or (liters > 0 and (not finite(fillType) or fillType <= 0)) then
+                    error("stored-object fill type or quantity is unreadable", 0)
+                end
+                local missionBale = doc:getBool(objectKey .. "#isMissionBale")
+                if className == "Bale" and type(missionBale) ~= "boolean" then
+                    error("stored bale mission ownership cannot be verified", 0)
+                end
+                if missionBale == true then
+                    table.insert(excluded, {kind="excluded", id=sourceId .. ":mission-object:" .. tostring(observed),
+                        name=fillName, location=source, quantity=liters, unit="liters", value=0,
+                        basis="mission_stock", note="Stored mission bale has no farm stock credit"})
+                elseif liters > 0 then
+                    local total = totals[fillType] or {liters=0, count=0}
+                    total.liters, total.count = total.liters + liters, total.count + 1
+                    if not finite(total.liters) then error("stored-object quantity exceeds the inventory limit", 0) end
+                    totals[fillType] = total
+                end
+            end)
+            if observed ~= count then error("serialized stored-object count does not match", 0) end
+        end)
+        doc:delete()
+        if not ok then
+            issue(farmId, "Stored bale/pallet inventory unresolved at " .. source .. ": " .. tostring(reason))
+            Logging.warning("[SiN Assessment] object-storage building=%s reason=%s", sourceId, tostring(reason))
+            return
+        end
+        for _, object in ipairs(stored) do seenStoredObjects[object] = farmId end
+        local fillTypes = {}
+        for fillType in pairs(totals) do table.insert(fillTypes, fillType) end
+        table.sort(fillTypes)
+        for _, fillType in ipairs(fillTypes) do
+            local total = totals[fillType]
+            stock(farmId, "storage:object:" .. sourceId .. ":" .. tostring(fillType), source .. " stored objects",
+                fillType, total.liters, tostring(total.count) .. " stored bale/pallet object(s); actual contents")
+        end
+        for _, row in ipairs(excluded) do add(farmId, row) end
     end
     local seenStorages = {}
     local function inspectStorage(storage, source, expectedFarmId)
@@ -204,13 +302,8 @@ function FS25SiNServer:exportFarmAssessments(xml)
             if placeable.spec_husbandryAnimals ~= nil then
                 livestock(farmId, placeable, name, "building:" .. tostring(index))
             end
-            local objectStorage = placeable.spec_objectStorage
-            if objectStorage ~= nil then
-                if type(objectStorage.storedObjects) ~= "table" then
-                    issue(farmId, "Stored bale/pallet inventory unavailable at " .. name)
-                elseif next(objectStorage.storedObjects) ~= nil then
-                    issue(farmId, "Stored bale/pallet quantities at " .. name .. " require a separate inventory")
-                end
+            if placeable.spec_objectStorage ~= nil then
+                objectStock(farmId, placeable, name, tostring(read(placeable, "getUniqueId") or index))
             end
             if placeable.spec_bunkerSilo ~= nil then
                 issue(farmId, "Bunker contents at " .. name .. " require a separate inventory")
@@ -286,6 +379,43 @@ function FS25SiNServer:exportFarmAssessments(xml)
         end
     end
 
+    -- Lifecycle messages are historical observations. A fresh complete native
+    -- list is the authority for outstanding closure liabilities, including
+    -- finished missions whose reward/equipment has not yet been collected.
+    local missions = read(g_missionManager, "getMissions")
+    local contractsReady = type(missions) == "table" and type(MissionStatus) == "table"
+        and MissionStatus.CREATED ~= nil and MissionStatus.PREPARING ~= nil and MissionStatus.RUNNING ~= nil
+        and MissionStatus.FINISHED ~= nil and MissionStatus.DISMISSED ~= nil
+    local seenMissions = {}
+    if contractsReady then
+        local count = 0
+        for _, native in pairs(missions) do
+            count = count + 1
+            if count > 5000 or type(native) ~= "table" then contractsReady = false; break end
+            local started = read(native, "getWasStarted")
+            if type(started) ~= "boolean" then contractsReady = false; break end
+            if not started and native.status ~= MissionStatus.CREATED then contractsReady = false; break end
+            if started and native.status ~= MissionStatus.DISMISSED then
+                local farmId = native.farmId
+                local id = read(native, "getUniqueId")
+                local lifecycle = nil
+                if native.status == MissionStatus.PREPARING or native.status == MissionStatus.RUNNING then
+                    lifecycle = "accepted"
+                elseif native.status == MissionStatus.FINISHED then
+                    lifecycle = "finished_awaiting_collection"
+                end
+                if farms[farmId] == nil or type(id) ~= "string" or id == "" or #id > 160
+                    or seenMissions[id] or lifecycle == nil then contractsReady = false; break end
+                seenMissions[id] = true
+                local field = type(native.field) == "table" and native.field.fieldId or nil
+                table.insert(farms[farmId].contracts, {mission_id=id, lifecycle=lifecycle,
+                    mission_type=tostring(read(native, "getMissionTypeName") or "unknown"),
+                    field_id=tostring(read(native, "getFieldId") or field or ""),
+                    finish_state=tostring(native.finishState or "")})
+            end
+        end
+    end
+
     local farmIndex = 0
     for farmId = 1, 254 do
         local record = farms[farmId]
@@ -297,6 +427,12 @@ function FS25SiNServer:exportFarmAssessments(xml)
             if finite(cash) then xml:setString(key .. "#cash", string.format("%.17g", cash)) end
             if finite(loan) and loan >= 0 then xml:setString(key .. "#loan", string.format("%.17g", loan)) end
             xml:setInt(key .. "#assetCount", #record.assets)
+            xml:setBool(key .. "#nativeContractInventoryReady", contractsReady)
+            xml:setInt(key .. "#nativeContractCount", #record.contracts)
+            for index, contract in ipairs(record.contracts) do
+                local contractKey = string.format("%s.nativeContracts.contract(%d)", key, index - 1)
+                for field, value in pairs(contract) do xml:setString(contractKey .. "#" .. field, value) end
+            end
             for index, row in ipairs(record.assets) do
                 local assetKey = string.format("%s.assets.asset(%d)", key, index - 1)
                 for _, field in ipairs({"kind", "id", "name", "location", "unit", "basis", "note"}) do

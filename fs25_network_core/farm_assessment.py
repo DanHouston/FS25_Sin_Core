@@ -195,11 +195,35 @@ class FarmAssessmentService:
                 issues.append("A garaged vehicle still appears in farm assets; wait for a fresh snapshot and resolve any duplicate")
         if any(item.get("state") not in {"stored", "retrieved", "failed"} for item in garage):
             issues.append("Garage custody is unsettled; complete storage/save confirmation before farm closure")
-        active_contracts = list(self.db.native_contracts.find({
+        contract_observations = list(self.db.native_contracts.find({
             **scope, "accepting_farm_id": {"$in": [str(farm_id), farm_id]},
             "lifecycle": {"$in": ["accepted", "started"]}}))
+        active_contracts = []
+        contracts_ready = data.get("native_contract_inventory_ready") is True
+        raw_contracts = data.get("native_contracts")
+        if not isinstance(raw_contracts, list) or len(raw_contracts) > 5000:
+            contracts_ready = False
+        elif contracts_ready:
+            contract_ids = set()
+            for raw in raw_contracts:
+                if (not isinstance(raw, dict) or not isinstance(raw.get("mission_id"), str)
+                        or not raw["mission_id"] or len(raw["mission_id"]) > 160
+                        or raw["mission_id"] in contract_ids
+                        or str(raw.get("accepting_farm_id")) != str(farm_id)
+                        or raw.get("lifecycle") not in {"accepted", "finished_awaiting_collection"}):
+                    contracts_ready = False
+                    break
+                contract_ids.add(raw["mission_id"])
+                active_contracts.append({key: str(raw.get(key) or "")[:160] for key in
+                    ("mission_id", "mission_type", "field_id", "lifecycle", "finish_state", "accepting_farm_id")})
+        if not contracts_ready:
+            active_contracts = []
+            issues.append("Current native contract inventory unavailable; update mod/Agent and wait for a fresh assessment")
         if active_contracts:
-            issues.append(f"{len(active_contracts)} active native contract(s) may carry completion or cancellation liabilities")
+            issues.append(f"{len(active_contracts)} current native contract(s) require completion, collection or cancellation")
+        live_ids = {item["mission_id"] for item in active_contracts}
+        historical_contracts = [item for item in contract_observations
+                                if not contracts_ready or str(item.get("mission_id")) not in live_ids]
 
         asset_total = sum(totals.values(), Decimal(0))
         net = cash + asset_total - loan if cash is not None and loan is not None else None
@@ -215,6 +239,8 @@ class FarmAssessmentService:
                 "complete": complete, "rows": rows, "issues": issues,
                 "estimated_rows": sum("estimate" in row.get("basis", "") for row in rows),
                 "pending_operations": pending, "active_contracts": active_contracts,
+                "native_contract_inventory_ready": contracts_ready,
+                "historical_contract_observations": historical_contracts,
                 "garaged_vehicles": garage_stored}
 
 
@@ -242,6 +268,8 @@ def format_farm_assessment(report):
         lines.append(f"Balance after proposed credit: {_money(report['projected_wallet_balance'])}")
     if report["debt_shortfall"]:
         lines.append(f"Uncovered farm debt: {_money(report['debt_shortfall'])}")
+    if report.get("native_contract_inventory_ready"):
+        lines.append(f"Native contracts (live): {len(report['active_contracts'])} unresolved.")
     if report["issues"]:
         lines.append("**Incomplete — resolve before using a final settlement figure:**")
         lines.extend(f"• {_label(message, 140)}" for message in report["issues"][:4])
@@ -293,5 +321,10 @@ def assessment_csv(report):
     for contract in report["active_contracts"]:
         write("Active native contract", contract.get("mission_id") or contract.get("_id"),
               contract.get("field_id"), contract.get("lifecycle"))
+    write("Native contract inventory", "live complete" if report.get("native_contract_inventory_ready") else "unavailable",
+          report.get("observed_at"))
+    for contract in report.get("historical_contract_observations", []):
+        write("Historical contract observation; not proof of current liability",
+              contract.get("mission_id") or contract.get("_id"), contract.get("field_id"), contract.get("lifecycle"))
     write("Exclusions", "Vehicle/implement contents; loose bales/pallets; standing crops; forestry and ground heaps; operating fuel; sale/delivery fees")
     return stream.getvalue().encode("utf-8-sig")

@@ -57,6 +57,19 @@ have no proposed personal-account payout.
   Parking a loaded trailer or loose bale inside a shed does not register it
   as building stock. An unfamiliar registered storage with contents is flagged
   until its building association can be established.
+- **Bale & Pallet Storage:** native `PlaceableObjectStorage` contents are
+  eligible building stock. The mod serializes the live stored entries into a
+  temporary XML handle through the native storage serializer, reads each
+  object's `className`, `farmId`, `fillType` and actual `fillLevel`, and then
+  discards the handle without saving a file or spawning/removing anything.
+  Supported entries are native `Bale` and `Vehicle` (pallet/big-bag) records.
+  Contents are summed by building and fill type, with the object count in the
+  CSV notes. Partially filled bales/pallets contribute only their actual liters;
+  fill type is the current material, with no assumed future fermentation value.
+  Each object must belong to the building's farm. Mission bales receive zero
+  credit and an exclusion row. Unknown formats, unreadable ownership/amounts,
+  duplicate entries, inconsistent native counts or active unloading keep the
+  estimate incomplete. Loose objects outside the native storage remain excluded.
 - **Livestock:** owned barns' native `getClusters()` groups, with each group's
   `getNumAnimals()` multiplied by its current per-animal `getSellPrice()`.
   The native sale value reflects the live animal state; the report does not
@@ -75,9 +88,9 @@ have no proposed personal-account payout.
 
 As requested, standing crops are excluded. Forestry, ground heaps, vehicle
 operating fuel, sale fees, and delivery costs are outside this estimate.
-Bunker silos and nonempty bale/pallet object-storage buildings still require
-a separate inventory; those contents are flagged, never silently valued at
-zero. Ordinary registered building storage is supported. Native asset
+Bunker silos still require a separate inventory; their contents are flagged,
+never silently valued at zero. Ordinary registered building storage and native
+bale/pallet object storage are supported. Native asset
 saleability, actual disposal and any closing charges remain work for the future
 settlement process. This is an estimate of the listed assets, not a guaranteed
 offer from a buyer or an executable settlement quote.
@@ -92,8 +105,15 @@ inventory for this report.
 
 Unreadable cash/loan, missing categories, unidentified ownership, duplicate
 assets, missing prices, unresolved recipient mappings, and relevant pending
-cash/asset operations are listed. Accepted native contracts are also flagged
-for their possible completion or cancellation liabilities. A report with gaps shows known subtotals and
+cash/asset operations are listed. Native contract liabilities use the fresh
+in-game mission list, including preparing/running jobs and finished missions
+awaiting collection. A complete empty list confirms zero current liabilities.
+Stale accepted lifecycle events do not override that list; they remain labeled
+historical observations in the CSV, with no history deletion or invented
+completion/cancellation event. Missing or invalid live inventory keeps the
+estimate incomplete instead of treating it as zero contracts. This check uses
+the same two-minute source/receipt freshness requirements as the asset inventory.
+A report with gaps shows known subtotals and
 an unavailable proposed credit. Missing values are not substituted with zero.
 Assessment schema 2 explicitly declares `building_storage_only` stock scope.
 Older snapshots can show legacy known resale/land subtotals while awaiting the
@@ -103,11 +123,11 @@ updated mod and Agent, but cannot produce a payout figure under the new policy.
 
 - **JiN/core source:** adds the command, calculation and CSV renderer. Restart
   JiN from the updated release so its normal command sync registers the command.
-- **Agent:** parses the new inventory and carries its source timestamp in the
-  existing authenticated snapshot. It also includes the prepared rotating-log
-  changes. The updated restart/updater scripts include task recovery settings.
-- **FS25_SiN_Server 0.2.2.25:** restricts stock to building storage and adds
-  read-only livestock valuation. Install the
+- **Agent:** parses the assessment's complete live contract list, validates
+  count/identity/state and carries it with the existing source timestamp in the
+  authenticated snapshot. An older mod or malformed list is marked unavailable.
+- **FS25_SiN_Server 0.2.2.28:** includes native stored bale/pallet quantities
+  and the live mission list alongside building stock and livestock. Install the
   identical ZIP from `dist/FS25_SiN_Server.zip` on server and clients and reload
   FS25. Other gameplay mods do not need changing for this command.
 
@@ -122,6 +142,10 @@ The itemized observations live under `server_snapshots.farm_assessments` with
 `farm_assessment_ready` and `farm_assessment_observed_at`. The command performs
 database reads only and creates the CSV in memory. It does not retain a signed
 or locked quote; rerun it after assets, prices or debts change.
+Per-farm records now include `native_contract_inventory_ready` and
+`native_contracts`. Stored object rows use `storage:object:<building unique ID>:<fill type>`
+identities within the existing building-only stock scope. No database migration
+or lifecycle-event rewrite is needed.
 
 ## Validation status
 
@@ -130,7 +154,13 @@ but exposed loose-item enumeration as unavailable and livestock as unvalued.
 The revised building-only policy removes loose-item enumeration entirely.
 Native livestock getters and trailer resale behavior were checked against the
 installed FS25 SDK's `PlaceableHusbandryAnimals.lua` and `LivestockTrailer.lua`.
-Behavioral and in-game validation of this revision are pending. No live game or account values
+The stored-object serializer and mission list/getters were checked against the
+installed SDK's `PlaceableObjectStorage.lua`, `MissionManager.lua` and
+`AbstractMission.lua`; stored Bale/Vehicle fields were also confirmed from the
+operator's FS25 save. The native object serializer is documented in
+[GIANTS PlaceableObjectStorage](https://gdn.giants-software.com/documentation_scripting_fs25.php?category=78&class=751&version=script).
+Behavioral and in-game validation of the new stored-object/live-contract path
+are pending. No live game or account values
 have been changed by preparing this feature. After explicit deployment, compare
 an assessment with the selected farm's balance and loan, its native equipment
 sale values, buildings and parcel prices, and at least one known stock quantity
@@ -139,5 +169,11 @@ excluded, then unload into building storage and compare the resulting credit.
 Compare livestock counts and current prices with the native animal menu,
 including different ages, an empty barn, and a newborn with a zero sale price.
 Review any coverage gaps before treating its net as a closing figure.
+For object storage, compare actual liters with the storage menu/save (including
+a partial bale/pallet), check an empty storage, and confirm mission/foreign
+contents are not credited. For native contracts, compare zero active missions,
+a running mission, and a finished mission awaiting collection; an old accepted
+event absent from the live list must remain historical without blocking the
+preview. Stop any storage unloading before requesting the final estimate.
 Verify the recipient and that the current SiN balance is displayed once, then
 confirm both assets and balances are unchanged after requesting the report.

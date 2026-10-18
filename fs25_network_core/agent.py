@@ -543,6 +543,29 @@ class PairingAgent:
                             "loan": number(node, "loan"), "assets": rows,
                             "issues": [item.get("message", "")[:400]
                                        for item in node.findall("./issues/issue")][:1000]}
+                        # Zero is authoritative only with an explicit complete
+                        # native list. A missing/invalid list never clears an
+                        # older accepted-contract observation.
+                        contracts = []
+                        contracts_ready = node.get("nativeContractInventoryReady") == "true"
+                        try:
+                            seen_contracts = set()
+                            for contract in node.findall("./nativeContracts/contract"):
+                                item = {key: contract.get(key, "") for key in
+                                        ("mission_id", "mission_type", "field_id", "lifecycle", "finish_state")}
+                                if (not item["mission_id"] or any(len(value) > 160 for value in item.values())
+                                        or item["mission_id"] in seen_contracts or len(contracts) >= 5000
+                                        or item["lifecycle"] not in {"accepted", "finished_awaiting_collection"}):
+                                    raise ValueError("invalid native contract inventory")
+                                seen_contracts.add(item["mission_id"])
+                                item["accepting_farm_id"] = farm_key
+                                contracts.append(item)
+                            if int(node.get("nativeContractCount", "-1")) != len(contracts):
+                                raise ValueError("native contract inventory count mismatch")
+                        except (ValueError, TypeError, OverflowError):
+                            contracts, contracts_ready = [], False
+                        assessments[farm_key]["native_contract_inventory_ready"] = contracts_ready
+                        assessments[farm_key]["native_contracts"] = contracts
                     except (ValueError, TypeError, OverflowError):
                         assessments[farm_key] = {"schema_version": 1, "assets": [],
                                                  "issues": ["Assessment inventory is invalid or incomplete"]}
