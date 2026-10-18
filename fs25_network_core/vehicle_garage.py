@@ -313,8 +313,10 @@ class VehicleGarageService:
         return result
 
     def list_for(self, owner):
+        # The garage is retained inventory and unresolved custody, not an
+        # attempt history. Failed stores remain available in the audit data.
         return list(self.db.vehicle_garage.find({"owner_discord_id": str(owner),
-                    "state": {"$ne": "retrieved"}}).sort("created_at", -1).limit(100))
+                    "state": {"$nin": ["failed", "retrieved"]}}).sort("created_at", -1).limit(100))
 
     def _notice(self, item, text, session=None):
         ActivityOutbox(self.database).enqueue("garage:" + item["_id"] + ":" + text,

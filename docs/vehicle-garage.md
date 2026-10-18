@@ -13,7 +13,7 @@ They declare Administrator as their default Discord command permission.
 | Command | Use |
 | --- | --- |
 | `/vehicle_garage_store_admin server:<server> vehicle_code:<code> reason:<text>` | Queue storage of one live owned vehicle. The source farm and its canonical account owner are resolved automatically. |
-| `/vehicle_garage_admin member:<Discord user> [page:1]` | Inspect that account's retained vehicles and pending/failed/review operations. Ten rows per page, up to 100 recent records; pages 1-10. |
+| `/vehicle_garage_admin member:<Discord user> [page:1]` | Inspect that account's retained vehicles and pending/review operations. Failed stores and completed retrievals are excluded. Ten rows per page, up to 100 recent records; pages 1-10. |
 | `/vehicle_garage_retrieve_admin destination_server:<server> destination_farm:<farm picker> vehicle_code:<code> reason:<text>` | Restore a stored vehicle to an owned farm on the original server/world, at the shop. The destination farm must belong to the same account holder. |
 
 Reasons are required, 1-200 characters. Codes retain their permanent SiN
@@ -59,7 +59,11 @@ this first path. Behavior of custom specializations still needs game validation.
 
 `failed` records are separate attempts, not additional stored copies. A
 definitively failed store retains the live source vehicle and releases that
-attempt's custody lock. Correct the reported condition before a new request.
+attempt's custody lock. They are excluded from `/vehicle_garage_admin`; failure
+and success notices update the original store/retrieve command's private reply
+while that interaction remains available. The records remain in the database
+for audit. Correct the reported condition before a new request. Pending states
+and `review_required` remain visible because their custody is unresolved.
 
 `detach all attached vehicles first` rejects an attached combination. A
 `vehicle changed after archiving` rejection means the second native save-state
@@ -69,9 +73,9 @@ Keep it detached, parked, empty of occupants, with engine and AI stopped.
 Server mod **0.2.2.27** names the changed XML field in the receipt and logs
 `[SiN Vehicle Garage] state changed` with archived/current values. It preserves
 the comparison checks; an unexplained mismatch still requires investigation.
-The garage list removes Lua source-location prefixes from historical failures
+Failure notices and garage review notes remove Lua source-location prefixes
 before limiting their length. Long pages use multiple private channel replies
-so the last failure reasons are not silently cut off.
+so the last review reasons are not silently cut off.
 
 On the Windows game host, inspect mismatch details from the server's game log
 (substitute its path if different):

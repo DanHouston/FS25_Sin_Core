@@ -1925,11 +1925,11 @@ class NetworkBot(discord.Client):
             await interaction.response.defer(ephemeral=True)
             item = await asyncio.to_thread(self.vehicle_garage.store, str(interaction.id),
                                           str(interaction.user.id), server, vehicle_code, reason)
-            await interaction.followup.send(
+            await interaction.edit_original_response(content=(
                 f"Garage storage for `{item['vehicle_code']}` queued for the farm owner's account. "
                 "The game must archive the vehicle, confirm its removal, and save that removal before it is stored. "
                 "Wait for garage status **stored** before decommissioning the farm. "
-                "This private reply will update with the final result while available.", ephemeral=True)
+                "This private reply will update with the final result while available."))
             self.remember_transfer_interaction("garage:" + item["_id"], interaction)
 
         @vehicle_garage_store_admin.autocomplete("server")
@@ -1954,7 +1954,7 @@ class NetworkBot(discord.Client):
                 name = discord.utils.escape_markdown(str(item.get("name") or "Vehicle")[:65])
                 entry = f"`{item['vehicle_code']}` {name} — **{item['state']}** ({item['server_key']})"
                 note = (item.get("last_receipt") or {}).get("receipt")
-                if note and item["state"] in {"review_required", "failed"}:
+                if note and item["state"] == "review_required":
                     entry += "\n" + discord.utils.escape_markdown(garage_receipt_reason(note))
                 if len(message) + len(entry) + 1 > 1950:
                     messages.append(message)
@@ -1980,10 +1980,10 @@ class NetworkBot(discord.Client):
             await interaction.response.defer(ephemeral=True)
             item = await asyncio.to_thread(self.vehicle_garage.retrieve, str(interaction.id),
                 str(interaction.user.id), vehicle_code, destination_server, destination_farm, reason)
-            await interaction.followup.send(
+            await interaction.edit_original_response(content=(
                 f"Garage retrieval for `{item['vehicle_code']}` queued. It completes after the game "
                 "confirms the restored vehicle at the shop and saves it. The archive remains held until then. "
-                "This private reply will update with the result while available.", ephemeral=True)
+                "This private reply will update with the result while available."))
             self.remember_transfer_interaction("garage:" + item["_id"], interaction)
 
         @vehicle_garage_retrieve_admin.autocomplete("destination_server")
