@@ -75,10 +75,22 @@ function Set-AgentTaskAction {
         $currentExecute -ieq $expectedExecute -and
         [string]$currentActions[0].Arguments -ceq $arguments -and
         $currentWorkingDirectory -ieq $expectedWorkingDirectory
-    if ($actionMatches) { return }
+    $settings = $task.Settings
+    $settingsMatch = $settings.RestartCount -eq 5 -and
+        $settings.RestartInterval -eq 'PT1M' -and
+        $settings.ExecutionTimeLimit -eq 'PT0S' -and
+        [int]$settings.MultipleInstances -eq 2
+    if ($actionMatches -and $settingsMatch) { return }
+
+    # Preserve identity, triggers, and other settings. Watch processes run
+    # indefinitely; failed exits get bounded automatic recovery.
+    $settings.RestartCount = 5
+    $settings.RestartInterval = 'PT1M'
+    $settings.ExecutionTimeLimit = 'PT0S'
+    $settings.MultipleInstances = 2 # TASK_INSTANCES_IGNORE_NEW
 
     try {
-        Set-ScheduledTask -TaskName $AgentTaskName -Action $action -ErrorAction Stop | Out-Null
+        Set-ScheduledTask -TaskName $AgentTaskName -Action $action -Settings $settings -ErrorAction Stop | Out-Null
     } catch {
         $principal = $task.Principal
         throw "Could not update the Agent scheduled-task action for '$($principal.UserId)' (logon type $($principal.LogonType)): $($_.Exception.Message). The task's saved Windows credentials may need to be refreshed in Task Scheduler."

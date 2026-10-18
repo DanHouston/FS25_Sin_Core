@@ -74,7 +74,13 @@ function Start-AgentTask {
     $arguments = '-m fs25_network_core.agent --watch --backend-url "{0}" --mailbox-dir "{1}" --interval {2}' -f `
         $ApiUrl, $MailboxDir, $PollInterval
     $action = New-ScheduledTaskAction -Execute $python -Argument $arguments -WorkingDirectory $AgentRoot
-    Set-ScheduledTask -TaskName $AgentTaskName -Action $action -ErrorAction Stop | Out-Null
+    $task = Get-AgentTask
+    $settings = $task.Settings
+    $settings.RestartCount = 5
+    $settings.RestartInterval = 'PT1M'
+    $settings.ExecutionTimeLimit = 'PT0S'
+    $settings.MultipleInstances = 2 # TASK_INSTANCES_IGNORE_NEW
+    Set-ScheduledTask -TaskName $AgentTaskName -Action $action -Settings $settings -ErrorAction Stop | Out-Null
     Start-ScheduledTask -TaskName $AgentTaskName -ErrorAction Stop
     Start-Sleep -Seconds 3
     $task = Get-ScheduledTask -TaskName $AgentTaskName -ErrorAction Stop

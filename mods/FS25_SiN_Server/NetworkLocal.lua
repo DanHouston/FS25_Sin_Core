@@ -497,6 +497,11 @@ end
 
 function FS25SiNServer:loadMap()
     FS25SiNVehicleCodes = {}
+    FS25SiNVehicleCodesByNetworkId = {}
+    self.vehicleCodesReceived = false
+    self.vehicleCodesRequestElapsed = 5000
+    self.vehicleNameHookElapsed = 0
+    self.vehicleNameCoverageSignature = nil
     self.elapsed = 0
     self.fieldMarkerElapsed = 0
     self.fieldMarkerRefreshInterval = 1000
@@ -596,6 +601,7 @@ function FS25SiNServer:loadMap()
     addConsoleCommand("sinSelfTest", "Report read-only SiN runtime integration checks", "consoleCommandSelfTest", self)
     addConsoleCommand("sinFarmland", "Report authoritative owner for a farmland ID", "consoleCommandFarmland", self)
     addConsoleCommand("sinEconomy", "Read-only FS25 farm money, loan, and farmland-price capability probe", "consoleCommandEconomy", self)
+    addConsoleCommand("sinBankFinance", "Admin: read-only native finance schema and report probe", "consoleCommandBankFinance", self)
     addConsoleCommand("sinWorld", "Report the current FS25 save-backed SiN world identity", "consoleCommandWorld", self)
     addConsoleCommand("sinPair", "Pair this server with a SiN pairing code", "consoleCommandPair", self)
     if g_messageCenter ~= nil and MessageType ~= nil and MessageType.PLAYER_FARM_CHANGED ~= nil then
@@ -676,7 +682,7 @@ function FS25SiNServer:queueFinanceObservation(farmId, moneyType, before, after)
     local category = moneyType ~= nil and self.financeCategoryByMoneyType ~= nil
         and self.financeCategoryByMoneyType[moneyType] or nil
     if category == nil and type(moneyType) == "table" then
-        category = moneyType.statsName or moneyType.name or moneyType.id
+        category = moneyType.statistic or moneyType.statsName or moneyType.name or moneyType.id
     end
     if category == nil and (type(moneyType) == "string" or type(moneyType) == "number") then
         category = moneyType
@@ -1053,29 +1059,144 @@ function FS25SiNServer:loadManagerAuthority()
     return authorized, contractors, true
 end
 
-function FS25SiNServer:installVehicleCodeNameHook()
-    if Vehicle == nil or type(Vehicle.getName) ~= "function" then return false end
-    if self.vehicleNameOriginal ~= nil and Vehicle.getName == self.vehicleNameWrapper then return true end
-    local original = Vehicle.getName
-    local wrapper = function(vehicle, ...)
-        local name = original(vehicle, ...)
-        local uniqueId = nil
-        if vehicle ~= nil and type(vehicle.getUniqueId) == "function" then
-            local ok, value = pcall(vehicle.getUniqueId, vehicle)
-            if ok and value ~= nil then uniqueId = tostring(value) end
-        end
-        local code = uniqueId ~= nil and FS25SiNVehicleCodes ~= nil
-            and FS25SiNVehicleCodes[uniqueId] or nil
-        if type(name) == "string" and type(code) == "string"
-            and not string.match(name, "^%[" .. code .. "%]") then
-            return "[" .. code .. "] " .. name
-        end
-        return name
+function FS25SiNServer:getVehicleDisplayCode(vehicle)
+    if vehicle == nil then return nil end
+    if NetworkUtil ~= nil and type(NetworkUtil.getObjectId) == "function" then
+        local ok, objectId = pcall(NetworkUtil.getObjectId, vehicle)
+        local code = ok and FS25SiNVehicleCodesByNetworkId ~= nil
+            and FS25SiNVehicleCodesByNetworkId[objectId] or nil
+        if type(code) == "string" then return code end
     end
-    Vehicle.getName = wrapper
-    self.vehicleNameOriginal, self.vehicleNameWrapper = original, wrapper
-    Logging.info("[SiN Vehicle Codes] installed display-name prefix hook")
-    return true
+    -- Savegame uniqueIds are not sent in the native Vehicle streams. Clients
+    -- generate their own IDs; only the shared network object ID is usable there.
+    local remoteClient = g_currentMission ~= nil
+        and type(g_currentMission.getIsServer) == "function"
+        and not g_currentMission:getIsServer()
+    if not remoteClient and type(vehicle.getUniqueId) == "function" then
+        local ok, uniqueId = pcall(vehicle.getUniqueId, vehicle)
+        return ok and FS25SiNVehicleCodes ~= nil and FS25SiNVehicleCodes[uniqueId] or nil
+    end
+    return nil
+end
+
+function FS25SiNServer:prefixVehicleCodeName(vehicle, name)
+    local code = self:getVehicleDisplayCode(vehicle)
+    if type(name) ~= "string" or type(code) ~= "string" then return name end
+    local prefix = "[" .. code .. "] "
+    if string.sub(name, 1, #prefix) == prefix then return name end
+    -- getFullName prepends the brand to getName. Move the existing code in
+    -- that result to the front instead of displaying it twice.
+    local start = string.find(name, prefix, 1, true)
+    if start ~= nil then
+        name = string.sub(name, 1, start - 1) .. string.sub(name, start + #prefix)
+    end
+    return prefix .. name
+end
+
+function FS25SiNServer:installVehicleCodeNameHook()
+    -- Vehicle methods are registered onto each vehicle type by
+    -- SpecializationUtil. Replacing Vehicle.getName alone can leave the
+    -- already-created type classes calling their copied, original function.
+    -- Hook both the base class and concrete types; update() retries this as
+    -- mod vehicle types become available during map loading.
+    self.vehicleNameWrappers = self.vehicleNameWrappers or setmetatable({}, {__mode="k"})
+    local hooked = 0
+    local function hookClass(class)
+        if type(class) ~= "table" then return end
+        for _, method in ipairs({"getName", "getFullName"}) do
+            local original = class[method]
+            if type(original) == "function" and not self.vehicleNameWrappers[original] then
+                local wrapper = function(vehicle, ...)
+                    return self:prefixVehicleCodeName(vehicle, original(vehicle, ...))
+                end
+                class[method] = wrapper
+                self.vehicleNameWrappers[wrapper] = true
+                hooked = hooked + 1
+            end
+        end
+    end
+
+    hookClass(Vehicle)
+    local manager = g_vehicleTypeManager
+    if manager ~= nil and type(manager.getTypes) == "function" then
+        local ok, types = pcall(manager.getTypes, manager)
+        if ok and type(types) == "table" then
+            for _, typeEntry in pairs(types) do
+                -- TypeManager entries hold registered instance methods in
+                -- .functions; they are not methods on the entry itself.
+                if type(typeEntry) == "table" then hookClass(typeEntry.functions) end
+            end
+        end
+    end
+
+    -- FS25 keeps live vehicles on VehicleSystem, not mission.vehicles.
+    local mission = g_currentMission
+    local system = mission ~= nil and mission.vehicleSystem or nil
+    if system ~= nil and type(system.vehicles) == "table" then
+        local count, coded, prefixed, sample = 0, 0, 0, ""
+        for _, vehicle in pairs(system.vehicles) do
+            if type(vehicle) == "table" then
+                hookClass(vehicle)
+                count = count + 1
+                local code = self:getVehicleDisplayCode(vehicle)
+                if code ~= nil then
+                    coded = coded + 1
+                    local getName = vehicle.getFullName or vehicle.getName
+                    if type(getName) == "function" then
+                        local ok, name = pcall(getName, vehicle)
+                        if ok and type(name) == "string"
+                            and string.sub(name, 1, #code + 3) == "[" .. code .. "] " then
+                            prefixed = prefixed + 1
+                            if sample == "" then sample = name end
+                        end
+                    end
+                end
+            end
+        end
+        local signature = tostring(count) .. ":" .. tostring(coded) .. ":" .. tostring(prefixed)
+        if count > 0 and signature ~= self.vehicleNameCoverageSignature then
+            self.vehicleNameCoverageSignature = signature
+            Logging.info("[SiN Vehicle Codes] display coverage vehicles=%d coded=%d prefixed=%d sample=%s",
+                count, coded, prefixed, sample)
+        end
+    end
+    if hooked > 0 then
+        Logging.info("[SiN Vehicle Codes] installed display-name prefix hook classes=%d", hooked)
+    end
+    return hooked > 0
+end
+
+function FS25SiNServer:updateVehicleCodeSync(dt)
+    if g_currentMission == nil or not g_currentMission:getIsClient()
+        or g_currentMission:getIsServer() then return end
+    self.vehicleCodesRequestElapsed = (self.vehicleCodesRequestElapsed or 5000) + dt
+    local interval = self.vehicleCodesReceived == true and 30000 or 5000
+    if self.vehicleCodesRequestElapsed >= interval then
+        self.vehicleCodesRequestElapsed = 0
+        if SiNVehicleCodesRequestEvent.sendEvent() and not self.vehicleCodesRequestLogged then
+            self.vehicleCodesRequestLogged = true
+            Logging.info("[SiN Vehicle Codes] requested authoritative vehicle codes from server")
+        end
+    end
+end
+
+function FS25SiNServer:getVehicleCodeNetworkProjection()
+    if type(self.vehicleCodesProjection) ~= "table"
+        or self.vehicleCodesWorldId ~= tostring(self.worldId or "") then return nil end
+    local system = g_currentMission ~= nil and g_currentMission.vehicleSystem or nil
+    if system == nil or type(system.getVehicleByUniqueId) ~= "function"
+        or NetworkUtil == nil or type(NetworkUtil.getObjectId) ~= "function" then return nil end
+    local rows = {}
+    for _, row in ipairs(self.vehicleCodesProjection) do
+        local vehicle = system:getVehicleByUniqueId(row.uniqueId)
+        if vehicle ~= nil and not vehicle.isDeleted then
+            local objectId = NetworkUtil.getObjectId(vehicle)
+            if type(objectId) == "number" and objectId > 0 then
+                table.insert(rows, {uniqueId=row.uniqueId, code=row.code, networkId=objectId})
+            end
+        end
+    end
+    return rows
 end
 
 function FS25SiNServer:loadVehicleCodes()
@@ -1110,15 +1231,19 @@ function FS25SiNServer:loadVehicleCodes()
     self.vehicleCodesWorldId = worldId
     self.vehicleCodesProjection = vehicles
     FS25SiNVehicleCodes = codesByUniqueId
-    if g_server ~= nil then SiNVehicleCodesEvent.broadcast(worldId, vehicles) end
+    if g_server ~= nil then
+        local projection = self:getVehicleCodeNetworkProjection()
+        if projection ~= nil then SiNVehicleCodesEvent.broadcast(worldId, projection) end
+    end
     return true
 end
 
 function FS25SiNServer:sendVehicleCodes(connection)
-    if connection == nil or type(self.vehicleCodesProjection) ~= "table"
-        or self.vehicleCodesWorldId ~= tostring(self.worldId or "") then return false end
+    if connection == nil then return false end
+    local projection = self:getVehicleCodeNetworkProjection()
+    if projection == nil then return false end
     return SiNVehicleCodesEvent.sendToClient(connection, self.vehicleCodesWorldId,
-        self.vehicleCodesProjection)
+        projection)
 end
 
 function FS25SiNServer:readFarmManagerState(farm, userId)
@@ -2363,7 +2488,12 @@ function FS25SiNServer:consoleCommandSelfTest()
 end
 
 function FS25SiNServer:update(dt)
-    if g_currentMission ~= nil then self:installVehicleCodeNameHook() end
+    self.vehicleNameHookElapsed = (self.vehicleNameHookElapsed or 0) + dt
+    if g_currentMission ~= nil and self.vehicleNameHookElapsed >= 1000 then
+        self.vehicleNameHookElapsed = 0
+        self:installVehicleCodeNameHook()
+    end
+    self:updateVehicleCodeSync(dt)
 	if g_currentMission ~= nil and type(g_currentMission.getIsClient) == "function"
         and g_currentMission:getIsClient() then
         self:installIngameMapHotspotHook()
@@ -3156,6 +3286,15 @@ end
 -- The central side reserves/credits only after this receipt proves both the
 -- native mutation and the resulting farm balance.  Farm:changeBalance is the
 -- native server-side API; do not fall back to an unscoped client call.
+local function sinBankMiscValue(farm)
+    local stats = farm ~= nil and farm.stats or nil
+    local finances = stats ~= nil and stats.finances or nil
+    local value = finances ~= nil and finances.other or nil
+    if type(value) == "number" and value == value
+        and value ~= math.huge and value ~= -math.huge then return value end
+    return nil
+end
+
 function FS25SiNServer:processMoneyCommand(command, operationId, operationType)
     local farmId = command:getString("networkLocalCommand#farm_id")
     local farmIdNumber = tonumber(farmId)
@@ -3174,6 +3313,15 @@ function FS25SiNServer:processMoneyCommand(command, operationId, operationType)
     local mutationPerformed = false
     local authoritativeReadback = false
     local after = nil
+    local moneyType = type(MoneyType) == "table" and MoneyType.OTHER or nil
+    local financeBefore = sinBankMiscValue(farm)
+    local financeAfter = nil
+    local financeReadback = false
+
+    -- Do not move cash if a receipt cannot even be allocated. The dispatcher
+    -- continues to own the existing world and receipt replay checks.
+    local receipt = XMLFile.create("networkLocalMoneyReceipt", self.receiptDirectory .. operationId .. ".xml", "networkLocalReceipt")
+    if receipt == nil then return end
 
     if g_currentMission == nil or not g_currentMission:getIsServer() then
         status = "definitively_not_applied"
@@ -3193,32 +3341,53 @@ function FS25SiNServer:processMoneyCommand(command, operationId, operationType)
     elseif type(farm.changeBalance) ~= "function" then
         status = "definitively_not_applied"
         reason = "FS25 farm balance mutation API unavailable"
+    elseif type(moneyType) ~= "table" or moneyType.statistic ~= "other" or financeBefore == nil then
+        status = "definitively_not_applied"
+        reason = "native Misc finance category unavailable; no money changed"
     else
         delta = operationType == "deposit_funds" and -amount or amount
-        local ok, errorMessage = pcall(farm.changeBalance, farm, delta)
-        mutationPerformed = ok
+        -- Native FS25 changeBalance accepts a MoneyType. Its single mutation
+        -- owns cash and finance booking; never call a second money/stat writer
+        -- to repair a missing or uncertain finance readback.
+        local ok, errorMessage = pcall(farm.changeBalance, farm, delta, moneyType)
+        if type(farm.getBalance) == "function" then
+            local balanceOk, balanceValue = pcall(farm.getBalance, farm)
+            if balanceOk then after = tonumber(balanceValue) end
+        end
+        financeAfter = sinBankMiscValue(farm)
+        local expected = before + delta
+        authoritativeReadback = after ~= nil and math.abs(after - expected) < 0.01
+        financeReadback = financeAfter ~= nil and math.abs(financeAfter - (financeBefore + delta)) < 0.01
+        mutationPerformed = ok or (after ~= nil and after ~= before)
         if not ok then
-            status = "definitively_not_applied"
-            reason = "FS25 farm balance mutation failed: " .. tostring(errorMessage)
-        else
-            if type(farm.getBalance) == "function" then
-                local balanceOk, balanceValue = pcall(farm.getBalance, farm)
-                if balanceOk then after = tonumber(balanceValue) end
+            -- A native call can throw after changing cash. Only prove failure
+            -- when both observed values are unchanged; otherwise reconcile.
+            if after ~= nil and after == before and financeAfter == financeBefore then
+                status = "definitively_not_applied"
+                reason = "FS25 farm balance mutation failed with unchanged balance and Misc: " .. tostring(errorMessage)
+            else
+                status = "pending_validation"
+                reason = "FS25 money call failed after an uncertain change; reconciliation required: " .. tostring(errorMessage)
             end
-            local expected = before + delta
-            authoritativeReadback = after ~= nil and math.abs(after - expected) < 0.01
+        else
             if authoritativeReadback then
                 status = "applied"
-                reason = "FS25 farm balance changed and was verified"
+                reason = financeReadback and "FS25 farm balance and Misc finance entry verified"
+                    or "FS25 farm balance verified; Misc finance entry could not be verified"
             else
                 status = "pending_validation"
                 reason = "FS25 farm balance readback did not match requested change"
             end
         end
+        Logging.info("[SiN Bank Finance] operation=%s farmId=%s delta=%s category=other before=%s after=%s financeReadback=%s balanceReadback=%s status=%s",
+            tostring(operationId), tostring(farmIdNumber), tostring(delta), tostring(financeBefore),
+            tostring(financeAfter), tostring(financeReadback), tostring(authoritativeReadback), status)
+        if not financeReadback then
+            Logging.warning("[SiN Bank Finance] Misc booking unverified operation=%s; no automatic replay or second writer attempted",
+                tostring(operationId))
+        end
     end
 
-    local receipt = XMLFile.create("networkLocalMoneyReceipt", self.receiptDirectory .. operationId .. ".xml", "networkLocalReceipt")
-    if receipt == nil then return end
     receipt:setString("networkLocalReceipt#operation_id", operationId)
     receipt:setString("networkLocalReceipt#operation_type", operationType)
     receipt:setString("networkLocalReceipt#server_id", command:getString("networkLocalCommand#server_id"))
@@ -3232,6 +3401,10 @@ function FS25SiNServer:processMoneyCommand(command, operationId, operationType)
     receipt:setString("networkLocalReceipt#after_balance", after ~= nil and tostring(after) or "")
     receipt:setBool("networkLocalReceipt#mutation_performed", mutationPerformed)
     receipt:setBool("networkLocalReceipt#authoritative_readback", authoritativeReadback)
+    receipt:setString("networkLocalReceipt#finance_category", "other")
+    receipt:setString("networkLocalReceipt#finance_before", financeBefore ~= nil and tostring(financeBefore) or "")
+    receipt:setString("networkLocalReceipt#finance_after", financeAfter ~= nil and tostring(financeAfter) or "")
+    receipt:setBool("networkLocalReceipt#finance_readback", financeReadback)
     receipt:setString("networkLocalReceipt#status", status)
     receipt:setString("networkLocalReceipt#receipt", reason)
     self:setReceiptWorldId(receipt, "networkLocalReceipt")
@@ -4263,6 +4436,18 @@ function FS25SiNServer:exportSnapshot()
             end
         end
     end
+    if type(self.exportFarmAssessments) == "function" then
+        local assessmentOk, assessmentError = pcall(self.exportFarmAssessments, self, xml)
+        if not assessmentOk then
+            xml:setBool("networkLocal#farmAssessmentReady", false)
+            if not self.farmAssessmentErrorLogged then
+                Logging.warning("[SiN Farm Assessment] inventory unavailable: %s", tostring(assessmentError))
+                self.farmAssessmentErrorLogged = true
+            end
+        else
+            self.farmAssessmentErrorLogged = false
+        end
+    end
     xml:save()
     xml:delete()
     if self.sequence == 1 then
@@ -4290,6 +4475,7 @@ function FS25SiNServer:deleteMap()
     removeConsoleCommand("sinSelfTest")
     removeConsoleCommand("sinFarmland")
     removeConsoleCommand("sinEconomy")
+    removeConsoleCommand("sinBankFinance")
     removeConsoleCommand("sinWorld")
     if g_messageCenter ~= nil and MessageType ~= nil and MessageType.PLAYER_FARM_CHANGED ~= nil then
         g_messageCenter:unsubscribe(MessageType.PLAYER_FARM_CHANGED, self)

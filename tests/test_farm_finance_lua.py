@@ -62,6 +62,17 @@ class FinanceHookLuaTests(unittest.TestCase):
         self.assertEqual(lua.eval("FS25SiNServer.financePending[1].values.money_type"),
                          "PURCHASE_SEEDS")
 
+    def test_late_registered_money_type_uses_deployed_native_statistic_field(self):
+        lua = runtime()
+        lua.execute(r'''
+            MoneyType = {OTHER={id=1, statistic="other", title="finance_other"}}
+            FS25SiNServer:installFinanceObservationHook()
+            -- Types registered after hook installation are not in its enum map.
+            g_currentMission:addMoney(-10, 2,
+                {id=40, statistic="other", title="sin_bankDeposit"})
+        ''')
+        self.assertEqual(lua.eval("FS25SiNServer.financePending[1].values.money_type"), "other")
+
     def test_reinstalls_after_another_mod_wraps_money_method_without_double_count(self):
         lua = runtime()
         lua.execute(r'''

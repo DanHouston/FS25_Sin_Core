@@ -188,6 +188,44 @@ Get-ScheduledTask -TaskName $Deployment.agent_task_name | Select-Object TaskName
 Update and publish server/client mod ZIPs separately using the manual mod
 workflow below, only when you intend to deploy a game-mod change.
 
+### Agent exits or registration stalls
+
+The Agent now saves timestamped output to `<agent_root>\logs\agent.log`
+(normally `C:\SiN\Agent\logs\agent.log`). Each file rotates at 5 MiB and
+five older files are retained. `--log-file` or `SIN_AGENT_LOG_FILE` can override
+the path. A log-file permission error is reported to the console and does not
+stop mailbox processing. Fatal exit diagnostics record stack locations,
+exception types, and HTTP/OS error codes without dumping mailbox XML.
+
+The updater and restart script configure the existing scheduled task to retry
+a failed exit up to five times at one-minute intervals, permit an unlimited
+execution duration, and ignore overlapping starts. Its identity and triggers
+are preserved. These settings recover exited processes; a task that is still
+running but stuck requires investigation. Persistent failure after the retry
+limit also requires operator attention.
+
+Run on the Windows FS25 host after deploying the updated Agent and launcher:
+
+```powershell
+$Deployment = Get-Content 'C:\SiN\deployment.json' -Raw | ConvertFrom-Json
+Get-ScheduledTask -TaskName $Deployment.agent_task_name | Select-Object TaskName,State
+Get-ScheduledTaskInfo -TaskName $Deployment.agent_task_name |
+    Select-Object LastRunTime,LastTaskResult
+Get-Content -LiteralPath (Join-Path $Deployment.agent_root 'logs\agent.log') -Tail 80
+```
+
+A pending registration request with no delivered response can leave the game
+registration check moving the player to spectator. Restoring delivery should
+allow registration to complete; verify the player can remain in the farm.
+An `INFO` line wrapped as PowerShell `NativeCommandError` is not evidence of a
+Python failure: Python's console logger writes to stderr.
+
+During foreground diagnosis, keep only one Agent running. Stop the foreground
+Agent before handing back to Task Scheduler. Retain pending and `.failed`
+mailbox files. Successful event acknowledgements remove only their accepted
+files; this is normal backlog draining. A failed file may need separate review
+and is not automatically replayed by restarting the Agent.
+
 The canonical FS25 mailbox must be:
 
 ```text

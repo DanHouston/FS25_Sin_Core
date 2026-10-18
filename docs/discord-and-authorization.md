@@ -175,6 +175,13 @@ automatic channel creation or background posting occurs.
 The bot responds privately to commands. Staff inspects the request queue with
 /farm_requests; requests are not automatically posted to a channel.
 
+Staff can use `/farm_assess_admin server:<server> farm:<owner/farm name>` in
+the staff channel for a private, itemized closure estimate. It reports cash,
+loan, land/building/equipment values, harvested inventory, and the proposed SiN
+account credit. See [farm closure assessment](farm-closure-assessment.md) for
+the calculation and valuation gaps. This command performs no settlement or
+farm deletion.
+
 Retired #link-account, #bank, #sin-applications, #farm-approvals, and
 #bank-reconciliation channels are not routing dependencies. Role and guild-wide
 channel IDs live in `discord.json`; per-server chat IDs live in Central. Optional

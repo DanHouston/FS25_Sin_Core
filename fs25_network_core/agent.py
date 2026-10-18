@@ -5,9 +5,12 @@ import hashlib
 import heapq
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import math
 import os
 import time
+import traceback
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -288,7 +291,9 @@ class PairingAgent:
         return {"body": text[:240]}
 
     def _snapshot_payload(self):
-        root = ElementTree.parse(self.directory / "snapshot.xml").getroot()
+        snapshot_path = self.directory / "snapshot.xml"
+        snapshot_stat = snapshot_path.stat()
+        root = ElementTree.parse(snapshot_path).getroot()
         if root.tag != "networkLocal" or root.get("source") != "game":
             raise ValueError("invalid game snapshot")
         farms = {}
@@ -403,6 +408,58 @@ class PairingAgent:
                 "farmland_price_source_ready": root.get("farmlandPriceSourceReady") == "true",
                 "vehicle_inventory_ready": vehicle_inventory_ready,
                 "vehicles": vehicles}
+        assessments = {}
+        assessment_ready = (root.get("farmAssessmentReady") == "true"
+                            and snapshot_path.stat().st_mtime_ns == snapshot_stat.st_mtime_ns)
+        if assessment_ready:
+            def number(node, key, *, negative=False):
+                raw = node.get(key)
+                if raw is None:
+                    return None
+                value = float(raw)
+                if not math.isfinite(value) or (not negative and value < 0):
+                    raise ValueError("invalid assessment number")
+                return value
+
+            total_rows = 0
+            try:
+                for node in root.findall("./farmAssessments/farm"):
+                    farm_key = str(int(node.get("farmId", "0")))
+                    if farm_key not in farms or farm_key in assessments:
+                        raise ValueError("invalid assessment farm")
+                    try:
+                        rows = []
+                        for asset in node.findall("./assets/asset"):
+                            total_rows += 1
+                            if len(rows) >= 10000 or total_rows > 50000:
+                                raise ValueError("assessment inventory exceeds safe limit")
+                            row = {key: asset.get(key, "")[:400] for key in
+                                   ("kind", "id", "name", "location", "unit", "basis", "note")}
+                            if row["kind"] not in {"stock", "equipment", "building", "land", "excluded"}:
+                                raise ValueError("invalid assessment asset category")
+                            for key in ("quantity", "unitPrice", "value"):
+                                row[key] = number(asset, key)
+                            rows.append(row)
+                        if int(node.get("assetCount", "-1")) != len(rows):
+                            raise ValueError("assessment inventory count mismatch")
+                        assessments[farm_key] = {
+                            "schema_version": 1, "cash": number(node, "cash", negative=True),
+                            "loan": number(node, "loan"), "assets": rows,
+                            "issues": [item.get("message", "")[:400]
+                                       for item in node.findall("./issues/issue")][:1000]}
+                    except (ValueError, TypeError, OverflowError):
+                        assessments[farm_key] = {"schema_version": 1, "assets": [],
+                                                 "issues": ["Assessment inventory is invalid or incomplete"]}
+                if int(root.get("farmAssessmentCount", "-1")) != len(assessments):
+                    raise ValueError("assessment farm count mismatch")
+            except (ValueError, TypeError, OverflowError):
+                assessment_ready = False
+                assessments = {}
+        payload["farm_assessments"] = assessments
+        payload["farm_assessment_ready"] = assessment_ready
+        payload["farm_assessment_observed_at"] = (
+            datetime.fromtimestamp(snapshot_stat.st_mtime, timezone.utc).isoformat()
+            if assessment_ready else None)
         optional_numbers = (("currentMonth", "current_month", int),
                             ("currentDay", "current_day", int),
                             ("dayTimeMinutes", "day_time_minutes", int),
@@ -416,6 +473,13 @@ class PairingAgent:
             except (TypeError, ValueError):
                 raise ValueError("invalid game-clock snapshot field") from None
             payload[payload_name] = int(value) if converter is int else value
+        # Keep the existing one-megabyte snapshot API responsive. An oversized
+        # optional inventory must not stall registration/authority snapshots.
+        if assessments and len(json.dumps(payload).encode("utf-8")) > 850000:
+            payload["farm_assessments"] = {}
+            payload["farm_assessment_ready"] = False
+            payload["farm_assessment_observed_at"] = None
+            payload["farm_assessment_error"] = "Assessment exceeds the snapshot transport budget"
         return payload
 
     def process_operations_once(self):
@@ -1117,9 +1181,11 @@ class PairingAgent:
             except (HTTPError, URLError, TimeoutError, RuntimeError, OSError, json.JSONDecodeError) as error:
                 if getattr(error, "code", None) in {400, 401, 403, 404, 422}:
                     self._quarantine(path)
-                    LOG.warning("registration request permanently rejected and quarantined")
+                    LOG.warning("registration request permanently rejected and quarantined status=%s error_type=%s",
+                                getattr(error, "code", None), type(error).__name__)
                 else:
-                    LOG.warning("registration API unavailable; request retained for retry")
+                    LOG.warning("registration API unavailable; request retained for retry status=%s error_type=%s errno=%s",
+                                getattr(error, "code", None), type(error).__name__, getattr(error, "errno", None))
         return processed
 
     def watch(self, interval=2.0, stop=None):
@@ -1154,6 +1220,24 @@ class PairingAgent:
             time.sleep(max(0.1, interval))
 
 
+def _open_agent_log(path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(path, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    logging.getLogger().addHandler(handler)
+    return handler
+
+
+def _log_agent_failure(message, error):
+    # Frame locations and numeric error codes identify failures without copying
+    # HTTP headers, mailbox contents, or arbitrary exception values into logs.
+    frames = "".join(traceback.format_tb(error.__traceback__))
+    LOG.error("%s error_type=%s http_status=%s errno=%s winerror=%s\n%s",
+              message, type(error).__name__, getattr(error, "code", None),
+              getattr(error, "errno", None), getattr(error, "winerror", None), frames)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group()
@@ -1164,34 +1248,62 @@ def main():
     parser.add_argument("--interval", type=float, default=float(os.environ.get("SIN_POLL_INTERVAL", "2")))
     parser.add_argument("--event-batch-size", type=int,
                         default=int(os.environ.get("SIN_EVENT_BATCH_SIZE", str(DEFAULT_EVENT_BATCH_SIZE))))
+    parser.add_argument("--log-file", default=os.environ.get("SIN_AGENT_LOG_FILE"),
+                        help="rotating Agent log (watch default: <agent root>/logs/agent.log)")
     args = parser.parse_args()
     if not args.backend_url or not args.mailbox_dir:
         parser.error("SIN_BACKEND_URL and SIN_MAILBOX_DIR are required")
     logging.basicConfig(level=logging.INFO)
-    agent = PairingAgent(args.mailbox_dir, args.backend_url, event_batch_size=args.event_batch_size)
+    log_path = args.log_file
+    if not log_path and args.watch:
+        log_path = Path(__file__).resolve().parent.parent / "logs" / "agent.log"
+    file_handler = None
+    if log_path:
+        try:
+            file_handler = _open_agent_log(log_path)
+        except OSError as error:
+            LOG.warning("persistent Agent log unavailable error_type=%s errno=%s; console logging continues",
+                        type(error).__name__, getattr(error, "errno", None))
     try:
+        agent = PairingAgent(args.mailbox_dir, args.backend_url, event_batch_size=args.event_batch_size)
         if args.pair is not None:
             server_key = agent.pair_once(args.pair)
             print(f"Pairing succeeded for server_key={server_key}; response queued for FS25_SiN_Server")
             return 0
         if args.watch:
+            LOG.info("Agent watch started pid=%s log_file=%s event_batch_size=%s",
+                     os.getpid(), str(log_path), args.event_batch_size)
             agent.watch(args.interval)
         else:
             print(json.dumps({"processed": agent.process_once()}))
         return 0
-    except (HTTPError, URLError, TimeoutError):
+    except (HTTPError, URLError, TimeoutError) as error:
+        _log_agent_failure("Agent API request failed; exiting with code 1", error)
         if args.pair is not None:
             print("Pairing failed: central API is unreachable or rejected the request", file=__import__("sys").stderr)
         else:
             print("Agent mailbox processing failed: central API is unreachable or rejected the request", file=__import__("sys").stderr)
         return 1
     except MailboxWriteError as error:
+        _log_agent_failure("Agent mailbox publication failed; exiting with code 1", error)
         print(f"Agent mailbox write failed: {error}", file=__import__("sys").stderr)
         return 1
     except (RuntimeError, ValueError, OSError, json.JSONDecodeError) as error:
+        _log_agent_failure("Agent mailbox processing failed; exiting with code 1", error)
         prefix = "Pairing failed" if args.pair is not None else "Agent mailbox processing failed"
         print(f"{prefix}: {error}", file=__import__("sys").stderr)
         return 1
+    except KeyboardInterrupt:
+        LOG.info("Agent stopped from console")
+        return 0
+    except Exception as error:
+        _log_agent_failure("Unexpected Agent failure; exiting with code 1", error)
+        print("Agent failed unexpectedly; inspect the Agent log", file=__import__("sys").stderr)
+        return 1
+    finally:
+        if file_handler is not None:
+            logging.getLogger().removeHandler(file_handler)
+            file_handler.close()
 
 
 if __name__ == "__main__":

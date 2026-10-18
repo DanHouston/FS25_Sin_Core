@@ -43,6 +43,12 @@ reference and implementation differ. Most server and farm data is scoped by
 | `sin_farms` | SiN's canonical farm mappings, owner, type, lifecycle state, and observed FS25 farm ID. |
 | `farm_links` | Legacy Discord-to-farm link records. These are not sufficient to authorize current banking. |
 
+The read-only farm closure assessment stores its observed cash, loan and
+itemized asset/stock valuations inside the existing current-world
+`server_snapshots.farm_assessments` field. Source freshness is carried by
+`farm_assessment_observed_at`; no closure or wallet-credit record is created
+by requesting an assessment. Recipient ownership comes from `sin_farms`.
+
 ## Money and farm operations
 
 | Collection | Purpose |

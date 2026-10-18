@@ -26,6 +26,28 @@ same player, farm name, or farm number appears on both servers. Garage assets
 must keep a persistent source farm identity and require an explicitly selected
 destination farm with its own verified manager authority.
 
+## In-game vehicle names
+
+The server mod prefixes vehicle and implement display names with the durable
+SiN code, for example `[PJT7H] AGRIFAC Condor Endurance II`. The code stays the
+same when ownership changes. Store catalog names and saved vehicle identities
+are not renamed.
+
+The Agent projects the authoritative codes to `vehicle-codes.xml` in the
+server mailbox. The server resolves each saved native ID through `VehicleSystem`
+and sends the code with that vehicle's network object ID. Client-generated
+native unique IDs cannot be used to match the server's savegame IDs. Clients
+request the projection every five seconds until it contains network mappings,
+then refresh every thirty seconds; broadcasts also update changed code lists.
+The client keeps the mapping if it arrives before the vehicle object finishes
+loading. Both the server and connecting clients need the same server-mod ZIP.
+
+Name hooks cover the registered type functions and live objects in
+`g_currentMission.vehicleSystem.vehicles`, including both `getName` and
+`getFullName`. Client log entries report the received network mapping count
+and `display coverage vehicles=... coded=... prefixed=... sample=...`. Those
+counts distinguish missing server codes from a name hook that has not applied.
+
 ## Live farm-to-farm transfers
 
 `/vehicle_transfer destination_server destination_farm vehicle_code` is

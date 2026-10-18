@@ -29,6 +29,7 @@ from .business_workflows import (ChatService, ContractService, InvoiceService,
 from .farm_lifecycle import FarmLifecycle, SYSTEM_FARM_NAME, FIRST_FIELD_MAX_PRICE
 from .vehicle_inventory import VehicleInventoryService
 from .farm_report import FarmReportService, format_farm_report
+from .farm_assessment import FarmAssessmentService, format_farm_assessment, assessment_csv
 from .contract_contribution import (ContractContributionReportService,
                                     format_contract_contribution_report)
 from .market_finance import DailyMarketFinancePublisher
@@ -461,6 +462,7 @@ class NetworkBot(discord.Client):
         self.farm_lifecycle = FarmLifecycle(bank.database, self.authorization)
         self.vehicle_inventory = VehicleInventoryService(bank.database)
         self.farm_reports = FarmReportService(bank.database)
+        self.farm_assessments = FarmAssessmentService(bank.database)
         self.contract_reports = ContractContributionReportService(
             bank.database, self.authorization.resolve_player_identity)
         self.activity_publisher = ActivityPublisher(self, bank.database)
@@ -1321,6 +1323,52 @@ class NetworkBot(discord.Client):
 
         @farm_report_admin.autocomplete("farm_id")
         async def farm_report_admin_farm_autocomplete(interaction: discord.Interaction, current: str):
+            return await observed_farms(interaction, current, "server", value_as_int=True)
+
+        @self.tree.command(name="farm_assess_admin", description="Staff: assess farm assets, debt, and proposed closure credit")
+        @app_commands.describe(server="Select the server", farm="Choose the owner/farm name on that server")
+        @app_commands.check(channel_check)
+        @app_commands.default_permissions(administrator=True)
+        async def farm_assess_admin(interaction: discord.Interaction, server: str,
+                                    farm: app_commands.Range[int, 1, 254]):
+            staff_check(interaction)
+            config = server_config(interaction, server)
+            await interaction.response.defer(ephemeral=True)
+            try:
+                save_key = selected_save(config)
+                runtime = await asyncio.to_thread(self.server_registry.active_runtime, server)
+                if (not isinstance(runtime, dict) or str(runtime.get("save_key") or "") != str(save_key)
+                        or not str(runtime.get("world_id") or "")):
+                    raise ValueError("No active world generation is available for this server/save")
+                report = await asyncio.to_thread(self.farm_assessments.for_admin, server, save_key,
+                                                 runtime["world_id"], farm)
+            except ValueError as error:
+                await interaction.followup.send(str(error), ephemeral=True)
+                return
+            except PyMongoError:
+                logging.exception("Farm closure assessment temporarily unavailable")
+                await interaction.followup.send("Farm assessment is temporarily unavailable; please try again later.",
+                                                ephemeral=True)
+                return
+            report["server_name"] = config.get("display_name") or server
+            attachment = discord.File(io.BytesIO(assessment_csv(report)), filename=f"farm-assessment-{farm}.csv")
+            await interaction.followup.send(format_farm_assessment(report), file=attachment,
+                                            ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+        @farm_assess_admin.autocomplete("server")
+        async def farm_assess_admin_server_autocomplete(interaction: discord.Interaction, current: str):
+            try:
+                staff_check(interaction)
+            except ValueError:
+                return []
+            return await server_choices(interaction, current, "reconcile")
+
+        @farm_assess_admin.autocomplete("farm")
+        async def farm_assess_admin_farm_autocomplete(interaction: discord.Interaction, current: str):
+            try:
+                staff_check(interaction)
+            except ValueError:
+                return []
             return await observed_farms(interaction, current, "server", value_as_int=True)
 
         @self.tree.command(name="contract_report", description="Staff: report measured player/AI work on a native FS25 contract")

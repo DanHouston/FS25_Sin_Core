@@ -18,6 +18,11 @@ The Agent archive contains only `fs25_network_core/__init__.py` and
 `fs25_network_core/agent.py`; it has no Mongo dependency or credentials. The
 FS25_SiN_Server archive is rebuilt from `mods/FS25_SiN_Server` and verified
 to contain `modDesc.xml` and `NetworkLocal.lua` at its archive root.
+Updated mod ZIPs, including local candidates, must be placed directly in the
+repository's canonical `dist` directory (for example,
+`dist/FS25_SiN_Server.zip`). Refresh the build manifest and checksums with the
+updated bytes. Record pending live validation explicitly; candidate subfolders
+must not hide the latest mod behind an older ZIP at the standard path.
 `SiN_FS25_Crop_Settings.zip` is a separate, map-independent multiplayer mod;
 install the exact release bytes on the server and all clients (normally via
 the approved modpack). The current policy probe changes only Sorghum (plant
@@ -34,6 +39,15 @@ on the Google Cloud endpoint and proxies requests to Central. The Windows
 `SiN FS25 Agent` scheduled task on the FS25 host is the sole Agent launcher;
 deployment updates its existing action while preserving its run-as identity and
 triggers.
+
+Agent watch mode writes a rotating log under `C:\SiN\Agent\logs\agent.log`
+for the default installation (5 MiB per file, five backups). Fatal exits record
+diagnostic stack locations and error codes. The updater and Agent restart
+script configure five retries one minute apart, unlimited task execution time,
+and no overlapping scheduled instances. See the
+[Agent recovery instructions](deploy-runbook.md#agent-exits-or-registration-stalls)
+for diagnosis and handoff from a foreground Agent. These changes must be
+deployed before they affect an existing installation.
 
 ## Creating a release
 

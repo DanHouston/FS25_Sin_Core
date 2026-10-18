@@ -19,8 +19,9 @@ function SiNVehicleCodesEvent:readStream(streamId, connection)
     self.vehicles = {}
     for _ = 1, count do
         local uniqueId, code = streamReadString(streamId), streamReadString(streamId)
+        local networkId = NetworkUtil.readNodeObjectId(streamId)
         if uniqueId ~= "" and code ~= "" then
-            self.vehicles[uniqueId] = code
+            table.insert(self.vehicles, {uniqueId=uniqueId, code=code, networkId=networkId})
         end
     end
     self:run(connection)
@@ -34,28 +35,37 @@ function SiNVehicleCodesEvent:writeStream(streamId, connection)
         local vehicle = self.vehicles[index]
         streamWriteString(streamId, vehicle.uniqueId)
         streamWriteString(streamId, vehicle.code)
+        NetworkUtil.writeNodeObjectId(streamId, vehicle.networkId or 0)
     end
 end
 
 function SiNVehicleCodesEvent:run(connection)
     if g_currentMission == nil or not g_currentMission:getIsClient() then return end
     if connection ~= nil and not connection:getIsServer() then return end
-    local codesByUniqueId = {}
-    -- readStream has already converted the wire rows to uniqueId -> code.
-    -- Also accept the row array used by the server-side projection/tests.
+    local codesByUniqueId, codesByNetworkId = {}, {}
     for key, value in pairs(self.vehicles or {}) do
         if type(key) == "string" and type(value) == "string" and key ~= "" and value ~= "" then
             codesByUniqueId[key] = value
         elseif type(value) == "table" and type(value.uniqueId) == "string"
             and value.uniqueId ~= "" and type(value.code) == "string" and value.code ~= "" then
             codesByUniqueId[value.uniqueId] = value.code
+            if type(value.networkId) == "number" and value.networkId > 0 then
+                codesByNetworkId[value.networkId] = value.code
+            end
         end
     end
     FS25SiNVehicleCodes = codesByUniqueId
+    FS25SiNVehicleCodesByNetworkId = codesByNetworkId
     local count = 0
     for _ in pairs(FS25SiNVehicleCodes) do count = count + 1 end
-    Logging.info("[SiN Vehicle Codes] received server projection world=%s vehicles=%d",
-        tostring(self.worldId), count)
+    local networkCount = 0
+    for _ in pairs(codesByNetworkId) do networkCount = networkCount + 1 end
+    Logging.info("[SiN Vehicle Codes] received server projection world=%s vehicles=%d networkVehicles=%d",
+        tostring(self.worldId), count, networkCount)
+    if FS25SiNServer ~= nil then
+        FS25SiNServer.vehicleCodesReceived = networkCount > 0
+        FS25SiNServer:installVehicleCodeNameHook()
+    end
 end
 
 function SiNVehicleCodesEvent.sendToClient(connection, worldId, vehicles)

@@ -25,6 +25,15 @@ provenance, production recipe attribution, and per-player labor remain open.
 The raw native money-type labels should be checked on a dedicated server before
 using them as final report headings.
 
+Server-mod candidate `0.2.2.23` passes the native Misc money type to the
+banking bridge's existing `Farm:changeBalance` call. It records independent
+cash and Misc readbacks on the operation receipt. The
+[bank finance validation procedure](bank-finance-validation.md) includes the
+read-only admin-client probe `sinBankFinance <farmId>` and the required live
+deposit, withdrawal, multiplayer, and persistence checks. Separate bank rows
+remain a follow-up. This direct farm path is still outside the passive
+`Mission:addMoney` telemetry hook; operation receipts retain bank classification.
+
 JiN also maintains one daily finance message in the configured market channel.
 At or after 00:10 America/New_York time, it sums the previous completed local
 calendar day's positive and negative native farm-money changes across all

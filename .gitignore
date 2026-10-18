@@ -6,6 +6,7 @@ atlas-credentials.env
 # Ephemeral release-builder output; deployment consumes GitHub Release assets.
 dist/
 local-test/
+logs/
 deployment_notes.txt
 # Windows Explorer shortcut accidentally placed in the workspace root.
 Local Disk (C) - Shortcut.lnk

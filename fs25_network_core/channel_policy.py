@@ -6,6 +6,7 @@ COMMAND_CHANNELS = {
     "server_register": "staff", "server_info": "staff", "farm_requests": "staff",
     "contract_report": "staff",
     "farm_report_admin": "staff",
+    "farm_assess_admin": "staff",
     "farm_roster": "staff", "farm_status_staff": "staff", "farm_approve": "staff", "farmland_status": "staff",
     "farm_reject": "staff", "farm_assign": "staff", "event_create": "staff",
     "event_cancel": "staff", "event_complete": "staff",

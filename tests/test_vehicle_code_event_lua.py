@@ -17,19 +17,22 @@ class VehicleCodeEventLuaTests(unittest.TestCase):
             Class = function() return {} end
             InitEventClass = function() end
             receivedLog = nil
-            Logging = {info = function(message, world, count)
-                receivedLog = string.format(message, world, count)
+            Logging = {info = function(message, ...)
+                receivedLog = string.format(message, ...)
             end}
             g_currentMission = {getIsClient = function() return true end}
-            FS25SiNServer = {worldId = "client-local-world-id"}
+            FS25SiNServer = {worldId = "client-local-world-id",
+                installVehicleCodeNameHook=function() end}
             connection = {getIsServer = function() return true end}
             """)
         lua.execute(EVENT.read_text(encoding="utf-8"))
         lua.execute("""
             -- This is the shape produced by SiNVehicleCodesEvent:readStream.
-            local event = {worldId = "server-world-id", vehicles = {['vehicle-1'] = "PJT7H"}}
+            local event = {worldId = "server-world-id", vehicles = {
+                {uniqueId='vehicle-1', code='PJT7H', networkId=71}}}
             SiNVehicleCodesEvent.run(event, connection)
             assert(FS25SiNVehicleCodes["vehicle-1"] == "PJT7H")
+            assert(FS25SiNVehicleCodesByNetworkId[71] == 'PJT7H')
             assert(string.find(receivedLog, "server-world-id", 1, true) ~= nil)
             assert(string.find(receivedLog, "vehicles=1", 1, true) ~= nil)
         """)
