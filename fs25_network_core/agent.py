@@ -911,8 +911,13 @@ class PairingAgent:
             self._write_clock_policy(policy)
             LOG.info("clock policy refreshed for save=%s", policy["save_key"])
             return int(policy["check_interval_seconds"])
-        except (HTTPError, URLError, TimeoutError, RuntimeError, OSError, ValueError, json.JSONDecodeError):
-            LOG.warning("clock policy unavailable; retaining last policy")
+        except (ElementTree.ParseError, HTTPError, URLError, TimeoutError, RuntimeError,
+                OSError, ValueError, json.JSONDecodeError) as error:
+            # The game can be rewriting snapshot.xml while its runtime save
+            # identity is read. Keep delivery running and retry the policy on
+            # the next refresh; never invent a save ID from an incomplete XML.
+            LOG.warning("clock policy unavailable; retaining last policy error_type=%s",
+                        type(error).__name__)
             return 60
 
     def _write_response(self, server_key, credential):

@@ -251,6 +251,21 @@ Get-ScheduledTaskInfo -TaskName $Deployment.agent_task_name |
 Get-Content -LiteralPath (Join-Path $Deployment.agent_root 'logs\agent.log') -Tail 80
 ```
 
+If the task is `Ready` and the log ends with an Agent failure, it is not
+currently delivering queued events. Start the existing scheduled task:
+
+```powershell
+Start-ScheduledTask -TaskName 'SiN FS25 Agent'
+```
+
+Inspect fresh log entries for `event batch complete` with accepted files
+removed and the pending count decreasing. Do not delete queued XML to clear
+the backlog. A `ParseError` from `process_clock_once` while reading
+`snapshot.xml` was an unhandled XML read failure in older Agents. The corrected
+Agent retains its last clock policy and retries after 60 seconds while its
+other mailbox work continues. Deploy the corrected Agent to make this behavior
+effective; restarting an older Agent alone does not install the fix.
+
 A pending registration request with no delivered response can leave the game
 registration check moving the player to spectator. Restoring delivery should
 allow registration to complete; verify the player can remain in the farm.
