@@ -10,6 +10,49 @@ the stored transaction. Central retains the signed amount, balances, native
 money-type label, in-game date/time, source order, and ingestion timestamp in
 `farm_finance_changes`. There is no per-transaction INFO logging.
 
+`game_day` is the native `environment.currentDay` counter, not a day of the
+month. Central accepts its original integer value from 0 through 2147483647;
+days 32 and later must not reject otherwise valid observations. The amount,
+balance delta, farm, source sequence, period/year/time and world validation
+remain enforced. No telemetry replay changes native farm money or SiN balances.
+
+## Recover day-limit rejections
+
+Older Central builds rejected entire batches with `game_day is invalid` once
+the game day counter exceeded 31. Their Agent files remain quarantined as
+`events/*.xml.failed` (or `.failed.N`). Deploy Central **v0.1.87 or later** and
+restart `sin-central.service` before replaying them. This validation fix needs
+no game-mod change or FS25 restart. The separate Agent XML crash fix is in
+v0.1.86 or later.
+
+On the Windows Agent host, obtain `scripts/Restore-SiN-FinanceEvents.ps1` from
+the released tag. Preview first, then apply:
+
+```powershell
+curl.exe -fL 'https://raw.githubusercontent.com/DanHouston/FS25_Sin_Core/v0.1.87/scripts/Restore-SiN-FinanceEvents.ps1' -o 'C:\SiN\Deploy\Restore-SiN-FinanceEvents.ps1'
+if ($LASTEXITCODE -ne 0) { throw 'Recovery helper download failed' }
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File 'C:\SiN\Deploy\Restore-SiN-FinanceEvents.ps1'
+# After reviewing the listed candidates:
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File 'C:\SiN\Deploy\Restore-SiN-FinanceEvents.ps1' -Apply
+```
+
+The helper only selects well-formed quarantined `farm_finance_batch` files
+containing an integer day above 31 within the corrected range. It leaves other
+event types, malformed day values, and existing pending destination filenames
+alone. Apply mode copies the original bytes into a unique
+`recovery-archive/finance-day-*` directory outside the active queue, then
+restores the original `.xml` filename without editing the envelope or row IDs.
+The running Agent can deliver those files normally. Central validates each
+batch and uses the existing world-scoped row IDs to prevent duplicate finance
+observations if any rows were accepted previously. Fresh log entries should
+show acceptance/removal; another rejection remains quarantined for review.
+Recovered observations retain their native game date, but their Central
+`observed_at` is the recovery ingestion time, so arrival-based daily reports can
+include them on the recovery date. Previously accepted raw storage records are
+not automatically rebucketed by this fix.
+
+## Reports and capture coverage
+
 The first read-only `/farm_report` now summarizes a verified farm manager's
 current-world history for the last 1-30 real-world days (7 by default). It
 shows native finance income/expense categories, physical NPC sale liters,

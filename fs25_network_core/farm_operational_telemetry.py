@@ -78,7 +78,8 @@ def validate_farm_operation(row):
         "source_sequence": _integer(row, "source_sequence", 1, 2147483647),
         "runtime_ms": _integer(row, "runtime_ms", 0, 9007199254740991, required=False),
         "game_period": _calendar_integer(row, "game_period", 1, 12),
-        "game_day": _calendar_integer(row, "game_day", 1, 31),
+        # Match the native currentDay counter emitted by FarmTelemetry.lua.
+        "game_day": _calendar_integer(row, "game_day", 1, 2147483647),
         "game_year": _calendar_integer(row, "game_year", 1, 10000),
         "game_time_ms": _calendar_integer(row, "game_time_ms", 0, 86400000),
     }
@@ -209,7 +210,7 @@ class FarmOperationalTelemetry:
     def _has_game_hour(data):
         return (data["game_year"] is not None and data["game_year"] >= 1
                 and data["game_period"] is not None and 1 <= data["game_period"] <= 12
-                and data["game_day"] is not None and 1 <= data["game_day"] <= 31
+                and data["game_day"] is not None and 1 <= data["game_day"] <= 2147483647
                 and data["game_time_ms"] is not None
                 and 0 <= data["game_time_ms"] < 86400000)
 

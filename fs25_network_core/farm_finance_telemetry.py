@@ -65,7 +65,9 @@ def validate_finance_change(payload):
         "balance_after_raw": str(after),
         "money_type": money_type,
         "game_period": _optional_game_int(payload, "game_period", 0, 12),
-        "game_day": _optional_game_int(payload, "game_day", 0, 31),
+        # Native environment.currentDay is a game day counter, not a day of
+        # the month. Preserve it unchanged when a save progresses past 31.
+        "game_day": _optional_game_int(payload, "game_day", 0, 2147483647),
         "game_year": _optional_game_int(payload, "game_year", 0, 10000),
         "game_time_ms": _optional_game_int(payload, "game_time_ms", 0, 86400000),
     }

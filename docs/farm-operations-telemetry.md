@@ -57,7 +57,10 @@ remaining rows. Out-of-order arrivals use the source row's game date and hour
 to select the bucket.
 
 `game_time_ms` must be in `[0, 86400000)`, and year, period, and day must be
-valid (year >= 1, period 1-12, day 1-31). Invalid or missing calendar values
+valid (year >= 1, period 1-12, native day counter 1-2147483647). The mod emits
+`environment.currentDay`, not a calendar day of the month; days 32 and later
+must retain their original value and remain eligible for hourly buckets.
+Invalid or missing calendar values
 are kept as individual raw reconciliation events with their Central arrival
 time; they are never guessed into a game-hour bucket. Sales, finance, AI,
 vehicle usage, ownership, contracts, and other authoritative events keep their
