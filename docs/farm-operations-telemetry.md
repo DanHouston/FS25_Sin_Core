@@ -60,6 +60,9 @@ to select the bucket.
 valid (year >= 1, period 1-12, native day counter 1-2147483647). The mod emits
 `environment.currentDay`, not a calendar day of the month; days 32 and later
 must retain their original value and remain eligible for hourly buckets.
+If a later-day storage event was already accepted as a raw reconciliation
+record by an older Central, delivery retries retain that record rather than
+also adding it to an hourly bucket. Existing raw history is not rebucketed.
 Invalid or missing calendar values
 are kept as individual raw reconciliation events with their Central arrival
 time; they are never guessed into a game-hour bucket. Sales, finance, AI,

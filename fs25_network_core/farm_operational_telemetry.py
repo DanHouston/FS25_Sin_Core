@@ -184,18 +184,29 @@ class FarmOperationalTelemetry:
         # Validate the entire batch before any write. Individual upserts make
         # recovery from a partial database failure idempotent.
         values = [validate_farm_operation(row) for row in changes]
+        document_ids = [hashlib.sha256("|".join((str(server_key), str(save_key),
+                                               str(world_id), event_id)).encode("utf-8")).hexdigest()
+                        for event_id in ids]
+        # Older Central versions accepted days >31 as raw reconciliation
+        # records. A delivery retried across this upgrade must not also enter
+        # an hourly aggregate. Check their indexed IDs once per bounded batch.
+        legacy_candidates = [document_id for document_id, data in zip(document_ids, values)
+                             if data["kind"] in {"storage_in", "storage_out"}
+                             and data["game_day"] is not None and data["game_day"] > 31]
+        legacy_raw_ids = ({row["_id"] for row in self.db.farm_operational_events.find(
+            {"_id": {"$in": legacy_candidates}}, {"_id": 1})} if legacy_candidates else set())
         inserted = []
         storage_movements = []
-        for event_id, data in zip(ids, values):
-            scope = "|".join((str(server_key), str(save_key), str(world_id), event_id))
+        for event_id, document_id, data in zip(ids, document_ids, values):
             if (data["kind"] in {"storage_in", "storage_out"}
+                    and document_id not in legacy_raw_ids
                     and self._has_game_hour(data)
                     and self._storage_source_marker(event_id, data) is not None):
                 storage_movements.append(self._ingest_storage_hour(
                     server_key, save_key, world_id, event_id, data))
                 continue
             document = {
-                "_id": hashlib.sha256(scope.encode("utf-8")).hexdigest(),
+                "_id": document_id,
                 "server_key": str(server_key), "save_key": str(save_key),
                 "world_id": str(world_id), "source_event_id": event_id,
                 "observed_at": datetime.now(timezone.utc), **data,

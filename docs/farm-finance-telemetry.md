@@ -21,7 +21,9 @@ remain enforced. No telemetry replay changes native farm money or SiN balances.
 Older Central builds rejected entire batches with `game_day is invalid` once
 the game day counter exceeded 31. Their Agent files remain quarantined as
 `events/*.xml.failed` (or `.failed.N`). Deploy Central **v0.1.87 or later** and
-restart `sin-central.service` before replaying them. This validation fix needs
+restart `sin-central.service` before replaying them. Prefer **v0.1.88 or later**,
+which also preserves raw-versus-hourly storage replay identity across the
+day-counter upgrade. This validation fix needs
 no game-mod change or FS25 restart. The separate Agent XML crash fix is in
 v0.1.86 or later.
 
@@ -29,7 +31,7 @@ On the Windows Agent host, obtain `scripts/Restore-SiN-FinanceEvents.ps1` from
 the released tag. Preview first, then apply:
 
 ```powershell
-curl.exe -fL 'https://raw.githubusercontent.com/DanHouston/FS25_Sin_Core/v0.1.87/scripts/Restore-SiN-FinanceEvents.ps1' -o 'C:\SiN\Deploy\Restore-SiN-FinanceEvents.ps1'
+curl.exe -fL 'https://raw.githubusercontent.com/DanHouston/FS25_Sin_Core/v0.1.88/scripts/Restore-SiN-FinanceEvents.ps1' -o 'C:\SiN\Deploy\Restore-SiN-FinanceEvents.ps1'
 if ($LASTEXITCODE -ne 0) { throw 'Recovery helper download failed' }
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File 'C:\SiN\Deploy\Restore-SiN-FinanceEvents.ps1'
 # After reviewing the listed candidates:
